@@ -1,0 +1,7 @@
+{
+  "name": "StudyFlow · Planificador Inteligente de Estudio",
+  "description": "Organizador integral de estudios con planificación adaptativa, temarios, repetición espaciada, Active Recall, método Cornell, técnica Feynman y temporizador Pomodoro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

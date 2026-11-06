@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile information storing authentication details and metadata",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier corresponding to Firebase Auth UID",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of the user",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Account creation timestamp",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "email"]
+    },
+    "UserStudyData": {
+      "title": "UserStudyData",
+      "description": "Comprehensive study state including study programs, subjects, topics, preferences, blocked calendar events, and pomodoro logs",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user UID matching request.auth.uid",
+          "maxLength": 128
+        },
+        "programs": {
+          "type": "array",
+          "description": "List of academic study programs with years, subjects, notes, and topics"
+        },
+        "preferences": {
+          "type": "object",
+          "description": "User study preferences including 52/17 pomodoro config, study days, and notification options"
+        },
+        "pomodoroLogs": {
+          "type": "array",
+          "description": "Historical pomodoro focus sessions"
+        },
+        "blockedEvents": {
+          "type": "array",
+          "description": "Calendar blocked time slots for appointments or personal events"
+        },
+        "chunkCount": {
+          "type": "number",
+          "description": "Number of overflow data chunk documents in studyData subcollection when programs payload is large"
+        },
+        "chunkIndex": {
+          "type": "number",
+          "description": "Zero-based index of a studyData chunk document"
+        },
+        "dataChunk": {
+          "type": "string",
+          "description": "Serialized JSON slice of study programs for multi-document storage under the 1 MiB limit",
+          "maxLength": 300000
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last synced timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Individual user document containing private profile information"
+    },
+    "/users/{userId}/studyData/{docId}": {
+      "schema": "UserStudyData",
+      "description": "User study data state for persistent synchronization across devices"
+    }
+  }
+}
