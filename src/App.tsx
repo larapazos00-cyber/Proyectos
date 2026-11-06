@@ -799,11 +799,37 @@ export default function App() {
     setActiveTab('pomodoro');
   };
 
-  // Record a completed Pomodoro session
+  // Record a completed Pomodoro session and update streak
   const handlePomodoroComplete = (log: PomodoroLog) => {
     const updatedLogs = [log, ...pomodoroLogs];
     setPomodoroLogs(updatedLogs);
     storageService.savePomodoroLogs(updatedLogs);
+
+    // Dynamic streak calculation: increments by 1 for consecutive days studied
+    const todayStr = new Date().toISOString().split('T')[0];
+    const prevDateStr = preferences.lastStudyDate;
+    if (prevDateStr !== todayStr) {
+      let nextStreak = preferences.streakDays || 0;
+      if (prevDateStr) {
+        const lastDate = new Date(prevDateStr);
+        const currDate = new Date(todayStr);
+        const diffDays = Math.round((currDate.getTime() - lastDate.getTime()) / (1000 * 3600 * 24));
+        if (diffDays === 1) {
+          nextStreak += 1;
+        } else {
+          nextStreak = 1;
+        }
+      } else {
+        nextStreak = 1;
+      }
+      const updatedPrefs: StudyPreferences = {
+        ...preferences,
+        streakDays: nextStreak,
+        lastStudyDate: todayStr,
+      };
+      setPreferences(updatedPrefs);
+      storageService.savePreferences(updatedPrefs);
+    }
 
     // If linked to a topic, accumulate actual hours spent across any study program
     if (log.subjectId && log.topicTitle) {
@@ -1062,7 +1088,7 @@ export default function App() {
       )}
 
       {/* Main Content Viewport */}
-      <main className="flex-1 min-w-0 max-w-6xl w-full mx-auto px-6 sm:px-8 lg:px-10 py-8 sm:py-10">
+      <main className="flex-1 min-w-0 max-w-6xl w-full mx-auto px-3.5 sm:px-8 lg:px-10 py-5 sm:py-10">
         {/* Tab 1: Pestaña General por Curso */}
         {activeTab === 'curso' && activeYear && (
           <CourseGeneralView
@@ -1792,6 +1818,7 @@ export default function App() {
                                     </span>
                                     <span className="text-[11px] font-mono-numbers text-slate-400 shrink-0">
                                       · { currentVuelta }ª Vuelta · {sub.credits || 6} ECTS
+                                      <span className="sm:hidden font-semibold text-slate-500"> · {studiedTopics}/{totalTopics} temas</span>
                                     </span>
                                   </div>
                                   {/* Mini tira visual de temas */}
@@ -1847,11 +1874,11 @@ export default function App() {
                                     e.stopPropagation();
                                     handleStartPomodoroWithSubject(sub.id);
                                   }}
-                                  className="hidden md:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-blue-600 text-slate-700 hover:text-white dark:bg-slate-800 dark:text-slate-300 text-[11px] font-semibold transition-colors cursor-pointer"
+                                  className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-blue-600 text-slate-700 hover:text-white dark:bg-slate-800 dark:text-slate-300 text-[11px] font-semibold transition-colors cursor-pointer"
                                   title="Iniciar sesión Pomodoro en esta materia"
                                 >
                                   <Clock className="w-3 h-3" />
-                                  <span>Pomodoro</span>
+                                  <span className="hidden sm:inline">Pomodoro</span>
                                 </button>
 
                                 <SubjectSpacedRepetitionInfoPopover subject={sub} compact />

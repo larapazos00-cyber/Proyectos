@@ -37,6 +37,8 @@ import {
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
 import { getSubjectSpacedRepetitionAlert } from '../utils/courseAlerts';
+import { StreakModal } from './StreakModal';
+import { StreakHeatmapPanel } from './StreakHeatmapPanel';
 
 interface CourseGeneralViewProps {
   programName: string;
@@ -336,6 +338,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
     : null;
 
   // Estado de modales rápidos
+  const [showStreakModal, setShowStreakModal] = useState<boolean>(false);
   const [showAddTaskModal, setShowAddTaskModal] = useState<boolean>(false);
   const [taskSubjectId, setTaskSubjectId] = useState<string>(allSubjects[0]?.id || '');
   const [taskTitle, setTaskTitle] = useState<string>('');
@@ -400,15 +403,16 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                   ? `Mix académico (${computedProgramsCount} carreras)`
                   : programName}
               </span>
-              {streakDays > 0 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="inline-flex items-center gap-1 font-bold text-amber-600">
-                    <Flame className="w-3.5 h-3.5 fill-amber-500 text-amber-600" />
-                    <span>{streakDays} días de racha</span>
-                  </span>
-                </>
-              )}
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={() => setShowStreakModal(true)}
+                className="inline-flex items-center gap-1.5 font-bold text-amber-700 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 px-2.5 py-0.5 rounded-full border border-amber-200/80 dark:border-amber-800/80 transition-all cursor-pointer shadow-2xs hover:scale-102"
+                title="Haz clic para ver cómo funciona tu racha de estudio y logros"
+              >
+                <Flame className="w-3.5 h-3.5 fill-amber-500 text-amber-600 animate-pulse" />
+                <span>{streakDays > 0 ? `${streakDays} días de racha` : 'Racha de estudio'}</span>
+              </button>
             </div>
 
             <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight truncate">
@@ -715,7 +719,16 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
         </div>
       </div>
 
-      {/* 4. ASIGNATURAS ACTIVAS (PANORAMA VISUAL EN CUADRÍCULA) */}
+      {/* 4. HISTORIAL DE RACHAS Y CONSTANCIA (CALENDARIO DE CALOR) */}
+      <StreakHeatmapPanel
+        pomodoroLogs={pomodoroLogs}
+        streakDays={streakDays}
+        preferences={preferences}
+        onSelectForPomodoro={(subId) => onSelectForPomodoro(subId || allSubjects[0]?.id || '')}
+        onOpenStreakModal={() => setShowStreakModal(true)}
+      />
+
+      {/* 5. ASIGNATURAS ACTIVAS (PANORAMA VISUAL EN CUADRÍCULA) */}
       <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
         <div className="flex items-center justify-between">
           <div>
@@ -1173,6 +1186,14 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Streak Explanation Modal */}
+      <StreakModal
+        isOpen={showStreakModal}
+        onClose={() => setShowStreakModal(false)}
+        streakDays={streakDays}
+        onStartStudy={() => onSelectForPomodoro(allSubjects[0]?.id || '')}
+      />
     </div>
   );
 };

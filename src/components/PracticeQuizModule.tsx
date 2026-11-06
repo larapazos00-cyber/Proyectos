@@ -104,6 +104,8 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
 
   // Active view navigation
   const [activeView, setActiveView] = useState<'create' | 'runner' | 'history' | 'quickfire' | 'analytics'>('create');
+  const [showActiveRecallModal, setShowActiveRecallModal] = useState<boolean>(false);
+  const [activeRecallToast, setActiveRecallToast] = useState<string | null>(null);
 
   const currentSubject = subjects.find((s) => s.id === selectedSubjectId) || subjects[0];
 
@@ -715,13 +717,9 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
 
         {/* Metric 4: Spaced Repetition Due Today */}
         <div
-          onClick={() => {
-            setActiveView('create');
-            if (currentSubjectSpacedAlert.hasPendingToday) {
-              setSelectedTopicIds(currentSubjectSpacedAlert.pendingTopicIds);
-            }
-          }}
-          className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-300 shadow-2xs hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
+          onClick={() => setShowActiveRecallModal(true)}
+          className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 hover:border-indigo-400 hover:shadow-md shadow-2xs transition-all cursor-pointer group flex flex-col justify-between"
+          title="Haz clic para abrir el panel de Active Recall y repasar los temas pendientes"
         >
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold tracking-wider uppercase text-indigo-700">
@@ -738,9 +736,9 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
               </span>
               <span className="text-xs text-slate-400 font-semibold">temas a repasar</span>
             </div>
-            <p className="text-[11px] text-indigo-700 font-medium mt-1 flex items-center gap-1">
-              <span>Evita el olvido con active recall</span>
-              <ArrowUpRight className="w-3 h-3 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
+            <p className="text-[11px] text-indigo-700 font-bold mt-1.5 flex items-center gap-1 group-hover:text-indigo-900 transition-colors">
+              <span className="underline underline-offset-2">Evita el olvido con active recall</span>
+              <ArrowUpRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
             </p>
           </div>
         </div>
@@ -888,7 +886,28 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
 
       {/* VIEW: CONFIGURATION & GENERATION */}
       {activeView === 'create' && (
-        <div className="space-y-6">
+        <div id="quiz-generator-section" className="space-y-6">
+          {activeRecallToast && (
+            <div className="p-3.5 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-950 text-xs flex items-center justify-between gap-3 shadow-2xs animate-fadeIn">
+              <div className="flex items-center gap-2.5">
+                <div className="p-1.5 rounded-lg bg-indigo-600 text-white shrink-0">
+                  <RotateCcw className="w-4 h-4" />
+                </div>
+                <div>
+                  <span className="font-bold block text-indigo-900">Active Recall Activado</span>
+                  <p className="text-[11px] text-indigo-700/90">{activeRecallToast}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveRecallToast(null)}
+                className="text-indigo-400 hover:text-indigo-700 p-1 rounded-lg transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {/* VISUAL SUBJECT SELECTOR GRID */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 space-y-3">
             <div className="flex items-center justify-between">
@@ -1946,6 +1965,206 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* MODAL: EVITA EL OLVIDO CON ACTIVE RECALL */}
+      {showActiveRecallModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fadeIn"
+          onClick={() => setShowActiveRecallModal(false)}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-slate-200 p-6 space-y-5 animate-in fade-in duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-violet-600 text-white flex items-center justify-center shadow-md shadow-indigo-500/20 shrink-0">
+                  <RotateCcw className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+                    <span>Evita el Olvido con Active Recall</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Frena la Curva del Olvido de Ebbinghaus mediante recuperación activa de memoria
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowActiveRecallModal(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                aria-label="Cerrar modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Status Summary Banner */}
+            <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-200/80 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-700">
+                  Repasos de Curva del Olvido
+                </span>
+                <span className="text-xs font-mono-numbers font-bold text-indigo-900 bg-white px-2.5 py-0.5 rounded-full border border-indigo-200 shadow-2xs">
+                  {globalStats.totalSpacedTopicsPending} {globalStats.totalSpacedTopicsPending === 1 ? 'tema pendiente' : 'temas pendientes'} hoy
+                </span>
+              </div>
+              <p className="text-xs text-indigo-900/90 leading-relaxed">
+                {globalStats.totalSpacedTopicsPending > 0
+                  ? 'La ciencia del aprendizaje demuestra que autoevaluarte justo cuando el concepto empieza a desvanecerse multiplica por 3 su retención en la memoria a largo plazo.'
+                  : '¡Excelente trabajo! No tienes ningún tema con repaso atrasado en la Curva del Olvido hoy. Puedes seleccionar cualquier materia a continuación para practicar Active Recall preventivo.'}
+              </p>
+            </div>
+
+            {/* Subjects with Pending Spaced Repetition or All Subjects */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  {globalStats.totalSpacedTopicsPending > 0 ? 'Materias con Repasos Pendientes' : 'Selecciona una Materia para Practicar'}
+                </h4>
+                <span className="text-[11px] text-slate-400 font-mono-numbers">
+                  {subjects.length} materias
+                </span>
+              </div>
+
+              <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
+                {subjects.map((sub) => {
+                  const alert = getSubjectSpacedRepetitionAlert(sub, true);
+                  const hasPending = alert.hasPendingToday;
+                  const deck = getSubjectQuickfireDeck(sub);
+
+                  return (
+                    <div
+                      key={sub.id}
+                      className={`p-3.5 rounded-2xl border transition-all ${
+                        hasPending
+                          ? 'bg-indigo-50/40 border-indigo-200 hover:border-indigo-300'
+                          : 'bg-slate-50/60 border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: sub.color || '#3b82f6' }}
+                          />
+                          <span className="font-bold text-xs text-slate-900 truncate">
+                            {sub.name}
+                          </span>
+                          <span className="text-[10px] font-mono-numbers text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200 shrink-0">
+                            {sub.code}
+                          </span>
+                        </div>
+
+                        {hasPending ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-full shrink-0">
+                            <RotateCcw className="w-3 h-3 text-indigo-600" />
+                            <span>{alert.totalPendingToday} {alert.totalPendingToday === 1 ? 'tema' : 'temas'}</span>
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full shrink-0 border border-emerald-200">
+                            ✓ Al día
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Pending topics list */}
+                      {hasPending && alert.pendingTopics && alert.pendingTopics.length > 0 && (
+                        <div className="mt-2 text-[11px] text-slate-600 bg-white p-2 rounded-xl border border-indigo-100 space-y-1">
+                          <span className="font-bold text-indigo-900 block text-[10px] uppercase tracking-wider">
+                            Temas a repasar hoy:
+                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {alert.pendingTopics.map((pt) => (
+                              <span
+                                key={pt.id}
+                                className="px-2 py-0.5 bg-indigo-50 text-indigo-800 rounded-md font-medium text-[10px] truncate max-w-[240px]"
+                              >
+                                {pt.title}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div className="mt-3 flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
+                        {deck.allCards.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedSubjectId(sub.id);
+                              setActiveView('quickfire');
+                              setShowActiveRecallModal(false);
+                            }}
+                            className="px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-bold transition-colors cursor-pointer inline-flex items-center gap-1"
+                            title="Repasar con tarjetas de memoria rápida"
+                          >
+                            <Zap className="w-3.5 h-3.5 text-amber-600" />
+                            <span>Flashcards ({deck.allCards.length})</span>
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedSubjectId(sub.id);
+                            setSourceMode('topics');
+                            if (alert.pendingTopicIds.length > 0) {
+                              setSelectedTopicIds(alert.pendingTopicIds);
+                            } else {
+                              setSelectedTopicIds((sub.topics || []).map((t) => t.id));
+                            }
+                            setActiveView('create');
+                            setShowActiveRecallModal(false);
+                            setActiveRecallToast(
+                              hasPending
+                                ? `✓ Se han seleccionado los ${alert.totalPendingToday} temas de ${sub.name} para tu test de Active Recall.`
+                                : `✓ Se ha cargado el temario de ${sub.name} para practicar Active Recall.`
+                            );
+                            setTimeout(() => {
+                              document.getElementById('quiz-generator-section')?.scrollIntoView({ behavior: 'smooth' });
+                            }, 120);
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-colors cursor-pointer inline-flex items-center gap-1 shadow-2xs"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Hacer Test Active Recall</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Bottom Modal Actions */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveView('analytics');
+                  setShowActiveRecallModal(false);
+                }}
+                className="text-indigo-600 hover:text-indigo-800 font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Ver Curva de Retención</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowActiveRecallModal(false)}
+                className="px-4 py-2 font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
