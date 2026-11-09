@@ -44,8 +44,6 @@ export const CornellFlashcardExtractorModal: React.FC<CornellFlashcardExtractorM
   initialNoteId,
   onSaveFlashcards,
 }) => {
-  if (!isOpen) return null;
-
   // Selection states
   const [selectedSubId, setSelectedSubId] = useState<string>(
     initialSubjectId || (subjects[0] ? subjects[0].id : '')
@@ -71,6 +69,8 @@ export const CornellFlashcardExtractorModal: React.FC<CornellFlashcardExtractorM
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [isFlipped, setIsFlipped] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  if (!isOpen) return null;
 
   // Extract terms and preliminary cards
   const handleExtractFromCornell = async () => {

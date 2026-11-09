@@ -17,6 +17,8 @@ import {
   Loader2,
   Layers,
   Check,
+  Maximize2,
+  MessageSquare,
 } from 'lucide-react';
 import {
   Subject,
@@ -27,6 +29,7 @@ import {
   EditableKeyPoint,
   CornellNote,
   Flashcard,
+  DocumentComment,
 } from '../types';
 import {
   detectImportedFileType,
@@ -35,6 +38,7 @@ import {
   convertMarkdownAndImagesToRichHtml,
 } from '../utils/documentParser';
 import { TopicNotesModal } from './TopicNotesModal';
+import { DocumentReadingModeOverlay } from './DocumentReadingModeOverlay';
 
 export type DocumentFilterType =
   | 'all'
@@ -190,6 +194,7 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
     docId?: string;
     openKeyPoints?: boolean;
   } | null>(null);
+  const [readingModeDocId, setReadingModeDocId] = useState<string | null>(null);
   const [summarizingDocId, setSummarizingDocId] = useState<string | null>(null);
   const [expandedSummaryDocId, setExpandedSummaryDocId] = useState<string | null>(null);
   const [aiSummaryError, setAiSummaryError] = useState<string | null>(null);
@@ -344,6 +349,7 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
           topicStatus: topic.status,
           isSynthesized: true,
           date: topic.studiedAt || new Date().toISOString(),
+          commentCount: topic.generalComments?.length || 0,
           content: topic.notes || topic.description || `Contenido académico del tema ${topic.title}`,
           summary: topic.summary,
           keyPoints: topic.keyPoints,
@@ -465,6 +471,106 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
       ...activeSubject,
       topics: updatedTopics,
     });
+  };
+
+  // Guardar resaltados, texto enriquecido y notas rápidas desde la vista de Modo Lectura a pantalla completa
+  const handleSaveDocumentReadingChanges = (
+    doc: NormalizedSubjectDocument,
+    updates: {
+      markdownContent: string;
+      richHtmlContent: string;
+      comments: DocumentComment[];
+      pagesRead?: number;
+    }
+  ) => {
+    if (!activeSubject) return;
+    const nowIso = new Date().toISOString();
+
+    const updatedTopics = activeSubject.topics.map((topic) => {
+      if (topic.id !== doc.topicId) return topic;
+
+      const resolvedPagesRead =
+        updates.pagesRead !== undefined
+          ? Math.min(doc.pageCount, Math.max(0, updates.pagesRead))
+          : doc.pagesRead;
+
+      let updatedAttachedFiles: AttachedTopicFile[];
+      if (topic.attachedFiles && topic.attachedFiles.length > 0 && !doc.isSynthesized) {
+        updatedAttachedFiles = topic.attachedFiles.map((f) =>
+          f.id === doc.id
+            ? {
+                ...f,
+                content: updates.markdownContent,
+                richHtmlContent: updates.richHtmlContent,
+                comments: updates.comments,
+                pagesRead: resolvedPagesRead,
+                lastEditedAt: nowIso,
+              }
+            : f
+        );
+      } else {
+        const persistedId = doc.isSynthesized ? `doc-${topic.id}` : doc.id;
+        updatedAttachedFiles = [
+          {
+            id: persistedId,
+            name: doc.name,
+            fileType: doc.fileType,
+            documentCategory: doc.documentCategory,
+            pageCount: doc.pageCount,
+            pagesRead: resolvedPagesRead,
+            scheduledDate: doc.scheduledDate,
+            includeInOrganization: true,
+            content: updates.markdownContent,
+            richHtmlContent: updates.richHtmlContent,
+            comments: updates.comments,
+            date: doc.date || nowIso,
+            lastEditedAt: nowIso,
+          },
+        ];
+      }
+
+      const sumTotalPages = updatedAttachedFiles.reduce((acc, f) => acc + (f.pageCount || 0), 0);
+      const sumReadPages = updatedAttachedFiles.reduce((acc, f) => acc + (f.pagesRead || 0), 0);
+
+      let nextStatus = topic.status;
+      if (sumReadPages >= sumTotalPages && sumTotalPages > 0) {
+        nextStatus = topic.status === 'repasado' ? 'repasado' : 'estudiado';
+      } else if (sumReadPages > 0 && topic.status === 'pendiente') {
+        nextStatus = 'en_progreso';
+      }
+
+      return {
+        ...topic,
+        attachedFiles: updatedAttachedFiles,
+        pageCount: sumTotalPages,
+        paginasTotales: sumTotalPages,
+        pagesRead: sumReadPages,
+        status: nextStatus,
+        notes:
+          updatedAttachedFiles.length === 1
+            ? updates.markdownContent
+            : topic.notes || updates.markdownContent,
+        generalNotes:
+          updatedAttachedFiles.length === 1
+            ? updates.markdownContent
+            : topic.generalNotes || updates.markdownContent,
+        richGeneralNotes:
+          updatedAttachedFiles.length === 1
+            ? updates.richHtmlContent
+            : topic.richGeneralNotes || updates.richHtmlContent,
+        generalComments: updates.comments,
+        lastNotesUpdatedAt: nowIso,
+      };
+    });
+
+    onUpdateSubject({
+      ...activeSubject,
+      topics: updatedTopics,
+    });
+
+    if (doc.isSynthesized) {
+      setReadingModeDocId(`doc-${doc.topicId}`);
+    }
   };
 
   // Generar resumen automático con IA y convertirlo en puntos clave editables en la vista de apuntes
@@ -1320,18 +1426,36 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => {
-            setNewDocTopicId(activeSubject.topics[0]?.id || '');
-            setIsAddOpen(!isAddOpen);
-          }}
-          className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white text-[11px] font-semibold rounded-xl transition-colors cursor-pointer shrink-0"
-          title="Importar o registrar un nuevo archivo PDF / documento para esta asignatura"
-        >
-          {isAddOpen ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
-          <span>{isAddOpen ? 'Cerrar' : 'Importar PDF'}</span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {allSubjectDocuments.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                setReadingModeDocId(
+                  filteredDocuments[0]?.id || allSubjectDocuments[0]?.id || null
+                )
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 text-amber-800 dark:text-amber-300 ring-1 ring-amber-300/70 dark:ring-amber-700/60 text-[11px] font-semibold rounded-xl transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              title="Abrir Modo Lectura en pantalla completa para resaltar texto y añadir notas rápidas"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Modo Lectura</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setNewDocTopicId(activeSubject.topics[0]?.id || '');
+              setIsAddOpen(!isAddOpen);
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white text-[11px] font-semibold rounded-xl transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            title="Importar o registrar un nuevo archivo PDF / documento para esta asignatura"
+          >
+            {isAddOpen ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+            <span>{isAddOpen ? 'Cerrar' : 'Importar PDF'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Selector rápido de asignatura cuando hay varias materias disponibles */}
@@ -1346,6 +1470,9 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
               onChange={(e) => {
                 const nextId = e.target.value;
                 setInternalSubjectId(nextId);
+                setActiveTypeFilter('all');
+                setEditingModalTarget(null);
+                setReadingModeDocId(null);
                 if (selectedSubject && onSelectSubject) {
                   onSelectSubject(nextId);
                 }
@@ -2203,6 +2330,20 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
                   <div className="flex items-center gap-1 shrink-0">
                     <button
                       type="button"
+                      onClick={() => setReadingModeDocId(doc.id)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-amber-100/90 hover:bg-amber-200/90 text-amber-900 dark:bg-amber-950/70 dark:text-amber-300 cursor-pointer whitespace-nowrap"
+                      title="Abrir en Modo Lectura a pantalla completa (oculta la interfaz principal, permite resaltar texto y añadir notas rápidas con menú flotante)"
+                    >
+                      <Maximize2 className="w-2.5 h-2.5" />
+                      <span>Modo Lectura</span>
+                      {(doc.commentCount || 0) > 0 && (
+                        <span className="font-mono-numbers text-[9px] opacity-80">
+                          ({doc.commentCount})
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() =>
                         setEditingModalTarget({
                           topicId: doc.topicId,
@@ -2210,7 +2351,7 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
                           openKeyPoints: false,
                         })
                       }
-                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 cursor-pointer whitespace-nowrap"
                       title="Abrir este documento en el editor para modificar texto, subrayar en colores, añadir comentarios o gestionar imágenes"
                     >
                       <Edit3 className="w-2.5 h-2.5" />
@@ -2404,6 +2545,18 @@ export const SubjectDocumentsSidePanel: React.FC<SubjectDocumentsSidePanelProps>
           />
         );
       })()}
+
+      {/* Vista 'Modo Lectura' a pantalla completa con menú flotante de resaltado y notas rápidas */}
+      {readingModeDocId && activeSubject && (
+        <DocumentReadingModeOverlay
+          isOpen={true}
+          onClose={() => setReadingModeDocId(null)}
+          subject={activeSubject}
+          documents={allSubjectDocuments}
+          initialDocumentId={readingModeDocId}
+          onSaveDocumentReadingChanges={handleSaveDocumentReadingChanges}
+        />
+      )}
     </aside>
   );
 };

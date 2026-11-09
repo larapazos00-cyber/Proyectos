@@ -170,6 +170,21 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
     setSavedProfiles(preferences.spacedRepetitionConfig?.savedProfiles || []);
     setLastMassAppliedAt(preferences.spacedRepetitionConfig?.lastMassAppliedAt);
     setLastMassAppliedProgramName(preferences.spacedRepetitionConfig?.lastMassAppliedProgramName);
+    setWeeklyObligations(preferences.weeklyFixedObligations || []);
+    setEnabledTabs(
+      preferences.enabledTabs || [
+        'curso',
+        'asignaturas',
+        'calendario',
+        'cuestionarios',
+        'pomodoro',
+        'estadisticas',
+      ]
+    );
+    setNavigationPosition(preferences.navigationPosition || 'top');
+    setPomodoroFocus(preferences.pomodoroConfig?.focusMinutes || 25);
+    setPomodoroShortBreak(preferences.pomodoroConfig?.shortBreakMinutes || 5);
+    setPomodoroLongBreak(preferences.pomodoroConfig?.longBreakMinutes || 15);
   }, [preferences, isOpen]);
   const [weeklyObligations, setWeeklyObligations] = useState<WeeklyObligation[]>(
     preferences.weeklyFixedObligations || []
@@ -291,6 +306,49 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
     }
   }, [preferences, isOpen]);
 
+  // Estadísticas en vivo para la pantalla de Notificaciones Push (Exámenes próximos y Repaso Espaciado)
+  const todayIsoStr = new Date().toISOString().split('T')[0];
+  const upcomingExamsSummary = React.useMemo(() => {
+    const allUpcoming: Array<{ title: string; date: string; subjectName: string; daysLeft: number }> = [];
+    subjects.forEach((sub) => {
+      (sub.exams || []).forEach((ex) => {
+        if (ex.completed || !ex.date) return;
+        const diff = Math.round(
+          (new Date(`${ex.date}T00:00:00`).getTime() - new Date(`${todayIsoStr}T00:00:00`).getTime()) /
+            (1000 * 60 * 60 * 24)
+        );
+        if (diff >= 0) {
+          allUpcoming.push({
+            title: ex.title,
+            date: ex.date,
+            subjectName: sub.name,
+            daysLeft: diff,
+          });
+        }
+      });
+    });
+    allUpcoming.sort((a, b) => a.daysLeft - b.daysLeft);
+    const withinThreshold = allUpcoming.filter((e) => e.daysLeft <= examReminderDaysAhead);
+    return {
+      totalUpcoming: allUpcoming.length,
+      withinThresholdCount: withinThreshold.length,
+      nextExam: allUpcoming[0] || null,
+    };
+  }, [subjects, examReminderDaysAhead, todayIsoStr]);
+
+  const spacedReviewsSummary = React.useMemo(() => {
+    let dueToday = 0;
+    let overdue = 0;
+    subjects.forEach((sub) => {
+      (sub.topics || []).forEach((t) => {
+        if (!t.nextReviewDate) return;
+        if (t.nextReviewDate === todayIsoStr) dueToday++;
+        else if (t.nextReviewDate < todayIsoStr) overdue++;
+      });
+    });
+    return { dueToday, overdue, totalPendingReviews: dueToday + overdue };
+  }, [subjects, todayIsoStr]);
+
   if (!isOpen) return null;
 
   const daysOfWeek = [
@@ -354,49 +412,6 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       setLastTestedEvent((prev) => (prev === label ? null : prev));
     }, 3500);
   };
-
-  // Estadísticas en vivo para la pantalla de Notificaciones Push (Exámenes próximos y Repaso Espaciado)
-  const todayIsoStr = new Date().toISOString().split('T')[0];
-  const upcomingExamsSummary = React.useMemo(() => {
-    const allUpcoming: Array<{ title: string; date: string; subjectName: string; daysLeft: number }> = [];
-    subjects.forEach((sub) => {
-      (sub.exams || []).forEach((ex) => {
-        if (ex.completed || !ex.date) return;
-        const diff = Math.round(
-          (new Date(`${ex.date}T00:00:00`).getTime() - new Date(`${todayIsoStr}T00:00:00`).getTime()) /
-            (1000 * 60 * 60 * 24)
-        );
-        if (diff >= 0) {
-          allUpcoming.push({
-            title: ex.title,
-            date: ex.date,
-            subjectName: sub.name,
-            daysLeft: diff,
-          });
-        }
-      });
-    });
-    allUpcoming.sort((a, b) => a.daysLeft - b.daysLeft);
-    const withinThreshold = allUpcoming.filter((e) => e.daysLeft <= examReminderDaysAhead);
-    return {
-      totalUpcoming: allUpcoming.length,
-      withinThresholdCount: withinThreshold.length,
-      nextExam: allUpcoming[0] || null,
-    };
-  }, [subjects, examReminderDaysAhead, todayIsoStr]);
-
-  const spacedReviewsSummary = React.useMemo(() => {
-    let dueToday = 0;
-    let overdue = 0;
-    subjects.forEach((sub) => {
-      (sub.topics || []).forEach((t) => {
-        if (!t.nextReviewDate) return;
-        if (t.nextReviewDate === todayIsoStr) dueToday++;
-        else if (t.nextReviewDate < todayIsoStr) overdue++;
-      });
-    });
-    return { dueToday, overdue, totalPendingReviews: dueToday + overdue };
-  }, [subjects, todayIsoStr]);
 
   const handleAddContextualRule = () => {
     if (!newRuleName.trim()) return;
@@ -545,17 +560,38 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
   };
 
   const handleToggleTab = (tabId: string) => {
+    let nextTabs = enabledTabs;
     if (enabledTabs.includes(tabId)) {
       if (enabledTabs.length > 1) {
-        setEnabledTabs(enabledTabs.filter((t) => t !== tabId));
+        nextTabs = enabledTabs.filter((t) => t !== tabId);
       }
     } else {
-      setEnabledTabs([...enabledTabs, tabId]);
+      nextTabs = [...enabledTabs, tabId];
     }
+    setEnabledTabs(nextTabs);
+    onSavePreferences({
+      ...preferences,
+      enabledTabs: nextTabs,
+      navigationPosition,
+    });
+  };
+
+  const handleNavigationPositionChange = (pos: 'top' | 'sidebar') => {
+    setNavigationPosition(pos);
+    onSavePreferences({
+      ...preferences,
+      enabledTabs,
+      navigationPosition: pos,
+    });
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+    >
       <div className="bg-white dark:bg-slate-900 w-full max-w-3xl rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-8 transition-colors">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex flex-col gap-3 bg-slate-50 dark:bg-slate-800/60">
@@ -589,7 +625,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
               }`}
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span>Horario y Pomodoro</span>
+              <span>Interfaz, Pestañas y Horario</span>
             </button>
             <button
               type="button"
@@ -1137,6 +1173,87 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
             <>
           {activePrefView === 'general' && (
             <>
+          {/* Section 0: Personalización de Interfaz y Pestañas del Sistema (Prominent at Top) */}
+          <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-blue-50/80 via-slate-50 to-indigo-50/50 dark:from-slate-800/80 dark:via-slate-900 dark:to-slate-800/80 border border-blue-200/80 dark:border-slate-700 space-y-3 shadow-2xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-blue-950 dark:text-blue-300 flex items-center gap-1.5">
+                <Layout className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span>Personalización de Interfaz y Pestañas del Sistema</span>
+              </h4>
+              <span className="text-[11px] text-blue-700 dark:text-blue-300 bg-blue-100/80 dark:bg-blue-950/60 px-2 py-0.5 rounded-full font-mono-numbers font-bold">
+                {enabledTabs.length} de {DEFAULT_TABS.length} pestañas activas
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-400">
+              Activa o desactiva las pestañas visibles en la barra de navegación y elige la posición del menú (los cambios se aplican al instante):
+            </p>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
+              {DEFAULT_TABS.map(({ id, defaultLabel }) => {
+                const isEnabled = enabledTabs.includes(id);
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => handleToggleTab(id)}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
+                      isEnabled
+                        ? 'bg-white dark:bg-slate-900 border-blue-400 dark:border-blue-600 text-blue-950 dark:text-blue-200 shadow-2xs font-bold'
+                        : 'bg-slate-100/70 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700 text-slate-400 opacity-65'
+                    }`}
+                  >
+                    <span className="text-xs truncate">{defaultLabel}</span>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded font-mono-numbers shrink-0 ${
+                        isEnabled
+                          ? 'bg-blue-600 text-white font-bold'
+                          : 'bg-slate-200 dark:bg-slate-700 text-slate-500'
+                      }`}
+                    >
+                      {isEnabled ? 'Visible' : 'Oculta'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="pt-2.5 border-t border-blue-200/50 dark:border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                  Posición del Menú de Navegación
+                </span>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Alterna entre la barra superior horizontal o el panel lateral izquierdo.
+                </span>
+              </div>
+
+              <div className="flex items-center bg-slate-200/70 dark:bg-slate-800 p-1 rounded-xl text-xs shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleNavigationPositionChange('top')}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+                    navigationPosition === 'top'
+                      ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-2xs font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Menú Superior
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleNavigationPositionChange('sidebar')}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+                    navigationPosition === 'sidebar'
+                      ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-2xs font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Menú Lateral
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Section 1: Calendario de Disponibilidad y Horario Fijo Semanal */}
           <WeeklyAvailabilityPlanner
             obligations={weeklyObligations}
@@ -2359,7 +2476,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
               <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs shrink-0">
                 <button
                   type="button"
-                  onClick={() => setNavigationPosition('top')}
+                  onClick={() => handleNavigationPositionChange('top')}
                   className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
                     navigationPosition === 'top'
                       ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-2xs'
@@ -2370,7 +2487,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setNavigationPosition('sidebar')}
+                  onClick={() => handleNavigationPositionChange('sidebar')}
                   className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
                     navigationPosition === 'sidebar'
                       ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-2xs'

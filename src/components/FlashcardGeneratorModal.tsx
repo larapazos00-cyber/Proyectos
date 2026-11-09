@@ -33,8 +33,6 @@ export const FlashcardGeneratorModal: React.FC<FlashcardGeneratorModalProps> = (
   initialNoteId,
   onAddFlashcards,
 }) => {
-  if (!isOpen) return null;
-
   // Source selection: from notes or from topics
   const [sourceType, setSourceType] = useState<'notes' | 'topics'>(
     initialNoteId ? 'notes' : initialTopicId ? 'topics' : 'notes'
@@ -60,6 +58,8 @@ export const FlashcardGeneratorModal: React.FC<FlashcardGeneratorModalProps> = (
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [generatedCards, setGeneratedCards] = useState<Array<Flashcard & { selected: boolean }>>([]);
+
+  if (!isOpen) return null;
 
   // Check all / uncheck all
   const toggleAllTopics = () => {

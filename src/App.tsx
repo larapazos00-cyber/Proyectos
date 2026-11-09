@@ -27,6 +27,7 @@ import { StudyPreferencesModal } from './components/StudyPreferencesModal';
 import { ErrorAnalysisModal } from './components/ErrorAnalysisModal';
 import { ExamsManagerModal } from './components/ExamsManagerModal';
 import { AuthModal } from './components/AuthModal';
+import { InteractiveOnboardingTour } from './components/InteractiveOnboardingTour';
 import { notificationService } from './services/notificationService';
 import { ArrowLeft, BookOpen, Plus, LayoutGrid, Kanban, AlertTriangle, AlertCircle, List, ChevronRight, FileText, PanelRight, Sparkles, Clock, RotateCcw, HelpCircle, ArrowRight, Brain } from 'lucide-react';
 import { TopicKanbanBoard } from './components/TopicKanbanBoard';
@@ -116,6 +117,22 @@ export default function App() {
   const [isErrorModalOpen, setIsErrorModalOpen] = useState(false);
   const [isExamsManagerOpen, setIsExamsManagerOpen] = useState(false);
   const [examsManagerSubjectId, setExamsManagerSubjectId] = useState<string | undefined>(undefined);
+  const [isOnboardingTourOpen, setIsOnboardingTourOpen] = useState<boolean>(() => {
+    try {
+      return !localStorage.getItem('studyflow_onboarding_completed_v1');
+    } catch {
+      return false;
+    }
+  });
+
+  const handleCloseOnboardingTour = () => {
+    setIsOnboardingTourOpen(false);
+    try {
+      localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+    } catch {
+      // ignore storage quota errors
+    }
+  };
 
   // Pomodoro direct focus target & Modo Enfoque (distraction-free mode)
   const [pomodoroSubjectTarget, setPomodoroSubjectTarget] = useState<string | undefined>();
@@ -171,10 +188,20 @@ export default function App() {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
   };
 
-  // Ensure valid active program and year
-  const activeProgram = programs.find((p) => p.id === activeProgramId) || programs[0];
-  const activeYear =
-    activeProgram?.years.find((y) => y.id === activeYearId) || activeProgram?.years[0];
+  // Ensure valid active program and year (with safe fallback so tabs always render)
+  const activeProgram =
+    programs.find((p) => p.id === activeProgramId) ||
+    programs.find((p) => (p.years || []).length > 0) ||
+    programs[0];
+  const activeYear: AcademicYear =
+    activeProgram?.years.find((y) => y.id === activeYearId) ||
+    activeProgram?.years[0] ||
+    programs.flatMap((p) => p.years || [])[0] || {
+      id: 'default-year',
+      name: '1º Curso',
+      targetWeeklyHours: 20,
+      subjects: [],
+    };
 
   // Helper to count total attached files and topics across programs
   const countProgramAssets = (progs: StudyProgram[]) => {
@@ -738,13 +765,17 @@ export default function App() {
   const handleAddBlockedEvent = (event: BlockedTimeEvent) => {
     deletedBlockedIdsRef.current.delete(event.id);
     setBlockedEvents((prev) => {
+      const isCustomStudyBlock = event.id.startsWith('custom-study-');
       const existingIdx = prev.findIndex(
         (e) =>
           e.id === event.id ||
-          (event.linkedTopicId &&
+          (!isCustomStudyBlock &&
+            !e.id.startsWith('custom-study-') &&
+            event.linkedTopicId &&
             e.linkedTopicId === event.linkedTopicId &&
-            e.linkedItemType === event.linkedItemType) ||
-          (event.linkedTaskId && e.linkedTaskId === event.linkedTaskId)
+            e.linkedItemType === event.linkedItemType &&
+            (!event.date || !e.date || e.date === event.date)) ||
+          (!isCustomStudyBlock && event.linkedTaskId && e.linkedTaskId === event.linkedTaskId)
       );
       let next: BlockedTimeEvent[];
       if (existingIdx >= 0) {
@@ -772,13 +803,19 @@ export default function App() {
   const handleUpdateBlockedEvent = (updatedEvent: BlockedTimeEvent) => {
     deletedBlockedIdsRef.current.delete(updatedEvent.id);
     setBlockedEvents((prev) => {
+      const isCustomStudyBlock = updatedEvent.id.startsWith('custom-study-');
       const existingIdx = prev.findIndex(
         (e) =>
           e.id === updatedEvent.id ||
-          (updatedEvent.linkedTopicId &&
+          (!isCustomStudyBlock &&
+            !e.id.startsWith('custom-study-') &&
+            updatedEvent.linkedTopicId &&
             e.linkedTopicId === updatedEvent.linkedTopicId &&
-            e.linkedItemType === updatedEvent.linkedItemType) ||
-          (updatedEvent.linkedTaskId && e.linkedTaskId === updatedEvent.linkedTaskId)
+            e.linkedItemType === updatedEvent.linkedItemType &&
+            (!updatedEvent.date || !e.date || e.date === updatedEvent.date)) ||
+          (!isCustomStudyBlock &&
+            updatedEvent.linkedTaskId &&
+            e.linkedTaskId === updatedEvent.linkedTaskId)
       );
       let next: BlockedTimeEvent[];
       if (existingIdx >= 0) {
@@ -1045,7 +1082,7 @@ export default function App() {
 
   return (
     <div
-      className={`min-h-screen bg-[#F8FAFC] dark:bg-[#090D16] text-slate-900 dark:text-slate-100 flex ${
+      className={`min-h-screen w-full max-w-full overflow-x-hidden bg-[#F8FAFC] dark:bg-[#090D16] text-slate-900 dark:text-slate-100 flex ${
         preferences.navigationPosition === 'sidebar' ? 'flex-col md:flex-row' : 'flex-col'
       } font-sans selection:bg-blue-100 selection:text-blue-900 transition-colors`}
     >
@@ -1055,8 +1092,19 @@ export default function App() {
           activeTab={activeTab}
           onSelectTab={(tab) => {
             setActiveTab(tab);
-            if (tab !== 'asignaturas' && tab !== 'cuestionarios') {
-              setSelectedSubjectId(null);
+            setSelectedSubjectId(null);
+            if (tab === 'asignaturas') {
+              setSubjectSectionViewMode('grid');
+            }
+            if (tab === 'cuestionarios') {
+              setQuizTopicTargetIds([]);
+            }
+            setIsPreferencesModalOpen(false);
+            setIsProgramModalOpen(false);
+            setIsExamsManagerOpen(false);
+            setIsErrorModalOpen(false);
+            if (typeof window !== 'undefined') {
+              window.scrollTo({ top: 0, behavior: 'smooth' });
             }
           }}
           programName={combinedProgramTitle}
@@ -1084,11 +1132,12 @@ export default function App() {
               navigationPosition: prev.navigationPosition === 'sidebar' ? 'top' : 'sidebar',
             }))
           }
+          onStartOnboardingTour={() => setIsOnboardingTourOpen(true)}
         />
       )}
 
       {/* Main Content Viewport */}
-      <main className="flex-1 min-w-0 max-w-6xl w-full mx-auto px-3.5 sm:px-8 lg:px-10 py-5 sm:py-10">
+      <main className="flex-1 min-w-0 w-full max-w-6xl overflow-x-hidden mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
         {/* Tab 1: Pestaña General por Curso */}
         {activeTab === 'curso' && activeYear && (
           <CourseGeneralView
@@ -1146,15 +1195,19 @@ export default function App() {
           <div
             className={
               isDocsSidePanelOpen
-                ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
+                ? preferences.navigationPosition === 'sidebar'
+                  ? 'grid grid-cols-1 xl:grid-cols-12 gap-6 items-start'
+                  : 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
                 : 'space-y-6'
             }
           >
             <div
               className={
                 isDocsSidePanelOpen
-                  ? 'lg:col-span-8 xl:col-span-9 min-w-0'
-                  : 'w-full'
+                  ? preferences.navigationPosition === 'sidebar'
+                    ? 'xl:col-span-8 2xl:col-span-9 min-w-0'
+                    : 'lg:col-span-8 xl:col-span-9 min-w-0'
+                  : 'w-full min-w-0'
               }
             >
             {currentSubject ? (
@@ -1189,6 +1242,7 @@ export default function App() {
                 </div>
 
                 <SubjectDetailView
+                  key={currentSubject.id}
                   subject={currentSubject}
                   onUpdateSubject={handleUpdateSubject}
                   onSelectForPomodoro={handleStartPomodoroWithSubject}
@@ -1817,7 +1871,8 @@ export default function App() {
                                       {sub.name}
                                     </span>
                                     <span className="text-[11px] font-mono-numbers text-slate-400 shrink-0">
-                                      · { currentVuelta }ª Vuelta · {sub.credits || 6} ECTS
+                                      · {currentVuelta}ª Vuelta
+                                      {sub.credits ? ` · ${sub.credits} ECTS` : ''}
                                       <span className="sm:hidden font-semibold text-slate-500"> · {studiedTopics}/{totalTopics} temas</span>
                                     </span>
                                   </div>
@@ -2004,10 +2059,14 @@ export default function App() {
                                       >
                                         {sub.code || 'ASIG'}
                                       </span>
-                                      <span className="font-mono-numbers font-semibold">
-                                        {sub.credits || 6} ECTS
-                                      </span>
-                                      <span>·</span>
+                                      {sub.credits ? (
+                                        <>
+                                          <span className="font-mono-numbers font-semibold">
+                                            {sub.credits} ECTS
+                                          </span>
+                                          <span>·</span>
+                                        </>
+                                      ) : null}
                                       <span className="font-mono-numbers font-bold text-slate-700 dark:text-slate-300">
                                         {currentVuelta}ª Vuelta
                                       </span>
@@ -2231,7 +2290,13 @@ export default function App() {
             </div>
 
             {isDocsSidePanelOpen && (
-              <div className="lg:col-span-4 xl:col-span-3 w-full">
+              <div
+                className={
+                  preferences.navigationPosition === 'sidebar'
+                    ? 'xl:col-span-4 2xl:col-span-3 w-full'
+                    : 'lg:col-span-4 xl:col-span-3 w-full'
+                }
+              >
                 <SubjectDocumentsSidePanel
                   subjects={activeSubjects}
                   selectedSubject={currentSubject || null}
@@ -2461,6 +2526,21 @@ export default function App() {
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
+      />
+
+      {/* Interactive Guided Onboarding Tour (First-Time User & On-Demand) */}
+      <InteractiveOnboardingTour
+        isOpen={isOnboardingTourOpen}
+        onClose={handleCloseOnboardingTour}
+        onSelectTab={(tab) => setActiveTab(tab)}
+        onOpenProgramManager={() => setIsProgramModalOpen(true)}
+        onOpenPreferences={() => setIsPreferencesModalOpen(true)}
+        onOpenFirstSubject={() => {
+          setActiveTab('asignaturas');
+          if (!selectedSubjectId && activeSubjects.length > 0) {
+            setSelectedSubjectId(activeSubjects[0].id);
+          }
+        }}
       />
     </div>
   );

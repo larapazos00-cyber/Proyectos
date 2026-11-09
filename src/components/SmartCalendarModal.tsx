@@ -197,7 +197,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   const [calendarLayerFilter, setCalendarLayerFilter] = useState<
     'all' | 'estudio' | 'repaso' | 'examenes_tareas'
   >('all');
-  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(true);
+  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(false);
   const [urgencyFilter, setUrgencyFilter] = useState<
     'all' | 'actionable' | 'upcoming' | 'stable' | 'unstarted'
   >('all');
@@ -287,19 +287,27 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     }
   });
 
-  // Group smart sessions by date
+  // Group daily new study sessions (Topics & Pages per day to arrive on time for exams/tasks) by date
   const sessionsByDate: Record<string, ScheduledStudySession[]> = {};
   allGeneratedSessions.forEach((sess) => {
+    if (sess.type !== 'estudio_nuevo') return;
     if (!sessionsByDate[sess.date]) {
       sessionsByDate[sess.date] = [];
     }
     sessionsByDate[sess.date].push(sess);
   });
 
-  // Group specific-date blocked events by date
+  // Group specific-date blocked events by date (avoid duplicating topic sessions already rendered in sessionsByDate, while always keeping custom study blocks)
   const blockedByDate: Record<string, BlockedTimeEvent[]> = {};
   blockedEvents.forEach((ev) => {
     if (ev.date) {
+      const isAlreadyRenderedTopicSession =
+        !ev.id?.startsWith('custom-study-') &&
+        (ev.linkedItemType === 'topic' || ev.id?.startsWith('block-topic-')) &&
+        (sessionsByDate[ev.date] || []).some((s) => s.topicId === ev.linkedTopicId);
+      if (isAlreadyRenderedTopicSession) {
+        return;
+      }
       if (!blockedByDate[ev.date]) {
         blockedByDate[ev.date] = [];
       }
@@ -307,15 +315,22 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     }
   });
 
-  // Helper: Get ALL effective blocked items for a specific date (includes specific-date plans AND weekly recurring blocks like classes, workouts/entrenos, work)
+  // Helper: Get ALL effective blocked items for a specific date (includes specific-date plans, custom study blocks, AND weekly recurring blocks)
   const getEffectiveBlockedForDate = (dateStr: string): EffectiveBlockedCalendarItem[] => {
     const dayOfWeek = getDayOfWeekFromDateStr(dateStr);
     const list: EffectiveBlockedCalendarItem[] = [];
     const seenKeys = new Set<string>();
+    const dayTopicIds = new Set((sessionsByDate[dateStr] || []).map((s) => s.topicId));
 
-    // 1. Specific date blocked events (Planes sobre la marcha / citas puntuales)
+    // 1. Specific date blocked events (Planes sobre la marcha / citas puntuales / bloques de estudio personalizados)
     (blockedByDate[dateStr] || []).forEach((ev) => {
-      const key = `${ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
+      const isAlreadyRenderedTopicSession =
+        !ev.id?.startsWith('custom-study-') &&
+        (ev.linkedItemType === 'topic' || ev.id?.startsWith('block-topic-')) &&
+        ev.linkedTopicId &&
+        dayTopicIds.has(ev.linkedTopicId);
+      if (isAlreadyRenderedTopicSession) return;
+      const key = `${ev.id || ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
       if (!seenKeys.has(key)) {
         seenKeys.add(key);
         list.push({ ...ev, isRecurringWeekly: false });
@@ -325,7 +340,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     // 2. Recurring BlockedTimeEvents
     blockedEvents.forEach((ev) => {
       if (!ev.date && ev.recurringDays && ev.recurringDays.includes(dayOfWeek)) {
-        const key = `${ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
+        const key = `${ev.id || ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
         if (!seenKeys.has(key)) {
           seenKeys.add(key);
           list.push({
@@ -420,15 +435,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         const logDates = matchingLogs.map((l) => l.date).filter(Boolean).sort();
         const historyDates = historyRecords.map((r) => r.date).filter(Boolean).sort();
 
-        const pageInfo = schedulerService.getTopicStudiedPages(topic);
+        const pageInfo = schedulerService.getTopicStudiedPages(topic, preferences);
 
+        // REGLA ESTRICTA: Los repasos espaciados (1, 3, 7, 15, 30 días) SOLO se crean para temas o páginas marcadas como estudiadas/leídas
         const hasStudyHistory =
           topic.status === 'estudiado' ||
           topic.status === 'repasado' ||
-          Boolean(topic.studiedAt) ||
-          historyRecords.length > 0 ||
-          pomodoroSessionsCount > 0 ||
-          (topic.actualHoursSpent || 0) > 0 ||
           pageInfo.studiedPages > 0;
 
         // Also check if smart scheduler assigned a study date for this topic
@@ -443,6 +455,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
           anchorStudyDate = historyDates[0];
         } else if (logDates.length > 0) {
           anchorStudyDate = logDates[0];
+        } else if (hasStudyHistory) {
+          anchorStudyDate = todayStr;
         } else if (topic.scheduledDate) {
           anchorStudyDate = topic.scheduledDate;
         } else if (scheduledFirstSession) {
@@ -459,16 +473,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         const lastReviewDate =
           allActivityDates.length > 0
             ? allActivityDates[allActivityDates.length - 1]
+            : hasStudyHistory
+            ? anchorStudyDate
             : null;
 
         let effectiveLevel = topic.reviewLevel || 0;
         if (effectiveLevel === 0 && hasStudyHistory) {
           if (topic.status === 'repasado') {
             effectiveLevel = Math.max(2, historyRecords.length + 1);
-          } else if (topic.status === 'estudiado' || historyRecords.length > 0) {
-            effectiveLevel = Math.max(1, historyRecords.length);
-          } else if (pomodoroSessionsCount > 0 || (topic.actualHoursSpent || 0) >= 0.5) {
-            effectiveLevel = 1;
+          } else {
+            effectiveLevel = Math.max(1, historyRecords.length || 1);
           }
         }
         effectiveLevel = Math.min(5, effectiveLevel);
@@ -1184,6 +1198,327 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     setTimeout(() => setRescheduledNotice(null), 4500);
   };
 
+  // Helper: Calculate endTime automatically from startTime + durationHours (preserving topic duration)
+  const calculateAutoEndTime = (startTimeStr: string, durationHours: number): string => {
+    const safeStart = startTimeStr && startTimeStr.includes(':') ? startTimeStr : '09:00';
+    const [hPart, mPart] = safeStart.split(':').map((n) => parseInt(n, 10) || 0);
+    const startMins = hPart * 60 + mPart;
+    const durationMins = Math.max(30, Math.round((durationHours || 1) * 60));
+    const endTotalMins = Math.min(23 * 60 + 59, startMins + durationMins);
+    return `${String(Math.floor(endTotalMins / 60)).padStart(2, '0')}:${String(
+      endTotalMins % 60
+    ).padStart(2, '0')}`;
+  };
+
+  // Change ONLY the start time (or move slot) of a study topic session without duplicating blocks or spawning another topic
+  const handleChangeTopicSessionStartTime = (
+    subjectId: string,
+    topicId: string,
+    targetDateStr: string,
+    newStartTime: string,
+    durationHours: number,
+    sourceDateStr?: string
+  ) => {
+    const targetSub = subjects.find((s) => s.id === subjectId);
+    if (!targetSub) return;
+
+    const cleanStart = newStartTime && newStartTime.includes(':') ? newStartTime : '09:00';
+    const autoEndStr = calculateAutoEndTime(cleanStart, durationHours);
+    let movedTopicTitle = 'Tema';
+
+    const updatedTopics = targetSub.topics.map((t) => {
+      if (t.id !== topicId) return t;
+      movedTopicTitle = t.title;
+      const nextStudyMap = { ...(t.studyTimeByDate || {}) };
+      const nextExtraMap = { ...(t.extraStudySessionsByDate || {}) };
+
+      if (sourceDateStr && sourceDateStr !== targetDateStr) {
+        delete nextStudyMap[sourceDateStr];
+        if (nextExtraMap[sourceDateStr]) {
+          const prevExtra = nextExtraMap[sourceDateStr];
+          delete nextExtraMap[sourceDateStr];
+          nextExtraMap[targetDateStr] = { ...prevExtra, startTime: cleanStart };
+        } else {
+          // Moving a topic session to another date places an explicit user session on targetDateStr
+          nextExtraMap[targetDateStr] = { startTime: cleanStart };
+        }
+      } else if (nextExtraMap[targetDateStr]) {
+        nextExtraMap[targetDateStr] = {
+          ...nextExtraMap[targetDateStr],
+          startTime: cleanStart,
+        };
+      }
+
+      nextStudyMap[targetDateStr] = cleanStart;
+
+      return {
+        ...t,
+        scheduledTime: cleanStart,
+        scheduledEndTime: autoEndStr,
+        studyTimeByDate: nextStudyMap,
+        extraStudySessionsByDate: nextExtraMap,
+        // Keep manualScheduledDate false so the sequential scheduler NEVER pulls a second topic into the same day
+        manualScheduledDate: false,
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({ ...targetSub, topics: updatedTopics });
+    } else {
+      onUpdateTopicsSchedule(targetSub.id, updatedTopics);
+    }
+
+    // Persistently update blockedEvents with the new startTime and recalculated endTime based on original duration
+    const existingTopicBlock = blockedEvents.find(
+      (b) =>
+        b.id === `block-topic-${topicId}` ||
+        (!b.id.startsWith('custom-study-') &&
+          b.linkedTopicId === topicId &&
+          b.linkedItemType === 'topic')
+    );
+
+    upsertBlockedEventInAppState({
+      id: existingTopicBlock?.id || `block-topic-${topicId}`,
+      title: `📖 Estudio: ${movedTopicTitle} (${targetSub.name})`,
+      date: targetDateStr,
+      startTime: cleanStart,
+      endTime: autoEndStr,
+      durationHours,
+      category: 'estudio',
+      notes: `Bloque de estudio (${durationHours}h) asignado a ${cleanStart}–${autoEndStr}`,
+      linkedItemType: 'topic',
+      linkedTopicId: topicId,
+      linkedSubjectId: targetSub.id,
+      subjectName: targetSub.name,
+      subjectColor: targetSub.color,
+    });
+
+    setRescheduledNotice(
+      `🕒 Hora de "${movedTopicTitle}" (${targetSub.name}) actualizada: ${cleanStart} – ${autoEndStr} (${durationHours}h, guardado en blockedEvents).`
+    );
+    setTimeout(() => setRescheduledNotice(null), 4500);
+  };
+
+  // State & Handlers for "+ Añadir tema en hueco libre" (User-chosen extra topic on any day with page selector & live endTime)
+  const [showAddTopicSlotModal, setShowAddTopicSlotModal] = useState(false);
+  const [extraTopicDate, setExtraTopicDate] = useState<string>(todayStr);
+  const [extraTopicSubjectId, setExtraTopicSubjectId] = useState<string>(
+    subjects[0]?.id || ''
+  );
+  const [extraTopicId, setExtraTopicId] = useState<string>(
+    subjects[0]?.topics?.find((t) => !t.studiedAt && t.status !== 'estudiado')?.id ||
+      subjects[0]?.topics?.[0]?.id ||
+      ''
+  );
+  const [extraTopicStartTime, setExtraTopicStartTime] = useState<string>('17:00');
+  const [extraTopicPagesCount, setExtraTopicPagesCount] = useState<number>(5);
+
+  // Helper: Minutes per page based on user preferences and topic difficulty
+  const getTopicMinutesPerPage = (topic?: any): number => {
+    const base =
+      preferences.averageMinutesPerPage && preferences.averageMinutesPerPage > 0
+        ? preferences.averageMinutesPerPage
+        : 8;
+    const useScaling = preferences.useDifficultyScalingForPages ?? true;
+    if (!useScaling || !topic) return base;
+    const diff = topic.difficulty || 'Media';
+    if (diff === 'Baja') return Math.max(1, Math.round(base * 0.75 * 10) / 10);
+    if (diff === 'Alta') return Math.round(base * 1.5 * 10) / 10;
+    return base;
+  };
+
+  // Helper: Calculate end time HH:mm from startTime + exact duration in minutes
+  const calculateAutoEndTimeFromMinutes = (
+    startTimeStr: string,
+    durationMinutes: number
+  ): string => {
+    const safeStart = startTimeStr && startTimeStr.includes(':') ? startTimeStr : '17:00';
+    const [hPart, mPart] = safeStart.split(':').map((n) => parseInt(n, 10) || 0);
+    const startMins = hPart * 60 + mPart;
+    const safeDurMins = Math.max(5, Math.round(durationMinutes || 30));
+    const endTotalMins = Math.min(23 * 60 + 59, startMins + safeDurMins);
+    return `${String(Math.floor(endTotalMins / 60)).padStart(2, '0')}:${String(
+      endTotalMins % 60
+    ).padStart(2, '0')}`;
+  };
+
+  // Helper: Get sensible default pages count for a chosen topic
+  const getDefaultPagesForTopic = (topic?: any, dateForCheck?: string): number => {
+    if (!topic) return 5;
+    if (dateForCheck && topic.extraStudySessionsByDate?.[dateForCheck]?.pagesCount) {
+      return Math.max(1, topic.extraStudySessionsByDate[dateForCheck].pagesCount);
+    }
+    const attachedPages = (topic.attachedFiles || []).reduce(
+      (sum: number, f: any) => sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
+      0
+    );
+    const rawTotal = Math.max(topic.pageCount || 0, topic.paginasTotales || 0, attachedPages);
+    if (rawTotal > 0) {
+      const readP = Math.max(0, topic.pagesRead || 0);
+      const remaining = Math.max(1, rawTotal - readP);
+      return Math.min(remaining, 6);
+    }
+    const minsPerPage = getTopicMinutesPerPage(topic);
+    const estH = topic.estimatedHours && topic.estimatedHours > 0 ? topic.estimatedHours : 1.5;
+    return Math.max(1, Math.min(8, Math.round((estH * 60) / minsPerPage)));
+  };
+
+  const openAddTopicSlotModalForDate = (dateStr: string, preferredHourStr?: string) => {
+    setExtraTopicDate(dateStr);
+    const defaultSub =
+      subjects.find((s) => s.topics.some((t) => !t.studiedAt && t.status !== 'estudiado')) ||
+      subjects[0];
+    if (defaultSub) {
+      setExtraTopicSubjectId(defaultSub.id);
+      const nextPending =
+        defaultSub.topics.find((t) => {
+          const totalP = Math.max(0, t.pageCount || 0);
+          const readP = Math.max(0, t.pagesRead || 0);
+          const done =
+            totalP > 0
+              ? readP >= totalP
+              : Boolean(t.studiedAt || t.status === 'estudiado' || t.status === 'repasado');
+          return !done;
+        }) || defaultSub.topics[0];
+      if (nextPending) {
+        setExtraTopicId(nextPending.id);
+        setExtraTopicPagesCount(getDefaultPagesForTopic(nextPending, dateStr));
+      }
+    }
+    if (preferredHourStr) {
+      setExtraTopicStartTime(preferredHourStr);
+    } else {
+      const freeH = findFreeHourForDate(dateStr);
+      setExtraTopicStartTime(
+        freeH !== null ? `${String(freeH).padStart(2, '0')}:00` : '17:00'
+      );
+    }
+    setShowAddTopicSlotModal(true);
+  };
+
+  const handleSuggestNextPendingTopicForSlot = () => {
+    for (const sub of subjects) {
+      const candidate = sub.topics.find((t) => {
+        const totalP = Math.max(0, t.pageCount || 0);
+        const readP = Math.max(0, t.pagesRead || 0);
+        const done =
+          totalP > 0
+            ? readP >= totalP
+            : Boolean(t.studiedAt || t.status === 'estudiado' || t.status === 'repasado');
+        return !done && !t.extraStudySessionsByDate?.[extraTopicDate];
+      });
+      if (candidate) {
+        setExtraTopicSubjectId(sub.id);
+        setExtraTopicId(candidate.id);
+        setExtraTopicPagesCount(getDefaultPagesForTopic(candidate, extraTopicDate));
+        return;
+      }
+    }
+  };
+
+  const handleConfirmAddExtraTopicToDay = (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetSub = subjects.find((s) => s.id === extraTopicSubjectId);
+    if (!targetSub) return;
+    const targetTopic = targetSub.topics.find((t) => t.id === extraTopicId);
+    if (!targetTopic) return;
+
+    const cleanStart = extraTopicStartTime || '17:00';
+    const chosenPages = Math.max(1, Math.round(extraTopicPagesCount || 1));
+    const minsPerPage = getTopicMinutesPerPage(targetTopic);
+    const durationMinutes = Math.max(5, Math.round(chosenPages * minsPerPage));
+    const estHours = Math.max(0.1, Math.round((durationMinutes / 60) * 100) / 100);
+    const autoEndStr = calculateAutoEndTimeFromMinutes(cleanStart, durationMinutes);
+
+    const updatedTopics = targetSub.topics.map((t) => {
+      if (t.id !== targetTopic.id) return t;
+      const currentTotalPages = Math.max(
+        t.pageCount || 0,
+        (t. pagesRead || 0) + chosenPages
+      );
+      return {
+        ...t,
+        pageCount: t.pageCount && t.pageCount >= currentTotalPages ? t.pageCount : currentTotalPages,
+        studyTimeByDate: {
+          ...(t.studyTimeByDate || {}),
+          [extraTopicDate]: cleanStart,
+        },
+        extraStudySessionsByDate: {
+          ...(t.extraStudySessionsByDate || {}),
+          [extraTopicDate]: {
+            startTime: cleanStart,
+            pagesCount: chosenPages,
+          },
+        },
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({ ...targetSub, topics: updatedTopics });
+    } else {
+      onUpdateTopicsSchedule(targetSub.id, updatedTopics);
+    }
+
+    // Also persist in blockedEvents with the exact duration and endTime computed from chosenPages
+    upsertBlockedEventInAppState({
+      id: `block-topic-${targetTopic.id}-${extraTopicDate}`,
+      title: `📖 Estudio: ${targetTopic.title} (${chosenPages} ${
+        chosenPages === 1 ? 'pág' : 'págs'
+      } · ${targetSub.name})`,
+      date: extraTopicDate,
+      startTime: cleanStart,
+      endTime: autoEndStr,
+      durationHours: estHours,
+      category: 'estudio',
+      notes: `Sesión extra de ${chosenPages} páginas (~${durationMinutes} min) de ${cleanStart} a ${autoEndStr}`,
+      linkedItemType: 'topic',
+      linkedTopicId: targetTopic.id,
+      linkedSubjectId: targetSub.id,
+      subjectName: targetSub.name,
+      subjectColor: targetSub.color,
+    });
+
+    setShowAddTopicSlotModal(false);
+    setSelectedDayStr(extraTopicDate);
+    setRescheduledNotice(
+      `➕ Tema "${targetTopic.title}" (${chosenPages} ${
+        chosenPages === 1 ? 'página' : 'páginas'
+      } · ~${durationMinutes} min) añadido el ${formatReadableDate(
+        extraTopicDate
+      )} de ${cleanStart} a ${autoEndStr}.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
+  const handleRemoveExtraTopicFromDay = (
+    subjectId: string,
+    topicId: string,
+    dateStr: string
+  ) => {
+    const targetSub = subjects.find((s) => s.id === subjectId);
+    if (!targetSub) return;
+    const updatedTopics = targetSub.topics.map((t) => {
+      if (t.id !== topicId) return t;
+      const nextExtra = { ...(t.extraStudySessionsByDate || {}) };
+      delete nextExtra[dateStr];
+      const nextStudyMap = { ...(t.studyTimeByDate || {}) };
+      delete nextStudyMap[dateStr];
+      return {
+        ...t,
+        extraStudySessionsByDate: nextExtra,
+        studyTimeByDate: nextStudyMap,
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({ ...targetSub, topics: updatedTopics });
+    } else {
+      onUpdateTopicsSchedule(targetSub.id, updatedTopics);
+    }
+    setRescheduledNotice(`🗑️ Sesión extra eliminada del ${formatReadableDate(dateStr)}.`);
+    setTimeout(() => setRescheduledNotice(null), 4000);
+  };
+
   // Universal Drop Handler for Tasks, Study Topics, Spaced Reviews, and Blocked Events across Days and Hours
   const handleDropCalendarItem = (targetDateStr: string, targetHourStr?: string) => {
     setDragOverSlot(null);
@@ -1219,12 +1554,6 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     }
 
     if (draggedItem.kind === 'topic_session') {
-      const targetSub = subjects.find((s) => s.id === draggedItem.subjectId);
-      if (!targetSub) {
-        setDraggedItem(null);
-        return;
-      }
-
       const finalHourStr =
         targetHourStr ||
         draggedItem.sourceHourStr ||
@@ -1234,67 +1563,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         })();
 
       const durationHours = Math.max(0.5, Math.min(4, draggedItem.durationHours || 1));
-      const startHourNum = parseInt(finalHourStr.split(':')[0], 10);
-      const startMins = startHourNum * 60 + (parseInt(finalHourStr.split(':')[1] || '0', 10) || 0);
-      const endTotalMins = Math.min(23 * 60 + 59, startMins + Math.max(60, Math.round(durationHours * 60)));
-      const finalEndStr = `${String(Math.floor(endTotalMins / 60)).padStart(2, '0')}:${String(
-        endTotalMins % 60
-      ).padStart(2, '0')}`;
-
-      const updatedTopics = targetSub.topics.map((t) => {
-        if (t.id !== draggedItem.topicId) return t;
-        const nextStudyMap = { ...(t.studyTimeByDate || {}) };
-        if (draggedItem.sourceDateStr && draggedItem.sourceDateStr !== targetDateStr) {
-          delete nextStudyMap[draggedItem.sourceDateStr];
-        }
-        nextStudyMap[targetDateStr] = finalHourStr;
-
-        return {
-          ...t,
-          scheduledDate: targetDateStr,
-          scheduledTime: finalHourStr,
-          scheduledEndTime: finalEndStr,
-          studyTimeByDate: nextStudyMap,
-          manualScheduledDate: true,
-        };
-      });
-
-      if (onUpdateSubject) {
-        onUpdateSubject({ ...targetSub, topics: updatedTopics });
-      } else {
-        onUpdateTopicsSchedule(targetSub.id, updatedTopics);
-      }
-
-      const displayTopicTitle = draggedItem.title || draggedItem.topicTitle || 'Tema';
-      const existingTopicBlock = blockedEvents.find(
-        (b) =>
-          b.id === `block-topic-${draggedItem.topicId}` ||
-          (b.linkedTopicId === draggedItem.topicId && b.linkedItemType === 'topic')
-      );
-
-      // Automatically update blockedEvents in the main App state
-      upsertBlockedEventInAppState({
-        id: existingTopicBlock?.id || `block-topic-${draggedItem.topicId}`,
-        title: `📖 Estudio: ${displayTopicTitle} (${draggedItem.subjectName})`,
-        date: targetDateStr,
-        startTime: finalHourStr,
-        endTime: finalEndStr,
+      handleChangeTopicSessionStartTime(
+        draggedItem.subjectId,
+        draggedItem.topicId,
+        targetDateStr,
+        finalHourStr,
         durationHours,
-        category: 'clase',
-        notes: `Bloque de estudio asignado mediante Drag & Drop para el tema "${displayTopicTitle}" (${draggedItem.subjectName})`,
-        linkedItemType: 'topic',
-        linkedTopicId: draggedItem.topicId,
-        linkedSubjectId: draggedItem.subjectId,
-        subjectName: draggedItem.subjectName,
-        subjectColor: targetSub.color,
-      });
-
-      setRescheduledNotice(
-        `📖 Tema "${displayTopicTitle}" (${draggedItem.subjectName}) movido al ${formatReadableDate(
-          targetDateStr
-        )} (${finalHourStr}–${finalEndStr}) · Bloque actualizado en blockedEvents.`
+        draggedItem.sourceDateStr
       );
-      setTimeout(() => setRescheduledNotice(null), 5000);
       setDraggedItem(null);
       return;
     }
@@ -1372,23 +1648,23 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       if (draggedItem.isWeeklyObligation && onUpdatePreferences) {
         const updatedObs = (preferences.weeklyFixedObligations || []).map((ob) => {
           if (ob.id !== draggedItem.eventId && ob.id !== draggedItem.sourceObligationId) return ob;
-          let nextStart = ob.startTime;
-          let nextEnd = ob.endTime;
-          if (targetHourStr) {
-            const [sH, sM] = ob.startTime.split(':').map(Number);
-            const [eH, eM] = ob.endTime.split(':').map(Number);
-            const durMins = Math.max(60, (eH * 60 + (eM || 0)) - (sH * 60 + (sM || 0)));
-            const newStartH = parseInt(targetHourStr.split(':')[0], 10);
-            const newEndTotal = Math.min(23 * 60 + 59, newStartH * 60 + durMins);
-            nextStart = targetHourStr;
-            nextEnd = `${String(Math.floor(newEndTotal / 60)).padStart(2, '0')}:${String(newEndTotal % 60).padStart(2, '0')}`;
-          }
+          const [sH, sM] = (ob.startTime || '09:00').split(':').map(Number);
+          const [eH, eM] = (ob.endTime || '10:00').split(':').map(Number);
+          const computedDurHours = Math.max(
+            0.5,
+            ((eH * 60 + (eM || 0)) - (sH * 60 + (sM || 0))) / 60
+          );
+          const origDurationHours =
+            ob.durationHours && ob.durationHours > 0 ? ob.durationHours : computedDurHours;
+          const nextStart = targetHourStr || ob.startTime;
+          const nextEnd = calculateAutoEndTime(nextStart, origDurationHours);
           return {
             ...ob,
             dayOfWeek: targetDayOfWeek,
             recurringDays: [targetDayOfWeek],
             startTime: nextStart,
             endTime: nextEnd,
+            durationHours: origDurationHours,
           };
         });
         onUpdatePreferences({
@@ -1398,22 +1674,28 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       } else {
         const targetEvt = blockedEvents.find((b) => b.id === draggedItem.eventId);
         if (targetEvt) {
-          let nextStart = targetEvt.startTime;
-          let nextEnd = targetEvt.endTime;
-          if (targetHourStr) {
-            const [sH, sM] = targetEvt.startTime.split(':').map(Number);
-            const [eH, eM] = targetEvt.endTime.split(':').map(Number);
-            const durMins = Math.max(60, (eH * 60 + (eM || 0)) - (sH * 60 + (sM || 0)));
-            const newStartH = parseInt(targetHourStr.split(':')[0], 10);
-            const newEndTotal = Math.min(23 * 60 + 59, newStartH * 60 + durMins);
-            nextStart = targetHourStr;
-            nextEnd = `${String(Math.floor(newEndTotal / 60)).padStart(2, '0')}:${String(newEndTotal % 60).padStart(2, '0')}`;
-          }
+          const [sH, sM] = (targetEvt.startTime || '09:00').split(':').map(Number);
+          const [eH, eM] = (targetEvt.endTime || '10:00').split(':').map(Number);
+          const computedDurHours = Math.max(
+            0.5,
+            ((eH * 60 + (eM || 0)) - (sH * 60 + (sM || 0))) / 60
+          );
+          const origDurationHours =
+            targetEvt.durationHours && targetEvt.durationHours > 0
+              ? targetEvt.durationHours
+              : draggedItem.durationHours && draggedItem.durationHours > 0
+              ? draggedItem.durationHours
+              : computedDurHours;
+
+          const nextStart = targetHourStr || targetEvt.startTime || '09:00';
+          const nextEnd = calculateAutoEndTime(nextStart, origDurationHours);
+
           upsertBlockedEventInAppState({
             ...targetEvt,
-            date: targetEvt.date ? targetDateStr : targetDateStr,
+            date: targetDateStr,
             startTime: nextStart,
             endTime: nextEnd,
+            durationHours: origDurationHours,
           });
 
           // If this blocked event is linked to a topic or task, sync its new date and time block
@@ -1430,11 +1712,10 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                   nextStudyMap[targetDateStr] = nextStart;
                   return {
                     ...t,
-                    scheduledDate: targetDateStr,
                     scheduledTime: nextStart,
                     scheduledEndTime: nextEnd,
                     studyTimeByDate: nextStudyMap,
-                    manualScheduledDate: true,
+                    manualScheduledDate: false,
                   };
                 });
                 if (onUpdateSubject) {
@@ -1462,9 +1743,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       }
 
       setRescheduledNotice(
-        `🚫 Bloque "${draggedItem.title}" movido al ${formatReadableDate(targetDateStr)}${
-          targetHourStr ? ` a las ${targetHourStr}` : ''
-        } (actualizado en blockedEvents).`
+        `🕒 Bloque "${draggedItem.title}" movido al ${formatReadableDate(targetDateStr)}${
+          targetHourStr ? ` (${targetHourStr})` : ''
+        } · Hora de fin recalculada y guardada en blockedEvents.`
       );
       setTimeout(() => setRescheduledNotice(null), 5000);
       setDraggedItem(null);
@@ -3444,6 +3725,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
             <button
               type="button"
+              onClick={() => openAddTopicSlotModalForDate(selectedDayStr)}
+              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs cursor-pointer"
+              title="Elegir y añadir un tema de estudio en un hueco libre de este día"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Añadir Tema en Hueco</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleFindFreeSlotsForAllReviews}
               className="px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
               title="Asignar horas libres automáticamente a los repasos de la semana"
@@ -3729,12 +4020,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                               setDragOverSlot(null);
                             }}
                             className={`text-[10px] px-1.5 py-0.5 rounded border truncate flex items-center gap-1 cursor-grab active:cursor-grabbing ${pillClass}`}
-                            title={`Arrastra este repaso a otro día: ${milestone.label} - ${analysis.topic.title}`}
+                            title={`Repaso Espaciado ${milestone.label}: ${analysis.topic.title} (${analysis.studiedPages}/${analysis.totalPages} págs. leídas)`}
                           >
                             <span className="font-mono-numbers font-bold shrink-0">
-                              🧠 R{milestone.cycle}
+                              🧠 R{milestone.cycle} ({milestone.intervalDays}d)
                             </span>
-                            <span className="truncate">{analysis.topic.title}</span>
+                            <span className="truncate">
+                              {analysis.topic.title} ({analysis.studiedPages}p)
+                            </span>
                           </div>
                         );
                       })}
@@ -3885,14 +4178,30 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                   </div>
                 ))}
 
-                {/* 2. Bloques del Plan de Estudio Inteligente (Draggable) */}
-                {selectedDayStudySessions.length > 0 && (
-                  <div className="space-y-2">
+                {/* 2. Bloques del Plan de Estudio Inteligente (Draggable + Editable Start Time) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400 flex items-center gap-1.5">
                       <BookOpen className="w-3.5 h-3.5" />
                       <span>Plan de Estudio ({selectedDayStudySessions.length})</span>
                     </span>
-                    {selectedDayStudySessions.map((sess) => (
+                    <button
+                      type="button"
+                      onClick={() => openAddTopicSlotModalForDate(selectedDayStr)}
+                      className="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                      title="Añadir un tema adicional en un hueco libre de este día"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Añadir tema</span>
+                    </button>
+                  </div>
+                  {selectedDayStudySessions.map((sess) => {
+                    const effectiveStart = sess.startTime || '09:00';
+                    const effectiveEnd =
+                      sess.endTime || calculateAutoEndTime(effectiveStart, sess.durationHours);
+                    const isExtraSession = sess.id.startsWith('sess-extra-');
+
+                    return (
                       <div
                         key={sess.id}
                         draggable
@@ -3905,7 +4214,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             topicTitle: sess.topicTitle,
                             subjectName: sess.subjectName,
                             sourceDateStr: selectedDayStr,
-                            sourceHourStr: sess.startTime,
+                            sourceHourStr: effectiveStart,
                             durationHours: sess.durationHours,
                           });
                         }}
@@ -3913,22 +4222,69 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           setDraggedItem(null);
                           setDragOverSlot(null);
                         }}
-                        className="p-3 rounded-xl border border-blue-200 dark:border-blue-800/70 bg-blue-50/40 dark:bg-blue-950/20 text-xs space-y-1.5 cursor-grab active:cursor-grabbing"
-                        title="Arrastra este tema a cualquier casilla del calendario mensual para cambiarlo de día"
+                        className="p-3 rounded-xl border border-blue-200 dark:border-blue-800/70 bg-blue-50/40 dark:bg-blue-950/20 text-xs space-y-2 cursor-grab active:cursor-grabbing"
+                        title="Cambia la hora de inicio o arrastra este tema a otra casilla"
                       >
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-1">
                             <GripVertical className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                             {sess.subjectName}
                           </span>
-                          <span className="font-mono-numbers text-blue-700 dark:text-blue-300 font-semibold">
-                            {sess.startTime ? `${sess.startTime} · ` : ''}
-                            {sess.durationHours}h
-                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="font-mono-numbers text-blue-700 dark:text-blue-300 font-semibold text-[11px]">
+                              {sess.durationHours}h
+                            </span>
+                            {isExtraSession && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleRemoveExtraTopicFromDay(
+                                    sess.subjectId,
+                                    sess.topicId,
+                                    selectedDayStr
+                                  )
+                                }
+                                className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                title="Quitar este tema extra del día"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <div className="font-bold text-slate-900 dark:text-white">
                           {sess.topicTitle}
                         </div>
+
+                        {/* Selector directo de Hora de Inicio con cálculo automático de Hora de Fin */}
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex flex-wrap items-center justify-between gap-1.5 bg-white/90 dark:bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-blue-200/80 dark:border-blue-800/60"
+                        >
+                          <label className="text-[10px] font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-blue-600 shrink-0" />
+                            <span>Inicio:</span>
+                            <input
+                              type="time"
+                              value={effectiveStart}
+                              onChange={(e) => {
+                                if (!e.target.value) return;
+                                handleChangeTopicSessionStartTime(
+                                  sess.subjectId,
+                                  sess.topicId,
+                                  selectedDayStr,
+                                  e.target.value,
+                                  sess.durationHours
+                                );
+                              }}
+                              className="bg-blue-50 dark:bg-slate-800 border border-blue-300 dark:border-blue-700 rounded px-1.5 py-0.5 text-[11px] font-mono-numbers font-bold text-blue-800 dark:text-blue-200 focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                            />
+                          </label>
+                          <span className="text-[10px] font-mono-numbers font-semibold text-slate-600 dark:text-slate-400">
+                            → Fin: <strong className="text-blue-700 dark:text-blue-300">{effectiveEnd}</strong>
+                          </span>
+                        </div>
+
                         {sess.pagesAllocation && (
                           <div className="text-[11px] text-blue-700 dark:text-blue-300 flex items-center gap-1 font-mono-numbers">
                             <FileText className="w-3 h-3 shrink-0" />
@@ -3946,9 +4302,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           </button>
                         )}
                       </div>
-                    ))}
-                  </div>
-                )}
+                    );
+                  })}
+                </div>
 
                 {/* 3. Repasos Espaciados SM-2 / Ebbinghaus del Día (Draggable) */}
                 {selectedDaySRReviews.length > 0 && (
@@ -4008,6 +4364,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                 </span>
                                 <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-mono-numbers">
                                   {milestone.label}
+                                </span>
+                                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100/80 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 font-mono-numbers">
+                                  {analysis.studiedPages}/{analysis.totalPages} págs. leídas
                                 </span>
                               </div>
                               <h5 className="text-xs font-bold text-slate-900 dark:text-white mt-1">
@@ -4813,11 +5172,11 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                               ))}
 
                               {currentSessionsAtHour.map((currentSession) => {
-                                const syncedTopicBlock = blocked.find(
-                                  (b) =>
-                                    b.linkedTopicId === currentSession.topicId ||
-                                    b.id === `block-topic-${currentSession.topicId}`
-                                );
+                                const effectiveStart = currentSession.startTime || hourStr;
+                                const effectiveEnd =
+                                  currentSession.endTime ||
+                                  calculateAutoEndTime(effectiveStart, currentSession.durationHours);
+                                const isExtraSession = currentSession.id.startsWith('sess-extra-');
 
                                 return (
                                   <div
@@ -4833,7 +5192,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                         topicTitle: currentSession.topicTitle,
                                         subjectName: currentSession.subjectName,
                                         sourceDateStr: dateStr,
-                                        sourceHourStr: currentSession.startTime || hourStr,
+                                        sourceHourStr: effectiveStart,
                                         durationHours: currentSession.durationHours,
                                       });
                                     }}
@@ -4842,12 +5201,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                       setDragOverSlot(null);
                                     }}
                                     onClick={(e) => e.stopPropagation()}
-                                    className={`p-2 rounded-xl border text-xs shadow-2xs space-y-0.5 cursor-grab active:cursor-grabbing ${
+                                    className={`p-2 rounded-xl border text-xs shadow-2xs space-y-1 cursor-grab active:cursor-grabbing ${
                                       currentSession.type === 'repaso_espaciado'
                                         ? 'bg-purple-50/90 border-purple-200 text-purple-950'
                                         : 'bg-blue-50/90 border-blue-200 text-blue-950'
                                     }`}
-                                    title="Arrastra este tema a otra hora o a otro día de la semana"
+                                    title="Arrastra este tema a otra hora o cambia su hora de inicio aquí"
                                   >
                                     <div className="flex items-center justify-between text-[10px]">
                                       <span className="font-bold truncate max-w-[85px] inline-flex items-center gap-0.5">
@@ -4856,17 +5215,21 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                       </span>
                                       <div className="flex items-center gap-1">
                                         <span className="font-mono-numbers text-blue-700 font-semibold">
-                                          {currentSession.startTime || hourStr}
+                                          {currentSession.durationHours}h
                                         </span>
-                                        {syncedTopicBlock && (
+                                        {isExtraSession && (
                                           <button
                                             type="button"
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              handleDeleteEffectiveBlockedItem(syncedTopicBlock);
+                                              handleRemoveExtraTopicFromDay(
+                                                currentSession.subjectId,
+                                                currentSession.topicId,
+                                                dateStr
+                                              );
                                             }}
-                                            className="text-amber-600 hover:text-rose-600 cursor-pointer"
-                                            title="Liberar bloque reservado en blockedEvents"
+                                            className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                            title="Quitar tema extra de este hueco"
                                           >
                                             <X className="w-3 h-3" />
                                           </button>
@@ -4876,11 +5239,25 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                     <div className="font-semibold leading-tight line-clamp-1 text-[11px]">
                                       {currentSession.topicTitle}
                                     </div>
-                                    {syncedTopicBlock && (
-                                      <div className="text-[9px] font-bold text-amber-800 bg-amber-100/80 px-1 py-0.2 rounded truncate font-mono-numbers">
-                                        🔒 Bloqueado {syncedTopicBlock.startTime}–{syncedTopicBlock.endTime}
-                                      </div>
-                                    )}
+                                    <div className="flex items-center justify-between gap-1 bg-white/80 px-1.5 py-0.5 rounded border border-blue-200/70 text-[9px] font-mono-numbers">
+                                      <input
+                                        type="time"
+                                        value={effectiveStart}
+                                        onChange={(e) => {
+                                          if (!e.target.value) return;
+                                          handleChangeTopicSessionStartTime(
+                                            currentSession.subjectId,
+                                            currentSession.topicId,
+                                            dateStr,
+                                            e.target.value,
+                                            currentSession.durationHours
+                                          );
+                                        }}
+                                        className="bg-transparent font-bold text-blue-800 focus:outline-none cursor-pointer w-[54px]"
+                                        title="Cambiar hora de inicio (fin se calcula solo)"
+                                      />
+                                      <span className="text-slate-600">→ {effectiveEnd}</span>
+                                    </div>
                                     {currentSession.pagesAllocation && (
                                       <div className="text-[9px] text-blue-700 truncate">
                                         📖 {currentSession.pagesAllocation}
@@ -5180,56 +5557,115 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                         </div>
                       )}
 
-                      {/* Study Plan Sessions (Draggable) */}
+                      {/* Study Plan Sessions (Draggable + Editable Start Time) */}
                       {showStudyLayer && (
                         <div className="space-y-2 mb-3">
-                          <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400 block">
-                            Plan de Estudio ({sessions.length})
-                          </span>
-                          {sessions.map((sess) => (
-                            <div
-                              key={sess.id}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.effectAllowed = 'move';
-                                setDraggedItem({
-                                  kind: 'topic_session',
-                                  subjectId: sess.subjectId,
-                                  topicId: sess.topicId,
-                                  topicTitle: sess.topicTitle,
-                                  subjectName: sess.subjectName,
-                                  sourceDateStr: dateStr,
-                                  sourceHourStr: sess.startTime,
-                                  durationHours: sess.durationHours,
-                                });
-                              }}
-                              onDragEnd={() => {
-                                setDraggedItem(null);
-                                setDragOverSlot(null);
-                              }}
-                              className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-xs space-y-1 cursor-grab active:cursor-grabbing hover:border-blue-400"
-                              title="Arrastra este tema a otra columna de la semana"
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                              Plan de Estudio ({sessions.length})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openAddTopicSlotModalForDate(dateStr)}
+                              className="px-1.5 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-bold inline-flex items-center gap-0.5 cursor-pointer"
+                              title="Añadir un tema en un hueco libre de este día"
                             >
-                              <div className="flex items-center justify-between text-[11px]">
-                                <span className="font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-0.5">
-                                  <GripVertical className="w-3 h-3 text-blue-400 shrink-0" />
-                                  {sess.subjectName}
-                                </span>
-                                <span className="font-mono-numbers text-blue-700 dark:text-blue-400 font-semibold">
-                                  {sess.durationHours}h
-                                </span>
-                              </div>
-                              <div className="font-medium leading-snug text-slate-900 dark:text-white">
-                                {sess.topicTitle}
-                              </div>
-                              {sess.pagesAllocation && (
-                                <div className="text-[10px] text-blue-700 bg-white/70 px-1.5 py-0.5 rounded border border-blue-100 flex items-center gap-1 font-mono-numbers">
-                                  <FileText className="w-3 h-3 text-blue-500 shrink-0" />
-                                  <span>{sess.pagesAllocation}</span>
+                              <Plus className="w-2.5 h-2.5" />
+                              <span>Tema</span>
+                            </button>
+                          </div>
+                          {sessions.map((sess) => {
+                            const effectiveStart = sess.startTime || '09:00';
+                            const effectiveEnd =
+                              sess.endTime ||
+                              calculateAutoEndTime(effectiveStart, sess.durationHours);
+                            const isExtraSession = sess.id.startsWith('sess-extra-');
+
+                            return (
+                              <div
+                                key={sess.id}
+                                draggable
+                                onDragStart={(e) => {
+                                  e.dataTransfer.effectAllowed = 'move';
+                                  setDraggedItem({
+                                    kind: 'topic_session',
+                                    subjectId: sess.subjectId,
+                                    topicId: sess.topicId,
+                                    topicTitle: sess.topicTitle,
+                                    subjectName: sess.subjectName,
+                                    sourceDateStr: dateStr,
+                                    sourceHourStr: effectiveStart,
+                                    durationHours: sess.durationHours,
+                                  });
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedItem(null);
+                                  setDragOverSlot(null);
+                                }}
+                                className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-xs space-y-1.5 cursor-grab active:cursor-grabbing hover:border-blue-400"
+                                title="Cambia la hora de inicio o arrastra este tema a otro día"
+                              >
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-0.5">
+                                    <GripVertical className="w-3 h-3 text-blue-400 shrink-0" />
+                                    {sess.subjectName}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-mono-numbers text-blue-700 dark:text-blue-400 font-semibold">
+                                      {sess.durationHours}h
+                                    </span>
+                                    {isExtraSession && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleRemoveExtraTopicFromDay(
+                                            sess.subjectId,
+                                            sess.topicId,
+                                            dateStr
+                                          )
+                                        }
+                                        className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                        title="Quitar tema extra"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
-                              )}
-                            </div>
-                          ))}
+                                <div className="font-medium leading-snug text-slate-900 dark:text-white">
+                                  {sess.topicTitle}
+                                </div>
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center justify-between gap-1 bg-white dark:bg-slate-900 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[10px] font-mono-numbers"
+                                >
+                                  <input
+                                    type="time"
+                                    value={effectiveStart}
+                                    onChange={(e) => {
+                                      if (!e.target.value) return;
+                                      handleChangeTopicSessionStartTime(
+                                        sess.subjectId,
+                                        sess.topicId,
+                                        dateStr,
+                                        e.target.value,
+                                        sess.durationHours
+                                      );
+                                    }}
+                                    className="bg-transparent font-bold text-blue-700 dark:text-blue-300 focus:outline-none cursor-pointer"
+                                    title="Hora de inicio"
+                                  />
+                                  <span className="text-slate-500">→ {effectiveEnd}</span>
+                                </div>
+                                {sess.pagesAllocation && (
+                                  <div className="text-[10px] text-blue-700 bg-white/70 px-1.5 py-0.5 rounded border border-blue-100 flex items-center gap-1 font-mono-numbers">
+                                    <FileText className="w-3 h-3 text-blue-500 shrink-0" />
+                                    <span>{sess.pagesAllocation}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
 
@@ -5855,14 +6291,59 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             }`}
                             title="Arrastra este tema a otra hora o a otro día de la tira superior"
                           >
-                            <div className="space-y-1">
-                              <div className="flex items-center gap-2">
+                            <div className="space-y-1.5">
+                              <div className="flex items-center gap-2 flex-wrap">
                                 <GripVertical className="w-4 h-4 text-blue-500 shrink-0" />
                                 <span className="font-bold text-slate-900">{sess.subjectName}</span>
                                 <span>·</span>
-                                <span className="font-mono-numbers font-semibold text-blue-700">
-                                  {sess.startTime} - {sess.endTime} ({sess.durationHours}h)
-                                </span>
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex items-center gap-1.5 bg-white px-2 py-0.5 rounded-lg border border-blue-200 font-mono-numbers text-xs"
+                                >
+                                  <span className="text-[10px] font-bold text-slate-500">Inicio:</span>
+                                  <input
+                                    type="time"
+                                    value={sess.startTime || hourStr}
+                                    onChange={(e) => {
+                                      if (!e.target.value) return;
+                                      handleChangeTopicSessionStartTime(
+                                        sess.subjectId,
+                                        sess.topicId,
+                                        selectedDayStr,
+                                        e.target.value,
+                                        sess.durationHours
+                                      );
+                                    }}
+                                    className="font-bold text-blue-700 bg-transparent focus:outline-none cursor-pointer"
+                                  />
+                                  <span className="text-slate-600">
+                                    → Fin auto:{' '}
+                                    <strong className="text-blue-700">
+                                      {sess.endTime ||
+                                        calculateAutoEndTime(
+                                          sess.startTime || hourStr,
+                                          sess.durationHours
+                                        )}
+                                    </strong>{' '}
+                                    ({sess.durationHours}h)
+                                  </span>
+                                </div>
+                                {sess.id.startsWith('sess-extra-') && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleRemoveExtraTopicFromDay(
+                                        sess.subjectId,
+                                        sess.topicId,
+                                        selectedDayStr
+                                      )
+                                    }
+                                    className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                    title="Quitar este tema extra"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                               </div>
                               <h5 className="text-sm font-bold text-slate-900 pl-6">
                                 {sess.topicTitle}
@@ -6025,25 +6506,34 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           reviewsAtHour.length === 0 &&
                           tasksAtHour.length === 0 &&
                           !isDragOver && (
-                            <div className="flex items-center justify-between pt-1">
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                               <span className="text-xs text-slate-300 italic">
                                 Hueco libre · Arrastra aquí un tema, repaso o tarea
                               </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBlockedDate(selectedDayStr);
-                                  setBlockedStartTime(hourStr);
-                                  setBlockedEndTime(
-                                    `${String(Math.min(23, hour + 1)).padStart(2, '0')}:00`
-                                  );
-                                  setBlockedModalMode('on_the_fly');
-                                  setShowAddBlockedModal(true);
-                                }}
-                                className="text-[11px] text-slate-400 hover:text-amber-600 font-semibold cursor-pointer"
-                              >
-                                + Bloquear esta hora
-                              </button>
+                              <div className="flex items-center gap-3">
+                                <button
+                                  type="button"
+                                  onClick={() => openAddTopicSlotModalForDate(selectedDayStr, hourStr)}
+                                  className="text-[11px] text-blue-600 hover:text-blue-700 font-bold cursor-pointer"
+                                >
+                                  + Añadir tema en este hueco
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setBlockedDate(selectedDayStr);
+                                    setBlockedStartTime(hourStr);
+                                    setBlockedEndTime(
+                                      `${String(Math.min(23, hour + 1)).padStart(2, '0')}:00`
+                                    );
+                                    setBlockedModalMode('on_the_fly');
+                                    setShowAddBlockedModal(true);
+                                  }}
+                                  className="text-[11px] text-slate-400 hover:text-amber-600 font-semibold cursor-pointer"
+                                >
+                                  + Bloquear esta hora
+                                </button>
+                              </div>
                             </div>
                           )}
                       </div>
@@ -6054,65 +6544,102 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             </div>
           ) : (
             <div className="space-y-4">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                Temas del Plan de Estudio Hoy (Arrastra a otro día en la tira superior)
-              </h4>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Temas del Plan de Estudio Hoy (Cambia su hora de inicio o arrastra a otro día)
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => openAddTopicSlotModalForDate(selectedDayStr)}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Añadir Tema en Hueco</span>
+                </button>
+              </div>
               <div className="space-y-3">
-                {selectedDayStudySessions.map((sess) => (
-                  <div
-                    key={sess.id}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.effectAllowed = 'move';
-                      setDraggedItem({
-                        kind: 'topic_session',
-                        subjectId: sess.subjectId,
-                        topicId: sess.topicId,
-                        topicTitle: sess.topicTitle,
-                        subjectName: sess.subjectName,
-                        sourceDateStr: selectedDayStr,
-                        sourceHourStr: sess.startTime,
-                        durationHours: sess.durationHours,
-                      });
-                    }}
-                    onDragEnd={() => {
-                      setDraggedItem(null);
-                      setDragOverSlot(null);
-                    }}
-                    className="p-5 rounded-2xl border border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-grab active:cursor-grabbing"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2 text-xs text-slate-500">
-                        <GripVertical className="w-4 h-4 text-blue-500" />
-                        <span className="font-bold text-slate-900">{sess.subjectName}</span>
-                        <span>·</span>
-                        <span className="font-mono-numbers font-semibold text-blue-700">
-                          ⏱ {sess.durationHours} horas estimadas
-                        </span>
-                      </div>
-                      <h5 className="text-base font-bold text-slate-900 pl-6">
-                        {sess.topicTitle}
-                      </h5>
-                      {sess.pagesAllocation && (
-                        <div className="inline-flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg font-medium mt-1 ml-6">
-                          <FileText className="w-3.5 h-3.5" />
-                          <span>Guía de lectura: {sess.pagesAllocation}</span>
+                {selectedDayStudySessions.map((sess) => {
+                  const effectiveStart = sess.startTime || '09:00';
+                  const effectiveEnd =
+                    sess.endTime || calculateAutoEndTime(effectiveStart, sess.durationHours);
+
+                  return (
+                    <div
+                      key={sess.id}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.effectAllowed = 'move';
+                        setDraggedItem({
+                          kind: 'topic_session',
+                          subjectId: sess.subjectId,
+                          topicId: sess.topicId,
+                          topicTitle: sess.topicTitle,
+                          subjectName: sess.subjectName,
+                          sourceDateStr: selectedDayStr,
+                          sourceHourStr: effectiveStart,
+                          durationHours: sess.durationHours,
+                        });
+                      }}
+                      onDragEnd={() => {
+                        setDraggedItem(null);
+                        setDragOverSlot(null);
+                      }}
+                      className="p-5 rounded-2xl border border-slate-200 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-grab active:cursor-grabbing"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap text-xs text-slate-500">
+                          <GripVertical className="w-4 h-4 text-blue-500" />
+                          <span className="font-bold text-slate-900">{sess.subjectName}</span>
+                          <span>·</span>
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-lg border border-blue-200 font-mono-numbers"
+                          >
+                            <span className="text-[11px] font-bold text-slate-600">Hora inicio:</span>
+                            <input
+                              type="time"
+                              value={effectiveStart}
+                              onChange={(e) => {
+                                if (!e.target.value) return;
+                                handleChangeTopicSessionStartTime(
+                                  sess.subjectId,
+                                  sess.topicId,
+                                  selectedDayStr,
+                                  e.target.value,
+                                  sess.durationHours
+                                );
+                              }}
+                              className="font-bold text-blue-700 bg-transparent focus:outline-none cursor-pointer"
+                            />
+                            <span className="text-slate-600">
+                              → Fin auto: <strong className="text-blue-700">{effectiveEnd}</strong> ({sess.durationHours}h)
+                            </span>
+                          </div>
                         </div>
+                        <h5 className="text-base font-bold text-slate-900 pl-6">
+                          {sess.topicTitle}
+                        </h5>
+                        {sess.pagesAllocation && (
+                          <div className="inline-flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg font-medium mt-1 ml-6">
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Guía de lectura: {sess.pagesAllocation}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {onStartPomodoro && (
+                        <button
+                          type="button"
+                          onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors whitespace-nowrap self-start sm:self-center cursor-pointer"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          <span>Iniciar Pomodoro</span>
+                        </button>
                       )}
                     </div>
-
-                    {onStartPomodoro && (
-                      <button
-                        type="button"
-                        onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors whitespace-nowrap self-start sm:self-center cursor-pointer"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        <span>Iniciar Pomodoro</span>
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -6441,6 +6968,319 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 >
                   <RotateCw className="w-3.5 h-3.5" />
                   <span>Guardar y Recalcular Temas y Repasos</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: AÑADIR TEMA DE ESTUDIO EN HUECO LIBRE A ELECCIÓN DEL USUARIO */}
+      {showAddTopicSlotModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl max-w-lg w-full overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <BookOpen className="w-5 h-5" />
+                <div>
+                  <h3 className="text-sm font-extrabold">
+                    Añadir Tema en Hueco Libre
+                  </h3>
+                  <p className="text-[11px] text-blue-100">
+                    Rellena un hueco del día con el tema que tú elijas; la hora de fin se calcula sola
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddTopicSlotModal(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmAddExtraTopicToDay} className="p-6 space-y-4">
+              <div className="flex items-center justify-between gap-2 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl p-3">
+                <div className="text-xs text-blue-900 dark:text-blue-200">
+                  <span className="font-bold block">¿Quieres avanzar el siguiente tema pendiente?</span>
+                  <span className="text-[11px] text-blue-700 dark:text-blue-300">
+                    La app puede preseleccionarte el próximo tema sin estudiar o puedes elegir cualquiera.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSuggestNextPendingTopicForSlot}
+                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold shrink-0 inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Wand2 className="w-3.5 h-3.5" />
+                  <span>Sugerir siguiente</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Día del Calendario
+                  </label>
+                  <input
+                    type="date"
+                    value={extraTopicDate}
+                    onChange={(e) => setExtraTopicDate(e.target.value)}
+                    className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    Hora de Inicio (Fin automático)
+                  </label>
+                  <input
+                    type="time"
+                    value={extraTopicStartTime}
+                    onChange={(e) => setExtraTopicStartTime(e.target.value)}
+                    className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 font-mono-numbers font-bold text-blue-700 dark:text-blue-300"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Materia
+                </label>
+                <select
+                  value={extraTopicSubjectId}
+                  onChange={(e) => {
+                    const nextSubId = e.target.value;
+                    setExtraTopicSubjectId(nextSubId);
+                    const subObj = subjects.find((s) => s.id === nextSubId);
+                    if (subObj && subObj.topics.length > 0) {
+                      const firstPending =
+                        subObj.topics.find((t) => !t.studiedAt && t.status !== 'estudiado') ||
+                        subObj.topics[0];
+                      setExtraTopicId(firstPending.id);
+                      setExtraTopicPagesCount(
+                        getDefaultPagesForTopic(firstPending, extraTopicDate)
+                      );
+                    }
+                  }}
+                  className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100"
+                >
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Tema que quieres estudiar en este hueco
+                </label>
+                <select
+                  value={extraTopicId}
+                  onChange={(e) => {
+                    const nextTopicId = e.target.value;
+                    setExtraTopicId(nextTopicId);
+                    const subObj = subjects.find((s) => s.id === extraTopicSubjectId);
+                    const topObj = subObj?.topics.find((t) => t.id === nextTopicId);
+                    if (topObj) {
+                      setExtraTopicPagesCount(
+                        getDefaultPagesForTopic(topObj, extraTopicDate)
+                      );
+                    }
+                  }}
+                  className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100"
+                >
+                  {(
+                    subjects.find((s) => s.id === extraTopicSubjectId)?.topics || []
+                  ).map((t) => {
+                    const attachedP = (t.attachedFiles || []).reduce(
+                      (sum, f) =>
+                        sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
+                      0
+                    );
+                    const totalP = Math.max(t.pageCount || 0, t.paginasTotales || 0, attachedP);
+                    const readP = Math.max(0, t.pagesRead || 0);
+                    return (
+                      <option key={t.id} value={t.id}>
+                        {t.title} (
+                        {totalP > 0
+                          ? `${readP}/${totalP} págs leídas`
+                          : `${t.estimatedHours || 1.5}h est.`}
+                        )
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {(() => {
+                const chosenSub = subjects.find((s) => s.id === extraTopicSubjectId);
+                const chosenTopic = chosenSub?.topics.find((t) => t.id === extraTopicId);
+                const attachedP = (chosenTopic?.attachedFiles || []).reduce(
+                  (sum, f) =>
+                    sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
+                  0
+                );
+                const minsPerPage = getTopicMinutesPerPage(chosenTopic);
+                const fallbackTotalPages = chosenTopic
+                  ? Math.max(
+                      1,
+                      Math.round(((chosenTopic.estimatedHours || 1.5) * 60) / minsPerPage)
+                    )
+                  : 10;
+                const totalTopicPages = Math.max(
+                  chosenTopic?.pageCount || 0,
+                  chosenTopic?.paginasTotales || 0,
+                  attachedP,
+                  fallbackTotalPages
+                );
+                const readPages = Math.max(0, chosenTopic?.pagesRead || 0);
+                const remainingPages = Math.max(1, totalTopicPages - readPages);
+                const sliderMax = Math.max(15, remainingPages, extraTopicPagesCount);
+
+                const safePages = Math.max(1, Math.round(extraTopicPagesCount || 1));
+                const durationMins = Math.max(5, Math.round(safePages * minsPerPage));
+                const durationHoursRounded = Math.round((durationMins / 60) * 100) / 100;
+                const autoEnd = calculateAutoEndTimeFromMinutes(
+                  extraTopicStartTime || '17:00',
+                  durationMins
+                );
+                const startPageNum = Math.min(totalTopicPages, readPages + 1);
+                const endPageNum = startPageNum + safePages - 1;
+
+                return (
+                  <div className="space-y-3">
+                    {/* Selector interactivo de Número de Páginas a Estudiar */}
+                    <div className="p-3.5 rounded-xl bg-blue-50/60 dark:bg-slate-800/80 border border-blue-200/80 dark:border-slate-700 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-xs font-extrabold text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                          <FileText className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Número de páginas que quieres estudiar:</span>
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExtraTopicPagesCount((prev) => Math.max(1, (prev || 1) - 1))
+                            }
+                            className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-bold text-xs text-slate-700 dark:text-slate-200 hover:bg-blue-100 cursor-pointer"
+                          >
+                            -
+                          </button>
+                          <input
+                            type="number"
+                            min={1}
+                            max={200}
+                            value={extraTopicPagesCount}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              setExtraTopicPagesCount(
+                                Number.isFinite(val) && val > 0 ? val : 1
+                              );
+                            }}
+                            className="w-16 text-center text-xs font-mono-numbers font-black bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-700 rounded-lg py-1 text-blue-700 dark:text-blue-300 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExtraTopicPagesCount((prev) => (prev || 1) + 1)
+                            }
+                            className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-bold text-xs text-slate-700 dark:text-slate-200 hover:bg-blue-100 cursor-pointer"
+                          >
+                            +
+                          </button>
+                          <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 ml-0.5">
+                            págs.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Barra deslizante + Botones rápidos de páginas */}
+                      <input
+                        type="range"
+                        min={1}
+                        max={sliderMax}
+                        value={safePages}
+                        onChange={(e) =>
+                          setExtraTopicPagesCount(parseInt(e.target.value, 10) || 1)
+                        }
+                        className="w-full accent-blue-600 cursor-pointer h-1.5 bg-blue-200 rounded-lg"
+                      />
+
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1">
+                          {[2, 4, 6, 8, 10].map((presetP) => (
+                            <button
+                              key={presetP}
+                              type="button"
+                              onClick={() => setExtraTopicPagesCount(presetP)}
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-mono-numbers font-bold transition-colors cursor-pointer ${
+                                safePages === presetP
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-white dark:bg-slate-900 border border-blue-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-blue-100'
+                              }`}
+                            >
+                              {presetP} págs
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => setExtraTopicPagesCount(remainingPages)}
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-bold transition-colors cursor-pointer ${
+                              safePages === remainingPages
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100'
+                            }`}
+                          >
+                            Restantes ({remainingPages} págs)
+                          </button>
+                        </div>
+
+                        <span className="text-[10px] font-mono-numbers text-slate-500 dark:text-slate-400">
+                          Ritmo: {minsPerPage} min/pág ({chosenTopic?.difficulty || 'Media'})
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Resumen en Vivo de Hora de Inicio y Hora de Fin según el Número de Páginas Escogido */}
+                    <div className="p-3.5 rounded-xl bg-gradient-to-r from-blue-600/10 via-indigo-600/10 to-blue-600/5 border border-blue-300 dark:border-blue-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="space-y-0.5">
+                        <span className="text-slate-700 dark:text-slate-200 font-bold block">
+                          Tiempo de fin según {safePages}{' '}
+                          {safePages === 1 ? 'página escogida' : 'páginas escogidas'} (Págs.{' '}
+                          {startPageNum}–{endPageNum}):
+                        </span>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                          Duración estimada: <strong>{durationMins} min</strong> ({durationHoursRounded}h)
+                        </span>
+                      </div>
+                      <div className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-700 font-mono-numbers font-black text-sm text-blue-700 dark:text-blue-300 shrink-0 text-center shadow-2xs">
+                        {extraTopicStartTime || '17:00'} → {autoEnd}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddTopicSlotModal(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold rounded-xl shadow-xs inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Añadir Tema ({extraTopicPagesCount} págs.)</span>
                 </button>
               </div>
             </form>

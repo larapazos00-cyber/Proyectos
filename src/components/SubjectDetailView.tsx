@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   BookOpen,
   Calendar,
@@ -39,6 +39,8 @@ import {
   SlidersHorizontal,
   Paperclip,
   GitBranch,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import {
   Subject,
@@ -303,7 +305,9 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [editName, setEditName] = useState(subject.name);
   const [editCode, setEditCode] = useState(subject.code || '');
   const [editColor, setEditColor] = useState(subject.color || '#3b82f6');
-  const [editCredits, setEditCredits] = useState(subject.credits !== undefined ? String(subject.credits) : '6');
+  const [editCredits, setEditCredits] = useState(
+    subject.credits !== undefined && subject.credits > 0 ? String(subject.credits) : ''
+  );
   const [editProf, setEditProf] = useState(subject.professor || '');
   const [editProfessorsList, setEditProfessorsList] = useState<string[]>(() => {
     if (subject.professors && subject.professors.length > 0) return subject.professors;
@@ -674,6 +678,219 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
       topics: updatedTopics,
       cornellNotes: updatedNotes,
     });
+  };
+
+  // ==========================================
+  // NOTAS DE VOZ RÁPIDAS (WEB SPEECH API -> TEXTO EN NOTAS GENERALES DEL TEMA)
+  // ==========================================
+  const [voiceRecordingTopicId, setVoiceRecordingTopicId] = useState<string | null>(null);
+  const [voiceFinalTranscript, setVoiceFinalTranscript] = useState<string>('');
+  const [voiceInterimTranscript, setVoiceInterimTranscript] = useState<string>('');
+  const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState<number>(0);
+  const [voiceNoticeByTopic, setVoiceNoticeByTopic] = useState<Record<string, string>>({});
+  const [voiceErrorByTopic, setVoiceErrorByTopic] = useState<Record<string, string>>({});
+  const [expandedGeneralNotesByTopic, setExpandedGeneralNotesByTopic] = useState<
+    Record<string, boolean>
+  >({});
+
+  const speechRecognitionRef = useRef<any>(null);
+  const voiceTimerRef = useRef<number | null>(null);
+  const accumulatedTranscriptRef = useRef<string>('');
+  const activeVoiceTopicRef = useRef<Topic | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {}
+      }
+      if (voiceTimerRef.current) {
+        window.clearInterval(voiceTimerRef.current);
+      }
+    };
+  }, []);
+
+  const appendTranscribedVoiceToTopic = (targetTopic: Topic, rawTranscript: string) => {
+    const cleaned = rawTranscript.trim();
+    if (!cleaned) return;
+
+    const latestTopic = subject.topics.find((t) => t.id === targetTopic.id) || targetTopic;
+    const timestamp = new Date().toLocaleTimeString('es-ES', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const voiceEntry = `🎙️ [Nota de voz · ${timestamp}]: ${cleaned}`;
+    const existingNotes = (latestTopic.generalNotes || latestTopic.notes || '').trim();
+    const updatedNotesText = existingNotes
+      ? `${existingNotes}\n\n${voiceEntry}`
+      : voiceEntry;
+
+    const nextRichGeneral = convertMarkdownAndImagesToRichHtml(
+      updatedNotesText,
+      latestTopic.generalImages || []
+    );
+
+    handleSaveTopicNotes(
+      latestTopic.id,
+      updatedNotesText,
+      latestTopic.cues || [],
+      latestTopic.summary || '',
+      latestTopic.attachedFiles,
+      latestTopic.pageCount,
+      nextRichGeneral,
+      latestTopic.generalImages,
+      latestTopic.generalComments,
+      latestTopic.keyPoints
+    );
+
+    setExpandedGeneralNotesByTopic((prev) => ({
+      ...prev,
+      [latestTopic.id]: true,
+    }));
+    setVoiceNoticeByTopic((prev) => ({
+      ...prev,
+      [latestTopic.id]: 'Nota de voz convertida a texto y guardada automáticamente en las notas generales del tema.',
+    }));
+    window.setTimeout(() => {
+      setVoiceNoticeByTopic((prev) => {
+        const copy = { ...prev };
+        delete copy[latestTopic.id];
+        return copy;
+      });
+    }, 5000);
+  };
+
+  const stopVoiceNoteRecording = (saveTranscript = true) => {
+    if (voiceTimerRef.current) {
+      window.clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.onend = null;
+        speechRecognitionRef.current.stop();
+      } catch {}
+      speechRecognitionRef.current = null;
+    }
+
+    const fullText = `${accumulatedTranscriptRef.current} ${voiceInterimTranscript}`.trim();
+    const targetTopic = activeVoiceTopicRef.current;
+
+    if (saveTranscript && targetTopic && fullText) {
+      appendTranscribedVoiceToTopic(targetTopic, fullText);
+    }
+
+    setVoiceRecordingTopicId(null);
+    setVoiceFinalTranscript('');
+    setVoiceInterimTranscript('');
+    setVoiceRecordingSeconds(0);
+    accumulatedTranscriptRef.current = '';
+    activeVoiceTopicRef.current = null;
+  };
+
+  const handleToggleVoiceNoteForTopic = (topic: Topic) => {
+    // Si ya está grabando en este tema, detener y guardar automáticamente
+    if (voiceRecordingTopicId === topic.id) {
+      stopVoiceNoteRecording(true);
+      return;
+    }
+
+    // Si estaba grabando en otro tema, guardar el anterior primero
+    if (voiceRecordingTopicId) {
+      stopVoiceNoteRecording(true);
+    }
+
+    setVoiceErrorByTopic((prev) => {
+      const next = { ...prev };
+      delete next[topic.id];
+      return next;
+    });
+
+    const SpeechRecognitionAPI =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    activeVoiceTopicRef.current = topic;
+    accumulatedTranscriptRef.current = '';
+    setVoiceFinalTranscript('');
+    setVoiceInterimTranscript('');
+    setVoiceRecordingSeconds(0);
+    setVoiceRecordingTopicId(topic.id);
+    setExpandedGeneralNotesByTopic((prev) => ({ ...prev, [topic.id]: true }));
+
+    voiceTimerRef.current = window.setInterval(() => {
+      setVoiceRecordingSeconds((s) => s + 1);
+    }, 1000);
+
+    if (!SpeechRecognitionAPI) {
+      setVoiceErrorByTopic((prev) => ({
+        ...prev,
+        [topic.id]:
+          'Tu navegador no soporta reconocimiento de voz directo (prueba Chrome o Edge), o escribe tu nota rápida abajo para guardarla al instante.',
+      }));
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionAPI();
+      recognition.lang = 'es-ES';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      recognition.onresult = (event: any) => {
+        let finalChunk = '';
+        let interimChunk = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcriptPiece = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalChunk += transcriptPiece + ' ';
+          } else {
+            interimChunk += transcriptPiece;
+          }
+        }
+        if (finalChunk) {
+          accumulatedTranscriptRef.current =
+            `${accumulatedTranscriptRef.current} ${finalChunk}`.trim();
+          setVoiceFinalTranscript(accumulatedTranscriptRef.current);
+        }
+        setVoiceInterimTranscript(interimChunk);
+      };
+
+      recognition.onerror = (event: any) => {
+        const errCode = event?.error || '';
+        if (errCode === 'no-speech') return;
+        if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
+          setVoiceErrorByTopic((prev) => ({
+            ...prev,
+            [topic.id]:
+              'Permiso de micrófono denegado en el navegador. Permite el acceso al micrófono o dicta/escribe en el cuadro inferior.',
+          }));
+        } else {
+          setVoiceErrorByTopic((prev) => ({
+            ...prev,
+            [topic.id]: `Aviso de audio (${errCode}). Puedes seguir dictando o pulsar Guardar.`,
+          }));
+        }
+      };
+
+      recognition.onend = () => {
+        // Si el usuario no ha detenido manualmente la grabación, guardar lo dictado automáticamente
+        if (activeVoiceTopicRef.current?.id === topic.id) {
+          stopVoiceNoteRecording(true);
+        }
+      };
+
+      speechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch (err: any) {
+      setVoiceErrorByTopic((prev) => ({
+        ...prev,
+        [topic.id]:
+          err?.message ||
+          'No se pudo iniciar el micrófono. Escribe o edita tu nota rápida en el panel abierto.',
+      }));
+    }
   };
 
   // Resuelve todo el contenido de texto de un tema (apuntes, documentos adjuntos, notas Cornell, descripción y subtemas)
@@ -1184,14 +1401,34 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           };
         }
         if (newStatus === 'pendiente') {
-          return { ...t, status: newStatus, pagesRead: 0 };
-        }
-        if (newStatus === 'en_progreso') {
-          const halfPages = Math.max(1, Math.round(pageInfo.totalPages * 0.25));
           return {
             ...t,
             status: newStatus,
-            pagesRead: t.pagesRead && t.pagesRead > 0 && t.pagesRead < pageInfo.totalPages ? t.pagesRead : halfPages,
+            pagesRead: 0,
+            studiedAt: undefined,
+            nextReviewDate: undefined,
+            reviewLevel: 0,
+          };
+        }
+        if (newStatus === 'en_progreso') {
+          const halfPages = Math.max(1, Math.round(pageInfo.totalPages * 0.25));
+          const readCount =
+            t.pagesRead && t.pagesRead > 0 && t.pagesRead < pageInfo.totalPages
+              ? t.pagesRead
+              : halfPages;
+          const calcPartial = schedulerService.getNextSpacedReview(0, 'bien', {
+            baseDateStr: t.studiedAt || todayStr,
+            studiedPages: readCount,
+            totalPages: pageInfo.totalPages,
+            difficulty: t.difficulty,
+          });
+          return {
+            ...t,
+            status: newStatus,
+            pagesRead: readCount,
+            studiedAt: t.studiedAt || todayStr,
+            reviewLevel: Math.max(1, t.reviewLevel || 1),
+            nextReviewDate: t.nextReviewDate || calcPartial.nextDate,
           };
         }
         return { ...t, status: newStatus };
@@ -1205,7 +1442,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     });
   };
 
-  // Marcar páginas leídas de un tema e integrarlo automáticamente en el estado y avance académico
+  // Marcar páginas leídas de un tema e integrarlo automáticamente en el estado y en la creación de repasos espaciados (1, 3, 7, 15, 30 días)
   const handleMarkTopicPagesRead = (
     topicId: string,
     newPagesRead: number,
@@ -1231,7 +1468,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         preferences
       );
 
-      // Si se completan todas las páginas del tema -> marcar como estudiado y programar repaso si no estaba estudiado
+      // Si se completan todas las páginas del tema -> marcar como estudiado y programar repaso espaciado (1, 3, 7, 15, 30d)
       if (effectiveTotal > 0 && clampedRead >= effectiveTotal) {
         if (t.status !== 'estudiado' && t.status !== 'repasado') {
           const topicErrors = subject.errorLogs.filter(
@@ -1289,8 +1526,14 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         };
       }
 
-      // Si hay páginas leídas parciales (> 0 y < total) -> estado 'en_progreso'
+      // Si hay páginas leídas parciales (> 0 y < total) -> estado 'en_progreso' Y crear/activar sus repasos espaciados (1, 3, 7, 15, 30d) para esas páginas leídas
       if (clampedRead > 0) {
+        const calcPartial = schedulerService.getNextSpacedReview(0, 'bien', {
+          baseDateStr: t.studiedAt || todayStr,
+          studiedPages: clampedRead,
+          totalPages: effectiveTotal,
+          difficulty: t.difficulty,
+        });
         return {
           ...t,
           pageCount: effectiveTotal,
@@ -1298,10 +1541,17 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           pagesRead: clampedRead,
           estimatedHours: recalculatedHours,
           status: 'en_progreso' as const,
+          studiedAt: t.studiedAt || todayStr,
+          reviewLevel: Math.max(1, t.reviewLevel || 1),
+          nextReviewDate: t.nextReviewDate || calcPartial.nextDate,
+          lastIntervalDays: t.lastIntervalDays || calcPartial.adjustedIntervalDays,
+          lastAdjustmentReason:
+            t.lastAdjustmentReason ||
+            `Repaso espaciado activado para ${clampedRead}/${effectiveTotal} págs. leídas`,
         };
       }
 
-      // Si se marca 0 páginas leídas -> estado 'pendiente'
+      // Si se marca 0 páginas leídas -> estado 'pendiente' y sin repasos espaciados
       return {
         ...t,
         pageCount: effectiveTotal,
@@ -1309,6 +1559,9 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         pagesRead: 0,
         estimatedHours: recalculatedHours,
         status: 'pendiente' as const,
+        studiedAt: undefined,
+        nextReviewDate: undefined,
+        reviewLevel: 0,
       };
     });
 
@@ -2135,15 +2388,25 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                       setEditName(subject.name);
                       setEditCode(subject.code || '');
                       setEditColor(subject.color || '#3b82f6');
-                      setEditCredits(subject.credits !== undefined ? String(subject.credits) : '6');
+                      setEditCredits(
+                        subject.credits !== undefined && subject.credits > 0
+                          ? String(subject.credits)
+                          : ''
+                      );
                       setEditProf(subject.professor || '');
                       setEditProfessorsList(allProfessors);
                       setShowEditSubjectModal(true);
                     }}
                     className="font-mono-numbers text-slate-700 hover:text-blue-700 font-semibold cursor-pointer inline-flex items-center gap-1.5 bg-slate-100 hover:bg-blue-50 px-2.5 py-0.5 rounded-md transition-colors"
-                    title="Editar créditos ECTS, docentes, color o datos de la asignatura"
+                    title="Editar créditos ECTS (opcional), docentes, color o datos de la asignatura"
                   >
-                    <span>{subject.credits !== undefined ? `${subject.credits} ECTS` : '6 ECTS'}</span>
+                    {subject.credits !== undefined && subject.credits > 0 ? (
+                      <span>{subject.credits} ECTS</span>
+                    ) : (
+                      <span className="font-sans text-slate-400 font-normal">
+                        + Créditos (opcional)
+                      </span>
+                    )}
                     {allProfessors.length > 0 && (
                       <>
                         <span className="text-slate-300 font-sans">·</span>
@@ -2792,10 +3055,16 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           },
         ];
 
+        const isSidebarNav = preferences?.navigationPosition === 'sidebar';
+
         return (
           <div className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
             {/* Fila 1: 6 Tarjetas Visuales Principales */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+            <div
+              className={`grid grid-cols-2 sm:grid-cols-3 ${
+                isSidebarNav ? 'xl:grid-cols-6' : 'lg:grid-cols-6'
+              } gap-2.5`}
+            >
               {coreVisualTabs.map((tab) => {
                 const IconComponent = tab.icon;
                 const isActive = activeTab === tab.id;
@@ -2871,7 +3140,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             </div>
 
             {/* Fila 2: 4 Accesos Visuales Complementarios (Tareas, Calificaciones, Proyectos, Mapas Mentales) */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 pt-1 border-t border-slate-100">
+            <div
+              className={`grid grid-cols-2 ${
+                isSidebarNav ? 'xl:grid-cols-4' : 'lg:grid-cols-4'
+              } gap-2 pt-1 border-t border-slate-100`}
+            >
               {secondaryVisualTabs.map((tab) => {
                 const IconComponent = tab.icon;
                 const isActive = activeTab === tab.id;
@@ -2932,6 +3205,17 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           if (topicPrintedFilter === 'digital') return !isPr;
           return true;
         });
+
+        const subjectDailyPlan = schedulerService.calculateSubjectDailyPageStudyPlan(
+          subject,
+          preferences
+        );
+        const pendingPlanItems = Object.values(subjectDailyPlan.topicPlans).filter(
+          (tp) => tp.remainingPages > 0
+        );
+        const activeSpacedPlanItems = Object.values(subjectDailyPlan.topicPlans).filter(
+          (tp) => tp.hasSpacedRepetition
+        );
 
         return (
         <div className="space-y-4">
@@ -3017,6 +3301,159 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Panel de Plan Diario de Páginas por Tema y Repasos Espaciados (1, 3, 7, 15, 30d) dentro de la Materia */}
+          {subject.topics.length > 0 && (
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-blue-50/80 via-white to-indigo-50/60 border border-blue-200/80 shadow-2xs space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                    <Calendar className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                      Plan Diario de Páginas a Estudiar y Repasos Espaciados (1, 3, 7, 15, 30d)
+                    </h4>
+                    <p className="text-[11px] text-slate-600">
+                      {subjectDailyPlan.remainingPages > 0 ? (
+                        <>
+                          Necesitas estudiar{' '}
+                          <strong className="text-blue-700 font-mono-numbers">
+                            {subjectDailyPlan.globalPagesPerDayNeeded} págs/día
+                          </strong>{' '}
+                          ({subjectDailyPlan.remainingPages} págs restantes en{' '}
+                          {subjectDailyPlan.availableStudyDaysToExam} días de estudio disponibles)
+                          {subjectDailyPlan.nextExam
+                            ? ` para llegar a tiempo a ${subjectDailyPlan.nextExam.title} (${subjectDailyPlan.nextExam.date})`
+                            : ' para completar el temario y entregas a tiempo'}
+                          .
+                        </>
+                      ) : (
+                        <span className="text-emerald-700 font-semibold">
+                          ¡Has completado la lectura de todas las páginas de esta materia! Todos los temas tienen su curva de repaso activa.
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-[11px] font-mono-numbers">
+                  <span className="px-2.5 py-1 rounded-xl bg-blue-100/80 text-blue-800 font-bold border border-blue-200">
+                    📖 Meta: {subjectDailyPlan.globalPagesPerDayNeeded} págs/día
+                  </span>
+                  <span className="px-2.5 py-1 rounded-xl bg-indigo-100/80 text-indigo-800 font-bold border border-indigo-200">
+                    🧠 Repasos 1-3-7 activos: {activeSpacedPlanItems.length}/{subject.topics.length} temas
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 pt-1">
+                {/* Columna 1: Qué páginas estudiar cada día para llegar al examen o tarea */}
+                <div className="p-3 rounded-xl bg-white border border-slate-200/80 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-blue-900 flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Páginas a estudiar por día (para Examen y Tareas)</span>
+                    </span>
+                    <span className="text-[10px] font-mono-numbers text-slate-500">
+                      {pendingPlanItems.length} tema(s) por leer
+                    </span>
+                  </div>
+
+                  {pendingPlanItems.length === 0 ? (
+                    <div className="text-[11px] text-emerald-700 bg-emerald-50/70 p-2 rounded-lg border border-emerald-200">
+                      ✓ Todas las páginas del temario están leídas.
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {pendingPlanItems.map((tp) => (
+                        <div
+                          key={tp.topicId}
+                          className="p-2 rounded-lg bg-slate-50/90 border border-slate-200/70 text-[11px] flex flex-col gap-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800 truncate">
+                              {tp.topicTitle}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-blue-600 text-white font-mono-numbers font-bold text-[10px] shrink-0">
+                              {tp.pagesPerDayNeeded} págs/día
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] text-slate-600">
+                            <span>
+                              Restan <strong>{tp.remainingPages} págs</strong> (de {tp.totalPages}p) ·{' '}
+                              <span className="text-indigo-700 font-semibold">{tp.deadlineLabel}</span>
+                            </span>
+                            {tp.dailySessions.length > 0 && (
+                              <span className="font-mono-numbers font-semibold text-blue-700">
+                                Próx: {tp.dailySessions[0].date} (Págs. {tp.dailySessions[0].startPage}–{tp.dailySessions[0].endPage})
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Columna 2: Repasos Espaciados (1, 3, 7, 15, 30d) SOLO de temas o páginas marcadas como estudiadas/leídas */}
+                <div className="p-3 rounded-xl bg-white border border-slate-200/80 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-indigo-900 flex items-center gap-1.5">
+                      <RotateCw className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Repasos Espaciados (1, 3, 7, 15, 30d · Solo lo estudiado/leído)</span>
+                    </span>
+                    <span className="text-[10px] font-mono-numbers text-slate-500">
+                      {activeSpacedPlanItems.length} activo(s)
+                    </span>
+                  </div>
+
+                  {activeSpacedPlanItems.length === 0 ? (
+                    <div className="text-[11px] text-slate-600 bg-amber-50/70 p-2.5 rounded-lg border border-amber-200 leading-relaxed">
+                      Aún no hay temas ni páginas marcadas como estudiadas/leídas en esta materia.{' '}
+                      <strong>
+                        Cuando marques páginas como leídas (+1p, +5p) o un tema como «Estudiado», se crearán automáticamente sus repasos espaciados (1, 3, 7, 15 y 30 días).
+                      </strong>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {activeSpacedPlanItems.map((tp) => (
+                        <div
+                          key={tp.topicId}
+                          className="p-2 rounded-lg bg-indigo-50/40 border border-indigo-200/70 text-[11px] space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-800 truncate">
+                              {tp.topicTitle}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono-numbers font-bold text-[10px] shrink-0">
+                              {tp.studiedPages}/{tp.totalPages} págs. leídas
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1 font-mono-numbers text-[10px]">
+                            {tp.spacedRepetitionSchedule.map((ms) => (
+                              <span
+                                key={ms.level}
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  ms.status === 'completed'
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                    : ms.status === 'due_today' || ms.status === 'overdue'
+                                    ? 'bg-rose-50 border-rose-300 text-rose-800 font-bold'
+                                    : 'bg-white border-indigo-200 text-indigo-700'
+                                }`}
+                              >
+                                {ms.label}: {ms.date.slice(5)}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Add Topic Form */}
           {showAddTopic && (
@@ -4321,84 +4758,135 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         );
                       })()}
 
-                      {/* Tira Compacta de Repaso Espaciado (cuando el tema tiene curva activa) */}
+                      {/* Plan Diario de Páginas de este Tema + Tira de Repaso Espaciado (1, 3, 7, 15, 30d SOLO si tiene páginas leídas o está estudiado) */}
                       {(() => {
+                        const topicPlan = subjectDailyPlan.topicPlans[topic.id];
                         const curveScheduleLabels: Record<number, string> = {
-                          1: 'R1 · 24h',
+                          1: 'R1 · 1d',
                           2: 'R2 · 3d',
                           3: 'R3 · 7d',
                           4: 'R4 · 15d',
                           5: 'R5 · 30d',
                         };
                         const currentLv = Math.min(5, Math.max(1, topic.reviewLevel || 1));
-                        const pageStats = schedulerService.getTopicStudiedPages(topic);
-                        if (
-                          !topic.nextReviewDate &&
-                          topic.status !== 'estudiado' &&
-                          topic.status !== 'repasado' &&
-                          pageStats.studiedPages === 0
-                        ) {
-                          return null;
-                        }
-                        return (
-                          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-slate-600">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <button
-                                type="button"
-                                onClick={() => setManualScheduleTopic(topic)}
-                                className="inline-flex items-center gap-1.5 font-semibold text-amber-800 hover:underline cursor-pointer"
-                              >
-                                <RotateCw className="w-3 h-3 text-amber-600" />
-                                <span>
-                                  Curva {curveScheduleLabels[currentLv]}
-                                  {topic.nextReviewDate ? ` → ${topic.nextReviewDate}` : ''}
-                                </span>
-                              </button>
-                              {topic.perceivedRetentionPct !== undefined && (
-                                <>
-                                  <span>·</span>
-                                  <span className="font-mono-numbers font-bold text-emerald-700">
-                                    Retención {topic.perceivedRetentionPct}%
-                                  </span>
-                                </>
-                              )}
-                            </div>
 
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setManualScheduleTopic(topic)}
-                                className="text-[10px] font-bold text-blue-700 hover:underline cursor-pointer"
-                              >
-                                Ajustar fecha
-                              </button>
-                              <span>·</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleAdjustTopicReviewByRetention(
-                                    topic.id,
-                                    'adelantar_baja_retencion'
-                                  )
-                                }
-                                className="text-[10px] font-semibold text-amber-700 hover:underline cursor-pointer"
-                              >
-                                Adelantar
-                              </button>
-                              <span>·</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleAdjustTopicReviewByRetention(
-                                    topic.id,
-                                    'espaciar_alta_retencion'
-                                  )
-                                }
-                                className="text-[10px] font-semibold text-emerald-700 hover:underline cursor-pointer"
-                              >
-                                Espaciar
-                              </button>
-                            </div>
+                        return (
+                          <div className="space-y-2 pt-1">
+                            {/* 1. Meta Diaria de Páginas para llegar a tiempo al Examen o Tarea */}
+                            {topicPlan && topicPlan.remainingPages > 0 && (
+                              <div className="p-2.5 rounded-xl bg-blue-50/70 border border-blue-200/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="px-2 py-0.5 rounded-md bg-blue-600 text-white font-mono-numbers font-bold text-[10px]">
+                                    Meta: {topicPlan.pagesPerDayNeeded} págs/día
+                                  </span>
+                                  <span className="text-blue-950 font-semibold">
+                                    Para llegar a tiempo ({topicPlan.deadlineLabel})
+                                  </span>
+                                </div>
+                                {topicPlan.dailySessions.length > 0 && (
+                                  <div className="flex flex-wrap items-center gap-1 font-mono-numbers text-[10px]">
+                                    {topicPlan.dailySessions.slice(0, 3).map((ds, dsIdx) => (
+                                      <span
+                                        key={dsIdx}
+                                        className="px-2 py-0.5 rounded bg-white border border-blue-200 text-blue-800 font-bold"
+                                      >
+                                        📅 {ds.date.slice(5)}: Págs. {ds.startPage}–{ds.endPage} ({ds.pagesCount}p)
+                                      </span>
+                                    ))}
+                                    {topicPlan.dailySessions.length > 3 && (
+                                      <span className="text-blue-700 font-bold">
+                                        +{topicPlan.dailySessions.length - 3} día(s)
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 2. Repasos Espaciados (1, 3, 7, 15, 30d): SOLO activos cuando se marcan páginas leídas o tema estudiado */}
+                            {topicPlan && topicPlan.hasSpacedRepetition ? (
+                              <div className="p-2.5 rounded-xl bg-indigo-50/50 border border-indigo-200/80 space-y-1.5 text-[11px]">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <button
+                                      type="button"
+                                      onClick={() => setManualScheduleTopic(topic)}
+                                      className="inline-flex items-center gap-1.5 font-bold text-indigo-900 hover:underline cursor-pointer"
+                                    >
+                                      <RotateCw className="w-3 h-3 text-indigo-600" />
+                                      <span>
+                                        Repasos Espaciados ({curveScheduleLabels[currentLv]}) ·{' '}
+                                        {topicPlan.studiedPages}/{topicPlan.totalPages} págs. leídas
+                                      </span>
+                                    </button>
+                                    {topic.perceivedRetentionPct !== undefined && (
+                                      <span className="font-mono-numbers font-bold text-emerald-700">
+                                        · Retención {topic.perceivedRetentionPct}%
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setManualScheduleTopic(topic)}
+                                      className="text-[10px] font-bold text-blue-700 hover:underline cursor-pointer"
+                                    >
+                                      Ajustar fecha
+                                    </button>
+                                    <span>·</span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleAdjustTopicReviewByRetention(
+                                          topic.id,
+                                          'adelantar_baja_retencion'
+                                        )
+                                      }
+                                      className="text-[10px] font-semibold text-amber-700 hover:underline cursor-pointer"
+                                    >
+                                      Adelantar
+                                    </button>
+                                    <span>·</span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleAdjustTopicReviewByRetention(
+                                          topic.id,
+                                          'espaciar_alta_retencion'
+                                        )
+                                      }
+                                      className="text-[10px] font-semibold text-emerald-700 hover:underline cursor-pointer"
+                                    >
+                                      Espaciar
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-1.5 font-mono-numbers text-[10px]">
+                                  {topicPlan.spacedRepetitionSchedule.map((ms) => (
+                                    <span
+                                      key={ms.level}
+                                      className={`px-2 py-0.5 rounded-md border ${
+                                        ms.status === 'completed'
+                                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-bold'
+                                          : ms.status === 'due_today' || ms.status === 'overdue'
+                                          ? 'bg-rose-50 border-rose-300 text-rose-800 font-bold'
+                                          : 'bg-white border-indigo-200 text-indigo-800'
+                                      }`}
+                                    >
+                                      {ms.label}: {ms.date} ({ms.pagesToReview}p)
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="px-3 py-1.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-[11px] text-slate-500 flex items-center justify-between gap-2">
+                                <span>
+                                  ⏳ <strong>Repasos espaciados (1, 3, 7, 15, 30d) en espera:</strong> se activarán automáticamente en cuanto marques páginas leídas (+1p, +5p) o el tema como estudiado.
+                                </span>
+                              </div>
+                            )}
                           </div>
                         );
                       })()}
@@ -4478,6 +4966,158 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                           )}
                         </div>
                       )}
+
+                      {/* Panel de Grabación de Voz en Vivo y Notas Generales del Tema */}
+                      {(voiceRecordingTopicId === topic.id ||
+                        voiceNoticeByTopic[topic.id] ||
+                        voiceErrorByTopic[topic.id] ||
+                        Boolean((topic.generalNotes || topic.notes || '').trim())) && (
+                        <div className="rounded-xl border border-rose-200/80 bg-gradient-to-r from-rose-50/40 via-white to-blue-50/30 p-3.5 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              {voiceRecordingTopicId === topic.id ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-600 text-white text-[11px] font-bold animate-pulse">
+                                  <Mic className="w-3 h-3" />
+                                  <span>
+                                    Escuchando voz ({Math.floor(voiceRecordingSeconds / 60)}:
+                                    {String(voiceRecordingSeconds % 60).padStart(2, '0')})
+                                  </span>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedGeneralNotesByTopic((prev) => ({
+                                      ...prev,
+                                      [topic.id]: !prev[topic.id],
+                                    }))
+                                  }
+                                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-800 hover:text-blue-700 cursor-pointer"
+                                >
+                                  <Mic className="w-3.5 h-3.5 text-rose-600" />
+                                  <span>Notas Generales y de Voz del Tema</span>
+                                  {expandedGeneralNotesByTopic[topic.id] ? (
+                                    <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+                                  ) : (
+                                    <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                                  )}
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {voiceRecordingTopicId === topic.id ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => stopVoiceNoteRecording(true)}
+                                    className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer inline-flex items-center gap-1 shadow-2xs"
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                    <span>Detener y Guardar en Notas</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => stopVoiceNoteRecording(false)}
+                                    className="px-2.5 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                                  >
+                                    Cancelar
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleVoiceNoteForTopic(topic)}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold transition-colors cursor-pointer inline-flex items-center gap-1"
+                                >
+                                  <Mic className="w-3 h-3" />
+                                  <span>+ Dictar otra nota de voz</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Transcripción en tiempo real mientras habla */}
+                          {voiceRecordingTopicId === topic.id && (
+                            <div className="space-y-2">
+                              <textarea
+                                rows={2}
+                                value={
+                                  voiceInterimTranscript
+                                    ? `${voiceFinalTranscript} ${voiceInterimTranscript}`.trim()
+                                    : voiceFinalTranscript
+                                }
+                                onChange={(e) => {
+                                  accumulatedTranscriptRef.current = e.target.value;
+                                  setVoiceFinalTranscript(e.target.value);
+                                  setVoiceInterimTranscript('');
+                                }}
+                                placeholder="Habla ahora al micrófono... Tu voz se está convirtiendo a texto en tiempo real (también puedes retocar el texto aquí antes de guardar)."
+                                className="w-full text-xs p-2.5 rounded-xl bg-white border border-rose-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-500 leading-relaxed"
+                              />
+                              {voiceErrorByTopic[topic.id] && (
+                                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                  {voiceErrorByTopic[topic.id]}
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Aviso de guardado automático */}
+                          {voiceNoticeByTopic[topic.id] && (
+                            <div className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>{voiceNoticeByTopic[topic.id]}</span>
+                            </div>
+                          )}
+
+                          {/* Vista rápida / edición de las Notas Generales almacenadas en el tema */}
+                          {(expandedGeneralNotesByTopic[topic.id] ||
+                            Boolean(voiceNoticeByTopic[topic.id])) &&
+                            Boolean((topic.generalNotes || topic.notes || '').trim()) && (
+                              <div className="space-y-1.5 pt-1 border-t border-slate-200/70">
+                                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                                  <span className="font-semibold text-slate-700">
+                                    Contenido en Notas Generales del Tema:
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedNotesTopic(topic);
+                                      setIsNotesModalOpen(true);
+                                    }}
+                                    className="text-blue-600 hover:underline font-bold cursor-pointer"
+                                  >
+                                    Abrir en Lienzo Completo →
+                                  </button>
+                                </div>
+                                <textarea
+                                  rows={3}
+                                  value={topic.generalNotes || topic.notes || ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    handleSaveTopicNotes(
+                                      topic.id,
+                                      val,
+                                      topic.cues || [],
+                                      topic.summary || '',
+                                      topic.attachedFiles,
+                                      topic.pageCount,
+                                      convertMarkdownAndImagesToRichHtml(
+                                        val,
+                                        topic.generalImages || []
+                                      ),
+                                      topic.generalImages,
+                                      topic.generalComments,
+                                      topic.keyPoints
+                                    );
+                                  }}
+                                  className="w-full text-xs p-2.5 rounded-xl bg-white/90 border border-slate-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500 leading-relaxed resize-y"
+                                />
+                              </div>
+                            )}
+                        </div>
+                      )}
                     </div>
 
                     {/* ZONA 3: BARRA INFERIOR DE HERRAMIENTAS DE ESTUDIO E IA DEL TEMA */}
@@ -4494,6 +5134,30 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         >
                           <FileText className="w-3.5 h-3.5" />
                           <span>Apuntes y PDFs</span>
+                        </button>
+
+                        {/* 1b. Grabar Nota de Voz Rápida (Web Speech API -> Notas Generales) */}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleVoiceNoteForTopic(topic)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer shadow-2xs ${
+                            voiceRecordingTopicId === topic.id
+                              ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-600 animate-pulse'
+                              : 'bg-white hover:bg-rose-50 text-rose-700 border-rose-200'
+                          }`}
+                          title="Grabar nota de voz rápida con el micrófono del navegador y guardarla automáticamente como texto en las notas generales del tema"
+                        >
+                          {voiceRecordingTopicId === topic.id ? (
+                            <>
+                              <MicOff className="w-3.5 h-3.5" />
+                              <span>Detener y Guardar Voz</span>
+                            </>
+                          ) : (
+                            <>
+                              <Mic className="w-3.5 h-3.5 text-rose-600" />
+                              <span>Nota de Voz</span>
+                            </>
+                          )}
                         </button>
 
                         {/* 2. Puntos Clave IA */}
@@ -6316,15 +6980,17 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-700 font-medium mb-1">Número de Créditos (ECTS)</label>
+                <label className="block text-slate-700 font-medium mb-1">
+                  Número de Créditos ECTS <span className="text-slate-400 font-normal">(opcional)</span>
+                </label>
                 <input
                   type="number"
                   step="0.5"
-                  min="0"
+                  min="0.5"
                   max="60"
                   value={editCredits}
                   onChange={(e) => setEditCredits(e.target.value)}
-                  placeholder="Ej: 6"
+                  placeholder="Dejar en blanco o indicar créditos (opcional)"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 font-mono-numbers focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -6398,7 +7064,8 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 type="button"
                 onClick={() => {
                   if (!editName.trim()) return;
-                  const parsedCredits = parseFloat(editCredits);
+                  const parsedCredits =
+                    editCredits.trim() !== '' ? parseFloat(editCredits) : NaN;
                   const validProfs = editProfessorsList.filter(p => p.trim().length > 0);
                   if (newProfInput.trim() && !validProfs.includes(newProfInput.trim())) {
                     validProfs.push(newProfInput.trim());
@@ -6409,7 +7076,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     name: editName.trim(),
                     code: editCode.trim() || undefined,
                     color: editColor,
-                    credits: !isNaN(parsedCredits) && parsedCredits >= 0 ? parsedCredits : undefined,
+                    credits: !isNaN(parsedCredits) && parsedCredits > 0 ? parsedCredits : undefined,
                     professor: validProfs[0] || undefined,
                     professors: validProfs.length > 0 ? validProfs : undefined,
                   });

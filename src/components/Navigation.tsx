@@ -58,6 +58,7 @@ interface NavigationProps {
   enabledTabs?: string[];
   navigationPosition?: 'top' | 'sidebar';
   onToggleNavigationPosition?: () => void;
+  onStartOnboardingTour?: () => void;
 }
 
 export const Navigation: React.FC<NavigationProps> = ({
@@ -77,6 +78,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   enabledTabs,
   navigationPosition = 'top',
   onToggleNavigationPosition,
+  onStartOnboardingTour,
 }) => {
   const [notifGranted, setNotifGranted] = useState(
     () => notificationService.getPermission() === 'granted'
@@ -110,11 +112,12 @@ export const Navigation: React.FC<NavigationProps> = ({
 
   // Reusable Sidebar Content (Used for Desktop Left Sidebar and Mobile Slide-out Drawer)
   const renderSidebarInner = (onClose?: () => void) => (
-    <div className="flex flex-col justify-between h-full space-y-4 select-none">
-      <div className="space-y-4 overflow-y-auto no-scrollbar">
+    <div className="flex flex-col justify-between h-full w-full space-y-4 select-none">
+      <div className="flex-1 min-h-0 space-y-4 overflow-y-auto no-scrollbar">
         {/* Brand + Switch to Top Bar / Close Drawer */}
         <div className="flex items-center justify-between px-1">
           <button
+            type="button"
             onClick={() => {
               onSelectTab('curso');
               onClose?.();
@@ -163,6 +166,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         {/* Active Program & Course Card */}
         <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80 space-y-2">
           <button
+            type="button"
             onClick={() => {
               onOpenProgramManager();
               onClose?.();
@@ -182,6 +186,7 @@ export const Navigation: React.FC<NavigationProps> = ({
           </button>
 
           <button
+            type="button"
             onClick={() => {
               onOpenProgramManager();
               onClose?.();
@@ -215,10 +220,12 @@ export const Navigation: React.FC<NavigationProps> = ({
 
           {visibleTabs.map((tab) => {
             const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
+            const isActive =
+              activeTab === tab.id || (tab.id === 'calendario' && activeTab === 'repaso');
             return (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => {
                   onSelectTab(tab.id);
                   onClose?.();
@@ -394,7 +401,7 @@ export const Navigation: React.FC<NavigationProps> = ({
     return (
       <>
         {/* Desktop Vertical Left Sidebar */}
-        <aside className="hidden md:flex md:w-64 lg:w-68 shrink-0 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex-col justify-between sticky top-0 h-screen z-40 p-4 select-none transition-colors">
+        <aside className="hidden md:flex md:w-64 lg:w-72 shrink-0 self-start bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex-col justify-between sticky top-0 h-screen z-40 p-4 select-none transition-colors">
           {renderSidebarInner()}
         </aside>
 
@@ -414,6 +421,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               </button>
 
               <button
+                type="button"
                 onClick={() => onSelectTab('curso')}
                 className="flex items-center gap-2 text-left focus:outline-none cursor-pointer min-w-0"
               >
@@ -460,6 +468,7 @@ export const Navigation: React.FC<NavigationProps> = ({
               </button>
 
               <button
+                type="button"
                 onClick={onOpenProgramManager}
                 className="px-2.5 py-1.5 text-xs font-semibold text-white bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 rounded-lg transition-all cursor-pointer whitespace-nowrap"
               >
@@ -472,10 +481,12 @@ export const Navigation: React.FC<NavigationProps> = ({
           <div className="flex overflow-x-auto pt-2 gap-1.5 text-xs font-medium no-scrollbar">
             {visibleTabs.map((tab) => {
               const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
+              const isActive =
+                activeTab === tab.id || (tab.id === 'calendario' && activeTab === 'repaso');
               return (
                 <button
                   key={tab.id}
+                  type="button"
                   onClick={() => onSelectTab(tab.id)}
                   className={`whitespace-nowrap py-1 px-2.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer shrink-0 ${
                     isActive
@@ -515,6 +526,10 @@ export const Navigation: React.FC<NavigationProps> = ({
           isOpen={showHelpModal}
           onClose={() => setShowHelpModal(false)}
           onNavigateTab={(tabId) => onSelectTab(tabId as NavTabId)}
+          onOpenPreferences={onOpenPreferences}
+          onOpenProgramManager={onOpenProgramManager}
+          onOpenStreakModal={() => setShowStreakModal(true)}
+          onStartOnboardingTour={onStartOnboardingTour}
         />
       </>
     );
@@ -778,6 +793,10 @@ export const Navigation: React.FC<NavigationProps> = ({
         isOpen={showHelpModal}
         onClose={() => setShowHelpModal(false)}
         onNavigateTab={(tabId) => onSelectTab(tabId as NavTabId)}
+        onOpenPreferences={onOpenPreferences}
+        onOpenProgramManager={onOpenProgramManager}
+        onOpenStreakModal={() => setShowStreakModal(true)}
+        onStartOnboardingTour={onStartOnboardingTour}
       />
     </>
   );

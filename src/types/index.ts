@@ -109,7 +109,8 @@ export interface Topic {
   scheduledDate?: string; // Asignado por el planificador inteligente o arrastrado manualmente
   scheduledTime?: string; // Hora de inicio (HH:mm) asignada o arrastrada manualmente para estudiar el tema
   scheduledEndTime?: string; // Hora de fin (HH:mm) asignada para estudiar el tema
-  studyTimeByDate?: Record<string, string>; // Mapa fecha YYYY-MM-DD -> hora HH:mm para sesiones de estudio arrastradas
+  studyTimeByDate?: Record<string, string>; // Mapa fecha YYYY-MM-DD -> hora HH:mm para cambiar la hora de inicio de sesiones de estudio
+  extraStudySessionsByDate?: Record<string, { startTime: string; pagesCount?: number }>; // Sesiones extra añadidas por el usuario para rellenar huecos libres en un día concreto
   manualScheduledDate?: boolean; // Si fue ubicado manualmente arrastrando en el calendario
   vueltasCount?: number; // Veces que se ha estudiado o repasado este tema (vueltas al temario)
   notes?: string; // Apuntes detallados redactados o importados para este tema
@@ -497,6 +498,8 @@ export interface StudyPreferences {
   availableDays: number[]; // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
   hoursPerDay: Record<number, number>; // Horas disponibles calculadas o manuales por día de la semana
   dailyGoalHours?: number; // Meta diaria de estudio configurada en preferencias (en horas, ej: 3.0)
+  dailyGoalTopics?: number; // Meta diaria de temas completados o repasados (ej: 2 temas/día)
+  dailyGoalMode?: 'hours' | 'topics' | 'both'; // Modo de seguimiento de la meta diaria en la vista General
   // Velocidad de lectura y estudio por página (Factor determinante en la planificación)
   readingSpeedPagesPerHour?: number; // Velocidad de lectura promedio en páginas por hora (ej: 8 págs/hora)
   averageMinutesPerPage?: number; // Minutos promedio de estudio/lectura por página (ej: 7.5 min/pág)

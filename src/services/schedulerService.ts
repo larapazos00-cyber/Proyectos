@@ -1336,35 +1336,45 @@ export const schedulerService = {
       );
 
       const matchedTaskInfo = weeklyTaskMap.get(t.id);
-      let nextReviewDate = t.nextReviewDate;
+      const pInfo = this.getTopicStudiedPages(t, preferences);
+      const isStudiedOrHasReadPages =
+        t.status === 'estudiado' ||
+        t.status === 'repasado' ||
+        pInfo.studiedPages > 0;
+
+      // REGLA ESTRICTA: Los repasos espaciados (1, 3, 7, 15, 30 días) SOLO existen para temas o páginas marcadas como estudiadas/leídas
+      let nextReviewDate = isStudiedOrHasReadPages ? t.nextReviewDate : undefined;
+      let studiedAt = isStudiedOrHasReadPages ? t.studiedAt || todayStr : undefined;
+      let reviewLevel = isStudiedOrHasReadPages ? Math.max(1, t.reviewLevel || 1) : 0;
       let lastAdjustmentReason = t.lastAdjustmentReason;
+
+      if (isStudiedOrHasReadPages && !nextReviewDate) {
+        const customInts = preferences?.spacedRepetitionConfig?.intervals || [1, 3, 7, 15, 30];
+        const firstInt = customInts[Math.min(customInts.length - 1, Math.max(0, reviewLevel - 1))] || 1;
+        const anchorObj = parseLocalDate(studiedAt || todayStr);
+        anchorObj.setDate(anchorObj.getDate() + firstInt);
+        nextReviewDate = toLocalDateStr(anchorObj);
+      }
 
       if (matchedTaskInfo) {
         taskPrioritizedCount++;
-        const pInfo = this.getTopicStudiedPages(t);
-        const isStudiedOrStarted =
-          t.status === 'estudiado' ||
-          t.status === 'repasado' ||
-          t.status === 'en_progreso' ||
-          pInfo.studiedPages > 0 ||
-          Boolean(t.nextReviewDate);
-
-        // Si el tema ya se estudió o está en curso, adelantamos/aseguramos su repaso esta semana antes de la entrega de la tarea
-        if (isStudiedOrStarted) {
+        if (isStudiedOrHasReadPages) {
           if (!nextReviewDate || nextReviewDate > matchedTaskInfo.task.dueDate || nextReviewDate < todayStr) {
             nextReviewDate = matchedTaskInfo.targetDateStr;
           }
-          lastAdjustmentReason = `Priorizado esta semana para tarea "${matchedTaskInfo.task.title}" (entrega ${matchedTaskInfo.task.dueDate})`;
+          lastAdjustmentReason = `Repaso priorizado para tarea "${matchedTaskInfo.task.title}" (entrega ${matchedTaskInfo.task.dueDate})`;
         } else {
-          lastAdjustmentReason = `Estudio y revisión priorizados esta semana por tarea "${matchedTaskInfo.task.title}" (${matchedTaskInfo.task.dueDate})`;
+          lastAdjustmentReason = `Lectura diaria priorizada para llegar a tarea "${matchedTaskInfo.task.title}" (${matchedTaskInfo.task.dueDate})`;
         }
       }
 
       return {
         ...t,
-        pageCount: effPages > 0 ? effPages : t.pageCount,
-        paginasTotales: effPages > 0 ? effPages : t.paginasTotales,
+        pageCount: effPages > 0 ? effPages : pInfo.totalPages,
+        paginasTotales: effPages > 0 ? effPages : pInfo.totalPages,
         estimatedHours: dynamicEstHours,
+        studiedAt,
+        reviewLevel,
         nextReviewDate,
         lastAdjustmentReason,
       };
@@ -1373,110 +1383,145 @@ export const schedulerService = {
     const sessions: ScheduledStudySession[] = [];
     const currentDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 12, 0, 0);
 
-    // Cola de temas pendientes o en progreso, más cualquier tema arrastrado manualmente a un bloque de tiempo
-    const allPendingClones = updatedTopics
-      .filter(
-        (t) =>
-          (t.status !== 'repasado' && t.status !== 'estudiado') ||
-          Boolean(t.manualScheduledDate && t.scheduledDate)
-      )
-      .map((t) => ({
-        ...t,
-        _simulatedHoursSpent: t.actualHoursSpent || 0,
-        _simulatedPagesRead: Math.min(this.getTopicEffectivePages(t), t.pagesRead || 0),
-      }));
+    // Mapear TODAS las tareas pendientes (no solo las de esta semana) para saber qué temas requieren terminarse antes de una entrega
+    const pendingTasks = (tasks || [])
+      .filter((tk) => !tk.completed && tk.dueDate >= todayStr)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
-    // 0. Respetar temas que el usuario ha arrastrado manualmente a una fecha/hora concreta (manualScheduledDate)
-    const manualPinnedTopics = allPendingClones.filter(
-      (t) => t.manualScheduledDate && t.scheduledDate
-    );
-    const pendingTopics = allPendingClones
-      .filter((t) => !(t.manualScheduledDate && t.scheduledDate))
-      .sort((a, b) => {
-        // Priorizar temas necesarios para las tareas de esta semana
-        const taskA = weeklyTaskMap.get(a.id);
-        const taskB = weeklyTaskMap.get(b.id);
-        if (taskA && !taskB) return -1;
-        if (!taskA && taskB) return 1;
-        if (taskA && taskB) {
-          return taskA.task.dueDate.localeCompare(taskB.task.dueDate);
-        }
-        return 0;
-      });
+    const topicDeadlineMap = new Map<
+      string,
+      { type: 'task' | 'exam'; title: string; dueDate: string; targetStudyDate: string }
+    >();
 
-    manualPinnedTopics.forEach((pinnedTopic) => {
-      const targetDate = pinnedTopic.scheduledDate!;
-      const effectiveTopicPages = this.getTopicEffectivePages(pinnedTopic);
-      const topicMinsPerPage = getMinutesPerPage(
-        pinnedTopic.difficulty || 'Media',
-        preferences.averageMinutesPerPage,
-        preferences.useDifficultyScalingForPages
-      );
-      let remainingTopicHours = Math.max(
-        0.25,
-        pinnedTopic.estimatedHours - pinnedTopic._simulatedHoursSpent
-      );
-      if (effectiveTopicPages > 0) {
-        const pagesLeft = Math.max(0, effectiveTopicPages - pinnedTopic._simulatedPagesRead);
-        if (pagesLeft > 0) {
-          remainingTopicHours = Math.max(
-            0.25,
-            Math.round(((pagesLeft * topicMinsPerPage) / 60) * 10) / 10
-          );
-        }
-      }
-      const allocatedHours = Math.round(Math.min(2.5, remainingTopicHours) * 10) / 10;
-      const customStart =
-        pinnedTopic.studyTimeByDate?.[targetDate] ||
-        pinnedTopic.scheduledTime ||
-        `${String(defaultStartHour).padStart(2, '0')}:00`;
-      const startMins = timeStrToMinutes(customStart);
-      const endMins = startMins + Math.max(30, Math.round(allocatedHours * 60));
+    updatedTopics.forEach((topic) => {
+      // 1. Buscar tarea vinculada directamente o por título/subtema
+      const linkedTask =
+        weeklyTaskMap.get(topic.id)?.task ||
+        pendingTasks.find((tk) => {
+          if (tk.topicId && tk.topicId === topic.id) return true;
+          const tLower = `${tk.title} ${tk.subtopic || ''}`.toLowerCase();
+          const topLower = topic.title.toLowerCase();
+          return tLower.includes(topLower) || topLower.includes(tk.title.toLowerCase());
+        });
 
-      let pagesAllocText: string | undefined = undefined;
-      if (effectiveTopicPages > 0) {
-        const startPage = Math.min(effectiveTopicPages, pinnedTopic._simulatedPagesRead + 1);
-        const pagesInSession = Math.max(
-          1,
-          Math.round((allocatedHours * 60) / Math.max(1, topicMinsPerPage))
-        );
-        const endPage = Math.min(effectiveTopicPages, startPage + pagesInSession - 1);
-        const pCount = Math.max(1, endPage - startPage + 1);
-        pagesAllocText = `Págs. ${startPage}-${endPage} (${pCount} ${
-          pCount === 1 ? 'pág' : 'págs'
-        } · ~${topicMinsPerPage} min/pág)`;
+      if (linkedTask) {
+        const dueObj = parseLocalDate(linkedTask.dueDate);
+        dueObj.setDate(dueObj.getDate() - 1);
+        const targetStr = toLocalDateStr(dueObj) >= todayStr ? toLocalDateStr(dueObj) : linkedTask.dueDate;
+        topicDeadlineMap.set(topic.id, {
+          type: 'task',
+          title: linkedTask.title,
+          dueDate: linkedTask.dueDate,
+          targetStudyDate: targetStr,
+        });
+        return;
       }
 
-      sessions.push({
-        id: `sess-top-${pinnedTopic.id}-${targetDate}`,
-        date: targetDate,
-        startTime: minutesToTimeStr(startMins),
-        endTime: minutesToTimeStr(endMins),
-        subjectId,
-        subjectName,
-        subjectColor,
-        topicId: pinnedTopic.id,
-        topicTitle: pinnedTopic.title,
-        durationHours: allocatedHours,
-        pageCount: effectiveTopicPages > 0 ? effectiveTopicPages : pinnedTopic.pageCount,
-        pagesAllocation: pagesAllocText,
-        type: 'estudio_nuevo',
-        completed: false,
-      });
+      // 2. Buscar examen próximo que incluya este tema o sea general de la materia
+      const matchingExam =
+        exams
+          .filter(
+            (e) =>
+              !e.completed &&
+              e.date >= todayStr &&
+              (!e.topicIds || e.topicIds.length === 0 || e.topicIds.includes(topic.id))
+          )
+          .sort((a, b) => a.date.localeCompare(b.date))[0] || upcomingExam;
+
+      if (matchingExam && matchingExam.date >= todayStr) {
+        const exObj = parseLocalDate(matchingExam.date);
+        exObj.setDate(exObj.getDate() - 1);
+        const targetStr = toLocalDateStr(exObj) >= todayStr ? toLocalDateStr(exObj) : matchingExam.date;
+        topicDeadlineMap.set(topic.id, {
+          type: 'exam',
+          title: matchingExam.title,
+          dueDate: matchingExam.date,
+          targetStudyDate: targetStr,
+        });
+      }
     });
 
-    // Cola de repasos espaciados pendientes (incluye temas estudiados/repasados, con páginas estudiadas o vinculados a tareas de esta semana)
+    // Cola de temas que aún tienen páginas pendientes por estudiar (o que tienen sesiones extra elegidas por el usuario)
+    const allPendingClones = updatedTopics
+      .filter((t) => {
+        const pInfo = this.getTopicStudiedPages(t, preferences);
+        const hasUnreadPages = pInfo.studiedPages < pInfo.totalPages;
+        const hasExtraSessions =
+          t.extraStudySessionsByDate && Object.keys(t.extraStudySessionsByDate).length > 0;
+        return (
+          (t.status !== 'repasado' && t.status !== 'estudiado' && hasUnreadPages) ||
+          Boolean(hasExtraSessions)
+        );
+      })
+      .map((t) => {
+        const pInfo = this.getTopicStudiedPages(t, preferences);
+        return {
+          ...t,
+          _totalPages: pInfo.totalPages,
+          _simulatedHoursSpent: t.actualHoursSpent || 0,
+          _simulatedPagesRead: Math.min(pInfo.totalPages, pInfo.studiedPages),
+        };
+      });
+
+    // Mantener todos los temas pendientes en su orden lógico sin extraerlos a otra lista (evita que aparezca otro tema o se duplique al cambiar la hora de inicio)
+    const pendingTopics = [...allPendingClones].sort((a, b) => {
+      const dlA = topicDeadlineMap.get(a.id);
+      const dlB = topicDeadlineMap.get(b.id);
+      if (dlA && !dlB) return -1;
+      if (!dlA && dlB) return 1;
+      if (dlA && dlB && dlA.targetStudyDate !== dlB.targetStudyDate) {
+        return dlA.targetStudyDate.localeCompare(dlB.targetStudyDate);
+      }
+      return 0;
+    });
+
+    // Contar días de estudio disponibles hasta la fecha límite (examen o entrega) para garantizar que el ritmo diario de páginas llegue a tiempo
+    const countAvailableStudyDaysBetween = (fromStr: string, toStr: string): number => {
+      if (toStr <= fromStr) return 1;
+      const cur = parseLocalDate(fromStr);
+      const end = parseLocalDate(toStr);
+      let count = 0;
+      let guard = 0;
+      while (cur <= end && guard < 180) {
+        guard++;
+        if (availableDaysSet.has(cur.getDay())) {
+          count++;
+        }
+        cur.setDate(cur.getDate() + 1);
+      }
+      return Math.max(1, count);
+    };
+
+    const totalRemainingPagesAllPending = pendingTopics.reduce(
+      (sum, pt) => sum + Math.max(0, pt._totalPages - pt._simulatedPagesRead),
+      0
+    );
+
+    const earliestExamDateStr = upcomingExam ? upcomingExam.date : null;
+    const availableDaysBeforeExam = earliestExamDateStr
+      ? countAvailableStudyDaysBetween(todayStr, earliestExamDateStr)
+      : 14;
+    const minSubjectPagesPerDayForExam =
+      totalRemainingPagesAllPending > 0
+        ? Math.max(1, Math.ceil(totalRemainingPagesAllPending / Math.max(1, availableDaysBeforeExam)))
+        : 0;
+
+    // Conjunto de fechas que tienen sesiones extra añadidas manualmente por el usuario ("+ Añadir tema")
+    const extraSessionDatesSet = new Set<string>();
+    pendingTopics.forEach((pt) => {
+      if (pt.extraStudySessionsByDate) {
+        Object.keys(pt.extraStudySessionsByDate).forEach((d) => extraSessionDatesSet.add(d));
+      }
+    });
+
+    // Cola de repasos espaciados: ESTRICTAMENTE SOLO temas marcados como estudiados/repasados o con páginas leídas > 0
     const spacedReviews = updatedTopics
       .filter((t) => {
-        const pInfo = this.getTopicStudiedPages(t);
-        const hasWeeklyTask = weeklyTaskMap.has(t.id);
+        const pInfo = this.getTopicStudiedPages(t, preferences);
         return (
-          ((t.status === 'estudiado' ||
-            t.status === 'repasado' ||
-            pInfo.studiedPages > 0 ||
-            hasWeeklyTask) &&
-            t.nextReviewDate) ||
-          (pInfo.studiedPages > 0 && (t.status === 'estudiado' || t.status === 'repasado'))
+          t.status === 'estudiado' ||
+          t.status === 'repasado' ||
+          pInfo.studiedPages > 0
         );
       })
       .sort((a, b) => {
@@ -1491,15 +1536,30 @@ export const schedulerService = {
     let daysEvaluated = 0;
     const maxDays = 120; // Límite de proyección a 4 meses
 
-    // Bucle para distribuir sesiones en días disponibles
-    while ((topicIdx < pendingTopics.length || spacedReviews.length > 0) && daysEvaluated < maxDays) {
+    // Bucle para distribuir sesiones en días disponibles (o días con temas extra elegidos por el usuario)
+    while (
+      (topicIdx < pendingTopics.length ||
+        spacedReviews.length > 0 ||
+        extraSessionDatesSet.size > 0) &&
+      daysEvaluated < maxDays
+    ) {
       const dayOfWeek = currentDate.getDay(); // 0 = Domingo, 1 = Lunes...
       const dateStr = toLocalDateStr(currentDate);
+      const hasUserExtraToday = extraSessionDatesSet.has(dateStr);
 
-      if (availableDaysSet.has(dayOfWeek)) {
+      if (availableDaysSet.has(dayOfWeek) || hasUserExtraToday) {
+        extraSessionDatesSet.delete(dateStr);
+
+        // Ignorar bloques antiguos vinculados a temas (block-topic-*) para que nunca dupliquen ni resten horas del tema
+        const nonTopicBlockedEvents = (blockedEvents || []).filter(
+          (e) =>
+            e.linkedItemType !== 'topic' &&
+            !(e.id && e.id.startsWith('block-topic-'))
+        );
+
         // Bloqueos en esta fecha: combina citas puntuales (date === dateStr), bloqueos recurrentes semanales y weeklyFixedObligations
-        const specificDateBlocked = (blockedEvents || []).filter((e) => e.date === dateStr);
-        const recurringBlocked = (blockedEvents || []).filter(
+        const specificDateBlocked = nonTopicBlockedEvents.filter((e) => e.date === dateStr);
+        const recurringBlocked = nonTopicBlockedEvents.filter(
           (e) => !e.date && e.recurringDays && e.recurringDays.includes(dayOfWeek)
         );
         const fixedObligationsToday = (preferences.weeklyFixedObligations || [])
@@ -1516,7 +1576,7 @@ export const schedulerService = {
             category: ob.category,
           }));
 
-        // Sesiones manuales ya fijadas en este día también ocupan su tramo horario
+        // Sesiones ya creadas en este día también ocupan su tramo horario
         const manualSessionsToday = sessions
           .filter((s) => s.date === dateStr && s.startTime && s.endTime)
           .map((s) => ({
@@ -1554,10 +1614,9 @@ export const schedulerService = {
           }
         });
 
-        const dailyAvailableHours = Math.max(
-          0,
-          (hoursPerDay[dayOfWeek] || 3.0) - specificBlockedHoursToday
-        );
+        const dailyAvailableHours = availableDaysSet.has(dayOfWeek)
+          ? Math.max(0, (hoursPerDay[dayOfWeek] || 3.0) - specificBlockedHoursToday)
+          : 0;
         let dayRemainingHours = dailyAvailableHours;
 
         // Rastreador del cursor de tiempo para time blocking
@@ -1590,11 +1649,83 @@ export const schedulerService = {
 
           const finalEnd = testStart + durationMins;
           currentTimelineMinute = finalEnd + 15; // 15 minutos entre sesiones
-          return {
+          const allocated = {
             startTime: minutesToTimeStr(testStart),
             endTime: minutesToTimeStr(finalEnd),
           };
+          dateBlocked.push({
+            startTime: allocated.startTime,
+            endTime: allocated.endTime,
+            isSpecificDate: true,
+          });
+          return allocated;
         };
+
+        // 0. Colocar temas extra añadidos a elección del usuario en este día ("+ Añadir tema en hueco")
+        pendingTopics.forEach((extraTopic) => {
+          const extraCfg = extraTopic.extraStudySessionsByDate?.[dateStr];
+          if (!extraCfg) return;
+
+          const topicMinsPerPage = getMinutesPerPage(
+            extraTopic.difficulty || 'Media',
+            preferences.averageMinutesPerPage,
+            preferences.useDifficultyScalingForPages
+          );
+          const pagesLeft = Math.max(1, extraTopic._totalPages - extraTopic._simulatedPagesRead);
+          const requestedPages = extraCfg.pagesCount
+            ? Math.max(1, extraCfg.pagesCount)
+            : Math.min(pagesLeft, Math.max(2, Math.min(minSubjectPagesPerDayForExam || 6, 8)));
+
+          const effectiveTopicPages = Math.max(
+            extraTopic._totalPages,
+            extraTopic._simulatedPagesRead + requestedPages
+          );
+
+          const allocatedMins = Math.max(5, Math.round(requestedPages * topicMinsPerPage));
+          const allocatedHours = Math.max(
+            0.1,
+            Math.round((allocatedMins / 60) * 100) / 100
+          );
+
+          const startPage = Math.min(effectiveTopicPages, extraTopic._simulatedPagesRead + 1);
+          const endPage = Math.min(effectiveTopicPages, startPage + requestedPages - 1);
+          const pCount = Math.max(1, endPage - startPage + 1);
+          extraTopic._simulatedPagesRead = Math.min(effectiveTopicPages, endPage);
+
+          const chosenStart =
+            extraTopic.studyTimeByDate?.[dateStr] ||
+            extraCfg.startTime ||
+            `${String(defaultStartHour).padStart(2, '0')}:00`;
+          const startMins = timeStrToMinutes(chosenStart);
+          const endMins = Math.min(23 * 60 + 59, startMins + allocatedMins);
+          const chosenEnd = minutesToTimeStr(endMins);
+
+          dateBlocked.push({
+            startTime: chosenStart,
+            endTime: chosenEnd,
+            title: extraTopic.title,
+            isSpecificDate: true,
+          });
+
+          sessions.push({
+            id: `sess-extra-${extraTopic.id}-${dateStr}`,
+            date: dateStr,
+            startTime: chosenStart,
+            endTime: chosenEnd,
+            subjectId,
+            subjectName,
+            subjectColor,
+            topicId: extraTopic.id,
+            topicTitle: `${extraTopic.title} (Págs. ${startPage}–${endPage})`,
+            durationHours: allocatedHours,
+            pageCount: effectiveTopicPages,
+            pagesAllocation: `Págs. ${startPage}–${endPage} (${pCount} ${
+              pCount === 1 ? 'pág' : 'págs'
+            } · ~${allocatedMins} min)`,
+            type: 'estudio_nuevo',
+            completed: false,
+          });
+        });
 
         // 1. Prioridad: Colocar repasos espaciados que venzan hoy o antes, dimensionados según el número de páginas estudiado
         for (let i = 0; i < spacedReviews.length; i++) {
@@ -1648,65 +1779,92 @@ export const schedulerService = {
           }
         }
 
-        // 2. Colocar nuevo estudio de tema (determinado por el número de páginas y la velocidad de lectura en preferencias)
-        while (topicIdx < pendingTopics.length && dayRemainingHours >= 0.4) {
+        // 2. Colocar estudio diario de páginas por tema para llegar a tiempo al examen o tarea
+        while (topicIdx < pendingTopics.length && dayRemainingHours >= 0.25) {
           const currentTopic = pendingTopics[topicIdx];
-          const effectiveTopicPages = this.getTopicEffectivePages(currentTopic);
+          const effectiveTopicPages = currentTopic._totalPages;
           const topicMinsPerPage = getMinutesPerPage(
             currentTopic.difficulty || 'Media',
             preferences.averageMinutesPerPage,
             preferences.useDifficultyScalingForPages
           );
 
-          // Si el tema tiene páginas definidas, las páginas restantes por leer y la velocidad de lectura determinan las horas restantes
-          let remainingTopicHours = Math.max(
-            0.25,
-            currentTopic.estimatedHours - currentTopic._simulatedHoursSpent
+          const pagesLeft = Math.max(0, effectiveTopicPages - currentTopic._simulatedPagesRead);
+          if (pagesLeft <= 0) {
+            topicIdx++;
+            continue;
+          }
+
+          // Si ya tenía una sesión extra añadida manualmente en este mismo día para este mismo tema, evitamos duplicarlo salvo que queden más temas
+          const alreadyScheduledExtraToday = sessions.some(
+            (s) => s.date === dateStr && s.topicId === currentTopic.id && s.id.startsWith('sess-extra-')
           );
-          if (effectiveTopicPages > 0) {
-            const pagesLeft = Math.max(0, effectiveTopicPages - currentTopic._simulatedPagesRead);
-            if (pagesLeft > 0) {
-              const hoursByPagesLeft = Math.round(((pagesLeft * topicMinsPerPage) / 60) * 10) / 10;
-              remainingTopicHours = Math.max(0.25, hoursByPagesLeft);
-            }
+          if (alreadyScheduledExtraToday) {
+            break;
           }
 
-          const allocatedHours =
-            Math.round(Math.min(dayRemainingHours, Math.min(2.5, remainingTopicHours)) * 10) / 10;
-          if (allocatedHours < 0.2) break;
+          // Verificar fecha límite del tema (tarea o examen) para calcular cuántas páginas mínimas hay que ver hoy
+          const dlInfo = topicDeadlineMap.get(currentTopic.id);
+          const daysLeftForTopic = dlInfo
+            ? countAvailableStudyDaysBetween(dateStr, dlInfo.targetStudyDate)
+            : availableDaysBeforeExam;
+          const minPagesTodayForTopicDeadline = Math.max(
+            1,
+            Math.ceil(pagesLeft / Math.max(1, daysLeftForTopic))
+          );
 
-          // Calcular reparto exacto de páginas según la velocidad de lectura configurada
-          let pagesAllocText: string | undefined = undefined;
-          if (effectiveTopicPages > 0) {
-            const totalPages = effectiveTopicPages;
-            const startPage = Math.min(totalPages, currentTopic._simulatedPagesRead + 1);
-            const pagesInThisSession = Math.max(
-              1,
-              Math.round((allocatedHours * 60) / Math.max(1, topicMinsPerPage))
-            );
-            const isCompletingTopic = allocatedHours >= remainingTopicHours - 0.05;
-            const endPage = isCompletingTopic
-              ? totalPages
-              : Math.min(totalPages, startPage + pagesInThisSession - 1);
-            const pCount = Math.max(1, endPage - startPage + 1);
-            pagesAllocText = `Págs. ${startPage}-${endPage} (${pCount} ${
-              pCount === 1 ? 'pág' : 'págs'
-            } · ~${topicMinsPerPage} min/pág)`;
-            currentTopic._simulatedPagesRead = endPage;
-          }
+          // Páginas que caben por horas disponibles hoy, garantizando al menos el ritmo necesario para llegar al examen/tarea
+          const pagesByAvailableTime = Math.max(
+            1,
+            Math.round((dayRemainingHours * 60) / Math.max(1, topicMinsPerPage))
+          );
+          const targetPagesInSession = Math.min(
+            pagesLeft,
+            Math.max(
+              minPagesTodayForTopicDeadline,
+              Math.min(pagesByAvailableTime, Math.max(minSubjectPagesPerDayForExam, 8))
+            )
+          );
+
+          const allocatedHours = Math.max(
+            0.25,
+            Math.round(((targetPagesInSession * topicMinsPerPage) / 60) * 10) / 10
+          );
+
+          const totalPages = effectiveTopicPages;
+          const startPage = Math.min(totalPages, currentTopic._simulatedPagesRead + 1);
+          const endPage = Math.min(totalPages, startPage + targetPagesInSession - 1);
+          const pCount = Math.max(1, endPage - startPage + 1);
+          const dlBadge = dlInfo
+            ? ` · Para ${dlInfo.type === 'task' ? `Tarea "${dlInfo.title}" (${dlInfo.dueDate})` : `${dlInfo.title} (${dlInfo.dueDate})`}`
+            : '';
+          const pagesAllocText = `Págs. ${startPage}–${endPage} (${pCount} ${
+            pCount === 1 ? 'pág/día' : 'págs/día'
+          })${dlBadge}`;
+          currentTopic._simulatedPagesRead = endPage;
 
           const customStartForDate = currentTopic.studyTimeByDate?.[dateStr];
           const slot = customStartForDate
-            ? {
-                startTime: customStartForDate,
-                endTime: minutesToTimeStr(
-                  timeStrToMinutes(customStartForDate) + Math.max(15, Math.round(allocatedHours * 60))
-                ),
-              }
+            ? (() => {
+                const startM = timeStrToMinutes(customStartForDate);
+                const endM = Math.min(
+                  23 * 60 + 59,
+                  startM + Math.max(15, Math.round(allocatedHours * 60))
+                );
+                const sStr = minutesToTimeStr(startM);
+                const eStr = minutesToTimeStr(endM);
+                dateBlocked.push({
+                  startTime: sStr,
+                  endTime: eStr,
+                  title: currentTopic.title,
+                  isSpecificDate: true,
+                });
+                return { startTime: sStr, endTime: eStr };
+              })()
             : allocateSlot(Math.max(15, Math.round(allocatedHours * 60)));
 
           sessions.push({
-            id: `sess-top-${currentTopic.id}-${dateStr}`,
+            id: `sess-top-${currentTopic.id}-${dateStr}-${startPage}`,
             date: dateStr,
             startTime: slot.startTime,
             endTime: slot.endTime,
@@ -1714,15 +1872,15 @@ export const schedulerService = {
             subjectName,
             subjectColor,
             topicId: currentTopic.id,
-            topicTitle: currentTopic.title,
+            topicTitle: `${currentTopic.title} (Págs. ${startPage}–${endPage})`,
             durationHours: allocatedHours,
-            pageCount: effectiveTopicPages > 0 ? effectiveTopicPages : currentTopic.pageCount,
+            pageCount: effectiveTopicPages,
             pagesAllocation: pagesAllocText,
             type: 'estudio_nuevo',
             completed: false,
           });
 
-          // Marcamos fecha y hora programada en el tema
+          // Marcamos fecha y hora programada en el tema (primera sesión)
           if (!currentTopic.scheduledDate) {
             currentTopic.scheduledDate = dateStr;
             currentTopic.scheduledTime = slot.startTime;
@@ -1739,14 +1897,11 @@ export const schedulerService = {
           currentTopic._simulatedHoursSpent =
             Math.round((currentTopic._simulatedHoursSpent + allocatedHours) * 10) / 10;
 
-          // Si completamos el tema en esta sesión o queda muy poco
-          if (
-            allocatedHours >= remainingTopicHours - 0.05 ||
-            (effectiveTopicPages > 0 && currentTopic._simulatedPagesRead >= effectiveTopicPages)
-          ) {
+          // Si completamos todas las páginas del tema en esta sesión, pasamos al siguiente tema
+          if (currentTopic._simulatedPagesRead >= effectiveTopicPages) {
             topicIdx++;
           } else {
-            // Requiere otra sesión en días subsiguientes
+            // El resto de páginas de este tema se verá en el siguiente día disponible
             break;
           }
         }
@@ -2416,17 +2571,20 @@ export const schedulerService = {
       const finalTopics = scheduleResult.updatedTopics.map((topic) => {
         const pInfo = this.getTopicStudiedPages(topic);
         const linkedTaskInfo = subjectWeeklyTaskMap.get(topic.id);
+        // REGLA ESTRICTA: Solo programar repaso espaciado si el tema está estudiado/repasado o tiene páginas leídas > 0
         const hasReview =
           topic.status === 'estudiado' ||
           topic.status === 'repasado' ||
-          pInfo.studiedPages > 0 ||
-          Boolean(topic.nextReviewDate) ||
-          (topic.reviewLevel && topic.reviewLevel > 0) ||
-          Boolean(linkedTaskInfo);
+          pInfo.studiedPages > 0;
 
         if (!hasReview) {
           if (topic.scheduledDate) recalculatedTopicsCount++;
-          return topic;
+          return {
+            ...topic,
+            nextReviewDate: undefined,
+            reviewScheduledTime: undefined,
+            reviewLevel: 0,
+          };
         }
 
         let targetReviewDate =
@@ -2434,24 +2592,10 @@ export const schedulerService = {
             ? topic.nextReviewDate
             : todayStr;
 
-        // Si el tema está vinculado a una tarea de esta semana, asegurar que su repaso ocurra en la semana (en o antes de la fecha de la tarea)
+        // Si el tema ya estudiado está vinculado a una tarea de esta semana, asegurar que su repaso ocurra antes de la entrega
         if (linkedTaskInfo) {
           if (targetReviewDate > linkedTaskInfo.task.dueDate) {
             targetReviewDate = linkedTaskInfo.targetDateStr;
-          }
-          // Si además es un tema nuevo programado esta semana, situar su repaso entre su fecha de estudio y la entrega de la tarea
-          if (
-            topic.scheduledDate &&
-            topic.scheduledDate >= todayStr &&
-            topic.scheduledDate <= linkedTaskInfo.task.dueDate
-          ) {
-            const afterStudyObj = parseLocalDate(topic.scheduledDate);
-            afterStudyObj.setDate(afterStudyObj.getDate() + 1);
-            const afterStudyStr = toLocalDateStr(afterStudyObj);
-            targetReviewDate =
-              afterStudyStr <= linkedTaskInfo.task.dueDate
-                ? afterStudyStr
-                : linkedTaskInfo.task.dueDate;
           }
         }
 
@@ -2496,6 +2640,8 @@ export const schedulerService = {
 
         return {
           ...topic,
+          studiedAt: topic.studiedAt || todayStr,
+          reviewLevel: Math.max(1, topic.reviewLevel || 1),
           nextReviewDate: assignedDate,
           reviewScheduledTime: assignedHourStr,
           reviewTimeByDate: nextReviewTimeByDate,
@@ -2524,10 +2670,10 @@ export const schedulerService = {
       weeklyTaskPrioritizedCount > 0
         ? ` Además, se han priorizado ${weeklyTaskPrioritizedCount} ${
             weeklyTaskPrioritizedCount === 1 ? 'tema vinculado' : 'temas vinculados'
-          } a tus tareas de esta semana para que los revises antes de su entrega.`
+          } a tus tareas de esta semana para que los estudies o repases antes de su entrega.`
         : '';
 
-    const summaryMessage = `¡Temas y repasos recalculados con éxito! Se han reorganizado ${recalculatedTopicsCount} temas de estudio y ${recalculatedReviewsCount} repasos espaciados en huecos libres respetando tus bloqueos semanales y planes sobre la marcha (${dailyNeeds.totalHoursNeededDaily}h/día necesarias).${taskSuffix}`;
+    const summaryMessage = `¡Temas y repasos recalculados con éxito! Se han reorganizado ${recalculatedTopicsCount} temas con su cuota de páginas por día y ${recalculatedReviewsCount} repasos espaciados (solo de temas/páginas leídas) respetando tus entregas y exámenes (${dailyNeeds.totalHoursNeededDaily}h/día necesarias).${taskSuffix}`;
 
     return {
       updatedSubjects,
@@ -2537,6 +2683,295 @@ export const schedulerService = {
       sessionsGeneratedCount,
       dailyNeeds,
       summaryMessage,
+    };
+  },
+
+  /**
+   * Calcula el plan detallado de páginas a estudiar por día de cada tema de una materia
+   * para llegar a tiempo a los exámenes y entregas de tareas, y genera los hitos de
+   * Repetición Espaciada (1, 3, 7, 15, 30 días) ÚNICAMENTE para los temas o páginas ya marcados como estudiados/leídos.
+   */
+  calculateSubjectDailyPageStudyPlan(
+    subject: Subject,
+    preferences?: StudyPreferences,
+    blockedEvents?: BlockedTimeEvent[]
+  ): {
+    todayStr: string;
+    totalPages: number;
+    studiedPages: number;
+    remainingPages: number;
+    nextExam: Exam | null;
+    pendingTasksCount: number;
+    availableStudyDaysToExam: number;
+    globalPagesPerDayNeeded: number;
+    activeSpacedRepetitionTopicsCount: number;
+    topicPlans: Record<
+      string,
+      {
+        topicId: string;
+        topicTitle: string;
+        totalPages: number;
+        studiedPages: number;
+        remainingPages: number;
+        pagesPerDayNeeded: number;
+        availableDaysUntilDeadline: number;
+        deadlineType: 'task' | 'exam' | 'continuous';
+        deadlineLabel: string;
+        deadlineDate: string | null;
+        dailySessions: Array<{
+          date: string;
+          startTime?: string;
+          endTime?: string;
+          startPage: number;
+          endPage: number;
+          pagesCount: number;
+          label: string;
+        }>;
+        hasSpacedRepetition: boolean;
+        spacedRepetitionAnchorDate: string | null;
+        spacedRepetitionSchedule: Array<{
+          level: number;
+          label: string;
+          intervalDays: number;
+          date: string;
+          pagesToReview: number;
+          status: 'completed' | 'due_today' | 'overdue' | 'upcoming';
+        }>;
+      }
+    >;
+  } {
+    const today = new Date();
+    const todayStr = toLocalDateStr(today);
+    const prefs: StudyPreferences = preferences || {
+      availableDays: [1, 2, 3, 4, 5],
+      hoursPerDay: { 1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 4, 0: 0 },
+      streakDays: 0,
+      lastStudyDate: todayStr,
+      enableWebNotifications: false,
+      notifyPomodoroBreaks: false,
+      notifyDailyReviews: false,
+      notifyTaskDeadlines: false,
+      pomodoroConfig: {
+        focusMinutes: 25,
+        shortBreakMinutes: 5,
+        longBreakMinutes: 15,
+        longBreakInterval: 4,
+      },
+    };
+    const availableDaysSet = new Set(prefs.availableDays || [1, 2, 3, 4, 5]);
+    const customIntervals = prefs.spacedRepetitionConfig?.intervals || [1, 3, 7, 15, 30];
+
+    const upcomingExam =
+      (subject.exams || [])
+        .filter((e) => !e.completed && e.date >= todayStr)
+        .sort((a, b) => a.date.localeCompare(b.date))[0] || null;
+
+    const pendingTasks = (subject.tasks || [])
+      .filter((t) => !t.completed && t.dueDate >= todayStr)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+    const countStudyDays = (fromStr: string, toStr: string): number => {
+      if (toStr <= fromStr) return 1;
+      const cur = parseLocalDate(fromStr);
+      const end = parseLocalDate(toStr);
+      let count = 0;
+      let guard = 0;
+      while (cur <= end && guard < 180) {
+        guard++;
+        if (availableDaysSet.has(cur.getDay())) count++;
+        cur.setDate(cur.getDate() + 1);
+      }
+      return Math.max(1, count);
+    };
+
+    const scheduleRes = this.generateSmartSchedule(
+      subject.topics || [],
+      subject.id,
+      subject.name,
+      subject.color || '#3b82f6',
+      subject.exams || [],
+      prefs,
+      todayStr,
+      blockedEvents || [],
+      subject.tasks || []
+    );
+
+    let totalPages = 0;
+    let studiedPages = 0;
+    let remainingPages = 0;
+    let activeSpacedRepetitionTopicsCount = 0;
+
+    const availableStudyDaysToExam = upcomingExam
+      ? countStudyDays(todayStr, upcomingExam.date)
+      : 14;
+
+    const topicPlans: Record<string, any> = {};
+
+    (subject.topics || []).forEach((topic) => {
+      const pInfo = this.getTopicStudiedPages(topic, prefs);
+      const tTotal = pInfo.totalPages;
+      const tRead = pInfo.studiedPages;
+      const tRem = Math.max(0, tTotal - tRead);
+
+      totalPages += tTotal;
+      studiedPages += tRead;
+      remainingPages += tRem;
+
+      // Buscar tarea o examen que requiera este tema
+      const linkedTask = pendingTasks.find((tk) => {
+        if (tk.topicId && tk.topicId === topic.id) return true;
+        const tLower = `${tk.title} ${tk.subtopic || ''}`.toLowerCase();
+        const topLower = topic.title.toLowerCase();
+        return tLower.includes(topLower) || topLower.includes(tk.title.toLowerCase());
+      });
+
+      const matchingExam =
+        (subject.exams || [])
+          .filter(
+            (e) =>
+              !e.completed &&
+              e.date >= todayStr &&
+              (!e.topicIds || e.topicIds.length === 0 || e.topicIds.includes(topic.id))
+          )
+          .sort((a, b) => a.date.localeCompare(b.date))[0] || upcomingExam;
+
+      let deadlineType: 'task' | 'exam' | 'continuous' = 'continuous';
+      let deadlineLabel = 'Ritmo continuo recomendado';
+      let deadlineDate: string | null = null;
+      let availableDaysUntilDeadline = availableStudyDaysToExam;
+
+      if (linkedTask) {
+        deadlineType = 'task';
+        deadlineDate = linkedTask.dueDate;
+        deadlineLabel = `Tarea: "${linkedTask.title}" (${linkedTask.dueDate})`;
+        availableDaysUntilDeadline = countStudyDays(todayStr, linkedTask.dueDate);
+      } else if (matchingExam) {
+        deadlineType = 'exam';
+        deadlineDate = matchingExam.date;
+        deadlineLabel = `Examen: ${matchingExam.title} (${matchingExam.date})`;
+        availableDaysUntilDeadline = countStudyDays(todayStr, matchingExam.date);
+      }
+
+      const pagesPerDayNeeded =
+        tRem > 0 ? Math.max(1, Math.ceil(tRem / Math.max(1, availableDaysUntilDeadline))) : 0;
+
+      // Sesiones diarias programadas para este tema en el calendario inteligente
+      const topicStudySessions = scheduleRes.sessions
+        .filter((s) => s.topicId === topic.id && s.type === 'estudio_nuevo')
+        .map((s) => {
+          const matchRange = (s.pagesAllocation || '').match(/Págs\.\s*(\d+)[–-](\d+)/);
+          const sPage = matchRange ? parseInt(matchRange[1], 10) : tRead + 1;
+          const ePage = matchRange ? parseInt(matchRange[2], 10) : tTotal;
+          const pCnt = Math.max(1, ePage - sPage + 1);
+          return {
+            date: s.date,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            startPage: sPage,
+            endPage: ePage,
+            pagesCount: pCnt,
+            label: s.pagesAllocation || `Págs. ${sPage}–${ePage} (${pCnt} págs)`,
+          };
+        });
+
+      // Repetición espaciada: SOLO si el tema está marcado como estudiado/repasado o tiene páginas leídas > 0
+      const hasSpacedRepetition =
+        topic.status === 'estudiado' ||
+        topic.status === 'repasado' ||
+        tRead > 0;
+
+      if (hasSpacedRepetition) {
+        activeSpacedRepetitionTopicsCount++;
+      }
+
+      const anchorDate = hasSpacedRepetition ? topic.studiedAt || todayStr : null;
+      const completedReviewsCount = topic.reviewsHistory ? topic.reviewsHistory.length : 0;
+      const currentLevel = Math.min(5, Math.max(1, topic.reviewLevel || 1));
+
+      const spacedRepetitionSchedule: Array<{
+        level: number;
+        label: string;
+        intervalDays: number;
+        date: string;
+        pagesToReview: number;
+        status: 'completed' | 'due_today' | 'overdue' | 'upcoming';
+      }> = [];
+
+      if (hasSpacedRepetition && anchorDate) {
+        let cursorDateStr = anchorDate;
+        for (let idx = 0; idx < customIntervals.length; idx++) {
+          const lv = idx + 1;
+          const intervalDays = customIntervals[idx];
+          const manualOverride = (topic as any).manualReviewDates?.[lv];
+
+          let milestoneDateStr: string;
+          if (manualOverride) {
+            milestoneDateStr = manualOverride;
+            cursorDateStr = manualOverride;
+          } else if (lv === currentLevel && topic.nextReviewDate) {
+            milestoneDateStr = topic.nextReviewDate;
+            cursorDateStr = topic.nextReviewDate;
+          } else {
+            const dObj = parseLocalDate(cursorDateStr);
+            dObj.setDate(dObj.getDate() + intervalDays);
+            milestoneDateStr = toLocalDateStr(dObj);
+            cursorDateStr = milestoneDateStr;
+          }
+
+          let mStatus: 'completed' | 'due_today' | 'overdue' | 'upcoming' = 'upcoming';
+          if (lv <= completedReviewsCount || (topic.status === 'repasado' && lv < currentLevel)) {
+            mStatus = 'completed';
+          } else if (milestoneDateStr < todayStr) {
+            mStatus = 'overdue';
+          } else if (milestoneDateStr === todayStr) {
+            mStatus = 'due_today';
+          }
+
+          spacedRepetitionSchedule.push({
+            level: lv,
+            label: `R${lv} (${intervalDays}d)`,
+            intervalDays,
+            date: milestoneDateStr,
+            pagesToReview: tRead > 0 ? tRead : tTotal,
+            status: mStatus,
+          });
+        }
+      }
+
+      topicPlans[topic.id] = {
+        topicId: topic.id,
+        topicTitle: topic.title,
+        totalPages: tTotal,
+        studiedPages: tRead,
+        remainingPages: tRem,
+        pagesPerDayNeeded,
+        availableDaysUntilDeadline,
+        deadlineType,
+        deadlineLabel,
+        deadlineDate,
+        dailySessions: topicStudySessions,
+        hasSpacedRepetition,
+        spacedRepetitionAnchorDate: anchorDate,
+        spacedRepetitionSchedule,
+      };
+    });
+
+    const globalPagesPerDayNeeded =
+      remainingPages > 0
+        ? Math.max(1, Math.ceil(remainingPages / Math.max(1, availableStudyDaysToExam)))
+        : 0;
+
+    return {
+      todayStr,
+      totalPages,
+      studiedPages,
+      remainingPages,
+      nextExam: upcomingExam,
+      pendingTasksCount: pendingTasks.length,
+      availableStudyDaysToExam,
+      globalPagesPerDayNeeded,
+      activeSpacedRepetitionTopicsCount,
+      topicPlans,
     };
   },
 };

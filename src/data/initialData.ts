@@ -75,7 +75,6 @@ export const initialStudyPrograms: StudyProgram[] = [
             name: 'Anatomía Humana I: Aparato Locomotor',
             code: 'ANAT-101',
             color: 'blue',
-            credits: 9,
             professor: 'Dra. Carmen Valero',
             classroom: 'Aula Magna 3 & Sala de Disección',
             topics: [
@@ -503,7 +502,6 @@ export const initialStudyPrograms: StudyProgram[] = [
             name: 'Bioquímica y Biología Molecular I',
             code: 'BIOQ-102',
             color: 'emerald',
-            credits: 6,
             professor: 'Dr. Alejandro Sanz',
             classroom: 'Laboratorio de Bioquímica 2',
             topics: [
@@ -693,7 +691,6 @@ export const initialStudyPrograms: StudyProgram[] = [
             name: 'Fisiología Humana General',
             code: 'FIS-103',
             color: 'amber',
-            credits: 6,
             professor: 'Prof. Marcos Iriarte',
             classroom: 'Seminario Fisiología B',
             topics: [
@@ -899,7 +896,6 @@ export const initialStudyPrograms: StudyProgram[] = [
             name: 'Farmacología Clínica Básica',
             code: 'FARM-201',
             color: '#8b5cf6',
-            credits: 6,
             professor: 'Dra. Elena Vázquez',
             topics: [
               {
@@ -976,7 +972,6 @@ export const initialStudyPrograms: StudyProgram[] = [
             name: 'Bioestadística y Ciencia de Datos Clínicos',
             code: 'BIOD-104',
             color: '#ec4899',
-            credits: 6,
             professor: 'Dr. Javier Morales',
             topics: [
               {

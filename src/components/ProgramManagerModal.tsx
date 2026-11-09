@@ -155,7 +155,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   const [newSubName, setNewSubName] = useState('');
   const [newSubCode, setNewSubCode] = useState('');
   const [newSubProf, setNewSubProf] = useState('');
-  const [newSubCredits, setNewSubCredits] = useState('6');
+  const [newSubCredits, setNewSubCredits] = useState('');
   const [newSubColor, setNewSubColor] = useState('#3b82f6');
   const [showAddSub, setShowAddSub] = useState(false);
 
@@ -164,7 +164,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   const [editSubName, setEditSubName] = useState('');
   const [editSubCode, setEditSubCode] = useState('');
   const [editSubProf, setEditSubProf] = useState('');
-  const [editSubCredits, setEditSubCredits] = useState('6');
+  const [editSubCredits, setEditSubCredits] = useState('');
   const [editSubColor, setEditSubColor] = useState('#3b82f6');
   const [confirmDeleteSubId, setConfirmDeleteSubId] = useState<string | null>(null);
 
@@ -737,12 +737,18 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   const handleAddSubject = () => {
     if (!currentProgram || !currentYear || !newSubName.trim()) return;
 
+    const parsedNewCredits =
+      newSubCredits.trim() !== '' ? parseFloat(newSubCredits) : NaN;
+
     const newSubject: Subject = {
       id: `sub-${Date.now()}`,
       name: newSubName.trim(),
       code: newSubCode.trim() || undefined,
       color: newSubColor || '#3b82f6',
-      credits: Math.max(1, parseFloat(newSubCredits) || 6),
+      credits:
+        !isNaN(parsedNewCredits) && parsedNewCredits > 0
+          ? parsedNewCredits
+          : undefined,
       professor: newSubProf.trim() || undefined,
       topics: [],
       tasks: [],
@@ -772,7 +778,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
     setNewSubName('');
     setNewSubCode('');
     setNewSubProf('');
-    setNewSubCredits('6');
+    setNewSubCredits('');
     setShowAddSub(false);
   };
 
@@ -782,12 +788,17 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
     setEditSubName(sub.name);
     setEditSubCode(sub.code || '');
     setEditSubProf(sub.professor || '');
-    setEditSubCredits(String(sub.credits ?? 6));
+    setEditSubCredits(
+      sub.credits !== undefined && sub.credits > 0 ? String(sub.credits) : ''
+    );
     setEditSubColor(sub.color || '#3b82f6');
   };
 
   const handleSaveEditSubject = (subId: string) => {
     if (!currentProgram || !currentYear || !editSubName.trim()) return;
+
+    const parsedEditCredits =
+      editSubCredits.trim() !== '' ? parseFloat(editSubCredits) : NaN;
 
     const updated = programs.map((p) => {
       if (p.id !== currentProgram.id) return p;
@@ -804,7 +815,10 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                     name: editSubName.trim(),
                     code: editSubCode.trim() || undefined,
                     professor: editSubProf.trim() || undefined,
-                    credits: Math.max(1, parseFloat(editSubCredits) || 6),
+                    credits:
+                      !isNaN(parsedEditCredits) && parsedEditCredits > 0
+                        ? parsedEditCredits
+                        : undefined,
                     color: editSubColor || '#3b82f6',
                   }
                 : s
@@ -1297,68 +1311,92 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                                                 </span>
                                               )}
                                             </div>
-                                            <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-md">
-                                              {subject.credits || 6} ECTS
-                                            </span>
+                                              {subject.credits ? (
+                                                <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-md">
+                                                  {subject.credits} ECTS
+                                                </span>
+                                              ) : (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    onSelectProgramAndYear(program.id, year.id);
+                                                    setEditingSubId(subject.id);
+                                                    setEditSubName(subject.name);
+                                                    setEditSubCode(subject.code || '');
+                                                    setEditSubProf(subject.professor || '');
+                                                    setEditSubCredits('');
+                                                    setEditSubColor(subject.color || '#3b82f6');
+                                                    setActiveModalTab('hierarchy');
+                                                  }}
+                                                  className="text-[10px] font-medium text-slate-400 hover:text-blue-600 dark:text-slate-500 dark:hover:text-blue-400 bg-slate-50 dark:bg-slate-800/60 px-2 py-0.5 rounded-md border border-dashed border-slate-200 dark:border-slate-700 cursor-pointer"
+                                                  title="Añadir créditos opcionales a esta asignatura"
+                                                >
+                                                  + Créditos (opcional)
+                                                </button>
+                                              )}
+                                            </div>
+
+                                            <h6 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white line-clamp-2 leading-snug">
+                                              {subject.name}
+                                            </h6>
+
+                                            {subject.professor && (
+                                              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                                👨‍🏫 {subject.professor}
+                                              </p>
+                                            )}
                                           </div>
 
-                                          <h6 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white line-clamp-2 leading-snug">
-                                            {subject.name}
-                                          </h6>
-
-                                          {subject.professor && (
-                                            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                                              👨‍🏫 {subject.professor}
-                                            </p>
-                                          )}
-                                        </div>
-
-                                        <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800/80">
-                                          <div className="flex items-center justify-between text-[11px]">
-                                            <span className="text-slate-500 dark:text-slate-400">
-                                              Temario ({completedSubTopics}/{totalSubTopics})
-                                            </span>
-                                            <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono-numbers">
-                                              {subProgressPct}%
-                                            </span>
-                                          </div>
-                                          <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                                            <div
-                                              className="h-full rounded-full transition-all"
-                                              style={{
-                                                width: `${subProgressPct}%`,
-                                                backgroundColor: subject.color || '#10b981',
-                                              }}
-                                            />
-                                          </div>
-
-                                          <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
-                                            <span className="text-slate-400 dark:text-slate-500 text-[10px]">
-                                              📝 {notesCount} {notesCount === 1 ? 'apunte' : 'apuntes'}
-                                            </span>
-                                            <div className="flex items-center gap-1.5">
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  onSelectProgramAndYear(program.id, year.id);
-                                                  onClose();
+                                          <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800/80">
+                                            <div className="flex items-center justify-between text-[11px]">
+                                              <span className="text-slate-500 dark:text-slate-400">
+                                                Temario ({completedSubTopics}/{totalSubTopics})
+                                              </span>
+                                              <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono-numbers">
+                                                {subProgressPct}%
+                                              </span>
+                                            </div>
+                                            <div className="w-full bg-slate-100 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                                              <div
+                                                className="h-full rounded-full transition-all"
+                                                style={{
+                                                  width: `${subProgressPct}%`,
+                                                  backgroundColor: subject.color || '#10b981',
                                                 }}
-                                                className="text-[11px] font-bold text-blue-600 hover:text-blue-800 cursor-pointer"
-                                              >
-                                                Abrir
-                                              </button>
-                                              <button
-                                                type="button"
-                                                onClick={() => {
-                                                  onSelectProgramAndYear(program.id, year.id);
-                                                  setEditingSubId(subject.id);
-                                                  setEditSubName(subject.name);
-                                                  setEditSubCode(subject.code || '');
-                                                  setEditSubProf(subject.professor || '');
-                                                  setEditSubCredits(String(subject.credits || 6));
-                                                  setEditSubColor(subject.color || '#3b82f6');
-                                                  setActiveModalTab('hierarchy');
-                                                }}
+                                              />
+                                            </div>
+
+                                            <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
+                                              <span className="text-slate-400 dark:text-slate-500 text-[10px]">
+                                                📝 {notesCount} {notesCount === 1 ? 'apunte' : 'apuntes'}
+                                              </span>
+                                              <div className="flex items-center gap-1.5">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    onSelectProgramAndYear(program.id, year.id);
+                                                    onClose();
+                                                  }}
+                                                  className="text-[11px] font-bold text-blue-600 hover:text-blue-800 cursor-pointer"
+                                                >
+                                                  Abrir
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    onSelectProgramAndYear(program.id, year.id);
+                                                    setEditingSubId(subject.id);
+                                                    setEditSubName(subject.name);
+                                                    setEditSubCode(subject.code || '');
+                                                    setEditSubProf(subject.professor || '');
+                                                    setEditSubCredits(
+                                                      subject.credits !== undefined && subject.credits > 0
+                                                        ? String(subject.credits)
+                                                        : ''
+                                                    );
+                                                    setEditSubColor(subject.color || '#3b82f6');
+                                                    setActiveModalTab('hierarchy');
+                                                  }}
                                                 className="text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
                                                 title="Editar datos de esta asignatura"
                                               >
@@ -1988,15 +2026,16 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                     </div>
                     <div>
                       <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">
-                        Créditos
+                        Créditos (opcional)
                       </label>
                       <input
                         type="number"
-                        min={1}
+                        min={0.5}
                         max={60}
                         step="0.5"
                         value={newSubCredits}
                         onChange={(e) => setNewSubCredits(e.target.value)}
+                        placeholder="Opcional"
                         className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-slate-800 dark:text-slate-100 focus:outline-none"
                       />
                     </div>
@@ -2092,15 +2131,16 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                             </div>
                             <div>
                               <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
-                                Créditos
+                                Créditos (opcional)
                               </label>
                               <input
                                 type="number"
-                                min={1}
+                                min={0.5}
                                 max={60}
                                 step="0.5"
                                 value={editSubCredits}
                                 onChange={(e) => setEditSubCredits(e.target.value)}
+                                placeholder="Opcional"
                                 className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-300 focus:outline-none"
                               />
                             </div>
@@ -2213,8 +2253,12 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
 
                           <div className="flex items-center gap-3">
                             <div className="hidden sm:flex items-center gap-2 text-slate-400 font-mono-numbers">
-                              <span>{sub.credits || 6} cr.</span>
-                              <span>·</span>
+                              {sub.credits ? (
+                                <>
+                                  <span>{sub.credits} cr.</span>
+                                  <span>·</span>
+                                </>
+                              ) : null}
                               <span>{sub.topics.length} temas</span>
                               <span>·</span>
                               <span>{sub.cornellNotes.length} apuntes</span>

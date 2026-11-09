@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   FileText,
   Upload,
@@ -24,6 +24,8 @@ import {
   CheckSquare,
   Square,
   FolderOpen,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import {
   Topic,
@@ -83,43 +85,43 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   onAiError,
   onSaveTopicNotes,
 }) => {
-  if (!isOpen || !topic) return null;
-
-  const [activeTab, setActiveTab] = useState<'editor' | 'import'>('editor');
+  const [activeTab, setActiveTab] = useState<'editor' | 'cornell_ia' | 'import'>('editor');
   const [noteFormat, setNoteFormat] = useState<'free' | 'cornell'>('free'); // Página de escritura de apuntes libre por defecto
+  const [cornellKeyTerms, setCornellKeyTerms] = useState<Array<{ term: string; definition: string }>>([]);
+  const [isActiveRecallMask, setIsActiveRecallMask] = useState<boolean>(false);
   const [notes, setNotes] = useState<string>(
-    topic.notes || topic.generalNotes || topic.description || ''
+    topic?.notes || topic?.generalNotes || topic?.description || ''
   );
   const [richGeneralNotes, setRichGeneralNotes] = useState<string>(
-    topic.richGeneralNotes ||
+    topic?.richGeneralNotes ||
       convertMarkdownAndImagesToRichHtml(
-        topic.notes || topic.generalNotes || topic.description || '',
-        topic.generalImages || []
+        topic?.notes || topic?.generalNotes || topic?.description || '',
+        topic?.generalImages || []
       )
   );
   const [generalImages, setGeneralImages] = useState<DocumentImageAsset[]>(
-    topic.generalImages || []
+    topic?.generalImages || []
   );
   const [generalComments, setGeneralComments] = useState<DocumentComment[]>(
-    topic.generalComments || []
+    topic?.generalComments || []
   );
   const [topicKeyPoints, setTopicKeyPoints] = useState<EditableKeyPoint[]>(
-    topic.keyPoints || []
+    topic?.keyPoints || []
   );
 
   const [cues, setCues] = useState<string[]>(
-    topic.cues && topic.cues.length > 0
+    topic?.cues && topic.cues.length > 0
       ? topic.cues
-      : topic.subtopics && topic.subtopics.length > 0
+      : topic?.subtopics && topic.subtopics.length > 0
       ? topic.subtopics.map((st) => `¿En qué consiste ${st}?`)
       : ['¿Cuál es la definición fundamental?', '¿Qué aplicaciones prácticas tiene?']
   );
-  const [summary, setSummary] = useState<string>(topic.summary || '');
+  const [summary, setSummary] = useState<string>(topic?.summary || '');
   const [newCue, setNewCue] = useState<string>('');
 
   // Attached Imported Documents State
   const [attachedFiles, setAttachedFiles] = useState<AttachedTopicFile[]>(() =>
-    (topic.attachedFiles || []).map((f) => ({
+    (topic?.attachedFiles || []).map((f) => ({
       ...f,
       pageCount: f.pageCount && f.pageCount > 0 ? f.pageCount : detectTextPageCount(f.content || ''),
       includeInOrganization: f.includeInOrganization !== undefined ? f.includeInOrganization : true,
@@ -135,16 +137,16 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
   // Active document being edited inside the Free-Writing Notes Page ('main' = general topic notes, or file.id = specific imported document)
   const [activeEditingDocId, setActiveEditingDocId] = useState<'main' | string>(() => {
-    if (initialDocumentId && (topic.attachedFiles || []).some((f) => f.id === initialDocumentId)) {
+    if (initialDocumentId && (topic?.attachedFiles || []).some((f) => f.id === initialDocumentId)) {
       return initialDocumentId;
     }
-    if ((topic.attachedFiles || []).length > 0) {
-      return topic.attachedFiles![topic.attachedFiles!.length - 1].id;
+    if ((topic?.attachedFiles || []).length > 0) {
+      return topic!.attachedFiles![topic!.attachedFiles!.length - 1].id;
     }
     return 'main';
   });
   const [customPageCountOverride, setCustomPageCountOverride] = useState<number | undefined>(
-    topic.pageCount
+    topic?.pageCount
   );
 
   // Import State
@@ -158,10 +160,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   const [isGeneratingKeyPoints, setIsGeneratingKeyPoints] = useState<boolean>(false);
   const [showKeyPointsPanel, setShowKeyPointsPanel] = useState<boolean>(() => {
     if (initialOpenKeyPoints) return true;
-    const hasDocKeyPoints = (topic.attachedFiles || []).some(
+    const hasDocKeyPoints = (topic?.attachedFiles || []).some(
       (f) => f.keyPoints && f.keyPoints.length > 0
     );
-    return hasDocKeyPoints || (topic.keyPoints?.length || 0) > 0;
+    return hasDocKeyPoints || (topic?.keyPoints?.length || 0) > 0;
   });
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<boolean>(false);
   const [actionBannerNotice, setActionBannerNotice] = useState<string | null>(null);
@@ -231,18 +233,18 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     if (attachedFiles.length > 0 && organizedFilesPageCount > 0) {
       return Math.max(customPageCountOverride || 0, organizedFilesPageCount);
     }
-    return customPageCountOverride || topic.pageCount || 0;
-  }, [attachedFiles, organizedFilesPageCount, customPageCountOverride, topic.pageCount]);
+    return customPageCountOverride || topic?.pageCount || 0;
+  }, [attachedFiles, organizedFilesPageCount, customPageCountOverride, topic?.pageCount]);
 
   // Estimated study hours based on detected pages & topic difficulty
   const estimatedStudyHours = useMemo(() => {
     return schedulerService.calculateTopicTime(
-      topic.difficulty,
-      topic.subtopics ? topic.subtopics.length : 0,
+      topic?.difficulty || 'Media',
+      topic?.subtopics ? topic.subtopics.length : 0,
       notes.length,
       effectivePageCount > 0 ? effectivePageCount : undefined
     );
-  }, [topic.difficulty, topic.subtopics, notes.length, effectivePageCount]);
+  }, [topic?.difficulty, topic?.subtopics, notes.length, effectivePageCount]);
 
   const activeAttachedFile = useMemo(
     () => attachedFiles.find((f) => f.id === activeEditingDocId) || null,
@@ -256,6 +258,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     }
     return topicKeyPoints;
   }, [activeAttachedFile, topicKeyPoints]);
+
+  if (!isOpen || !topic) return null;
 
   const updateActiveKeyPoints = (nextPoints: EditableKeyPoint[]) => {
     setTopicKeyPoints(nextPoints);
@@ -495,6 +499,123 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     setTimeout(() => setActionBannerNotice(null), 3200);
   };
 
+  // Grabación de Nota de Voz Rápida (Web Speech API -> Notas Generales del Tema)
+  const [isRecordingVoiceModal, setIsRecordingVoiceModal] = useState<boolean>(false);
+  const modalRecognitionRef = useRef<any>(null);
+  const modalVoiceBufferRef = useRef<string>('');
+
+  useEffect(() => {
+    return () => {
+      if (modalRecognitionRef.current) {
+        try {
+          modalRecognitionRef.current.stop();
+        } catch {}
+      }
+    };
+  }, []);
+
+  const handleToggleModalVoiceRecording = () => {
+    if (!topic) return;
+
+    if (isRecordingVoiceModal) {
+      if (modalRecognitionRef.current) {
+        try {
+          modalRecognitionRef.current.onend = null;
+          modalRecognitionRef.current.stop();
+        } catch {}
+        modalRecognitionRef.current = null;
+      }
+      setIsRecordingVoiceModal(false);
+      if (modalVoiceBufferRef.current.trim()) {
+        showTransientNotice(
+          '¡Nota de voz convertida a texto y almacenada automáticamente en las notas generales del tema!'
+        );
+        modalVoiceBufferRef.current = '';
+      }
+      return;
+    }
+
+    const SpeechRecognitionAPI =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionAPI) {
+      setImportError(
+        'Tu navegador no soporta reconocimiento de voz directo. Prueba en Chrome o Edge.'
+      );
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionAPI();
+      recognition.lang = 'es-ES';
+      recognition.continuous = true;
+      recognition.interimResults = false;
+
+      modalVoiceBufferRef.current = '';
+      setActiveEditingDocId('main');
+
+      recognition.onresult = (event: any) => {
+        let added = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            added += event.results[i][0].transcript + ' ';
+          }
+        }
+        const cleaned = added.trim();
+        if (cleaned) {
+          modalVoiceBufferRef.current = `${modalVoiceBufferRef.current} ${cleaned}`.trim();
+          const timestamp = new Date().toLocaleTimeString('es-ES', {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          const voiceLine = `🎙️ [Nota de voz · ${timestamp}]: ${cleaned}`;
+          setNotes((prevNotes) => {
+            const nextMain = prevNotes.trim()
+              ? `${prevNotes.trim()}\n\n${voiceLine}`
+              : voiceLine;
+            const nextRich = convertMarkdownAndImagesToRichHtml(nextMain, generalImages);
+            setRichGeneralNotes(nextRich);
+            onSaveTopicNotes(topic.id, {
+              notes: nextMain,
+              cues,
+              summary,
+              attachedFiles,
+              pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
+              richGeneralNotes: nextRich,
+              generalImages,
+              generalComments,
+              keyPoints: activeEditableKeyPoints,
+            });
+            return nextMain;
+          });
+        }
+      };
+
+      recognition.onerror = (ev: any) => {
+        if (ev?.error && ev.error !== 'no-speech') {
+          setImportError(`Aviso de micrófono: ${ev.error}`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsRecordingVoiceModal(false);
+        if (modalVoiceBufferRef.current.trim()) {
+          showTransientNotice(
+            '¡Nota de voz convertida a texto y almacenada automáticamente en las notas generales del tema!'
+          );
+          modalVoiceBufferRef.current = '';
+        }
+      };
+
+      modalRecognitionRef.current = recognition;
+      setIsRecordingVoiceModal(true);
+      recognition.start();
+    } catch (err: any) {
+      setImportError(err?.message || 'Error al iniciar la grabación de voz.');
+      setIsRecordingVoiceModal(false);
+    }
+  };
+
   // Add a new cue
   const handleAddCue = () => {
     if (!newCue.trim()) return;
@@ -507,13 +628,20 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     setCues(cues.filter((_, i) => i !== index));
   };
 
-  // AI Structure & Enhance
-  const handleStructureWithAI = async () => {
-    const textToStructure = getEffectiveSourceText();
-    if (!textToStructure) {
-      setImportError('Por favor escribe o selecciona un documento con texto antes de estructurar con IA.');
-      return;
-    }
+  // AI Structure & Enhance (Método Cornell Automático con IA)
+  const handleStructureWithAI = async (forceRefresh = false) => {
+    const rawSource = getEffectiveSourceText();
+    const fallbackSyllabusContext = [
+      `Tema: ${topic.title}`,
+      topic.description ? `Descripción: ${topic.description}` : '',
+      Array.isArray(topic.subtopics) && topic.subtopics.length > 0
+        ? `Subtemas oficiales: ${topic.subtopics.join(', ')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const textToStructure = rawSource || fallbackSyllabusContext || topic.title;
 
     setIsStructuring(true);
     setImportError(null);
@@ -526,6 +654,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           topicTitle: topic.title,
           rawNotes: textToStructure,
           subjectName,
+          subtopics: topic.subtopics || [],
+          forceRefresh,
         }),
       });
 
@@ -537,6 +667,9 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             ? resData.data.cues
             : cues;
         const nextSummary = resData.data.summary || summary;
+        if (Array.isArray(resData.data.keyTerms) && resData.data.keyTerms.length > 0) {
+          setCornellKeyTerms(resData.data.keyTerms);
+        }
 
         const nowIso = new Date().toISOString();
         let nextMainNotes = notes;
@@ -1059,7 +1192,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
         {/* Barra de Navegación del Estudio y Herramientas IA */}
         <div className="px-6 py-2.5 bg-slate-50/90 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-1 bg-white border border-slate-200 p-1 rounded-xl text-xs">
+          <div className="flex items-center gap-1 bg-white border border-slate-200 p-1 rounded-xl text-xs flex-wrap">
             <button
               onClick={() => setActiveTab('editor')}
               className={`px-3 py-1.5 font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
@@ -1070,6 +1203,28 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             >
               <Edit3 className="w-3.5 h-3.5" />
               <span>Lienzo de Escritura Libre</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('cornell_ia');
+                // Si el tema aún no tiene resumen Cornell o notas estructuradas, lo genera automáticamente con IA al abrir la pestaña
+                const hasMeaningfulCornell =
+                  summary.trim().length > 20 &&
+                  notes.trim().length > 80 &&
+                  notes.trim() !== (topic.description || '').trim();
+                if (!hasMeaningfulCornell && !isStructuring) {
+                  handleStructureWithAI(false);
+                }
+              }}
+              className={`px-3 py-1.5 font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 whitespace-nowrap ${
+                activeTab === 'cornell_ia'
+                  ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-2xs'
+                  : 'text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100/80'
+              }`}
+              title="Genera y edita automáticamente el Método Cornell completo de este tema con Inteligencia Artificial"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Método Cornell IA</span>
             </button>
             <button
               onClick={() => setActiveTab('import')}
@@ -1113,6 +1268,30 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   className="hidden"
                 />
               </label>
+
+              {/* Botón de Nota de Voz Rápida (Web Speech API -> Notas Generales) */}
+              <button
+                type="button"
+                onClick={handleToggleModalVoiceRecording}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border transition-all cursor-pointer whitespace-nowrap ${
+                  isRecordingVoiceModal
+                    ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-600 animate-pulse shadow-xs'
+                    : 'bg-white hover:bg-rose-50 text-rose-700 border-rose-200'
+                }`}
+                title="Grabar nota de voz rápida y guardarla automáticamente como texto en las notas generales del tema"
+              >
+                {isRecordingVoiceModal ? (
+                  <>
+                    <MicOff className="w-3.5 h-3.5" />
+                    <span>Detener y Guardar Voz</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-3.5 h-3.5 text-rose-600" />
+                    <span>Nota de Voz</span>
+                  </>
+                )}
+              </button>
 
               {/* Selector de formato de trabajo */}
               <div className="flex items-center bg-white border border-slate-200 p-0.5 rounded-xl text-xs">
@@ -1181,7 +1360,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
               <button
                 type="button"
-                onClick={handleStructureWithAI}
+                onClick={() => handleStructureWithAI(true)}
                 disabled={isStructuring}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-blue-50 border border-slate-200 hover:border-blue-200 text-slate-700 hover:text-blue-700 text-xs font-semibold rounded-xl transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap"
                 title="Aplica formato Markdown estructurado, añade preguntas detonadoras y resumen automático"
@@ -1791,49 +1970,158 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             </div>
           )}
 
-          {activeTab === 'editor' && noteFormat === 'cornell' && (
-            <div className="space-y-5">
+          {((activeTab === 'editor' && noteFormat === 'cornell') || activeTab === 'cornell_ia') && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Cabecera de Generación Automática del Método Cornell con IA */}
+              <div className="bg-gradient-to-r from-indigo-600 via-violet-600 to-blue-600 rounded-2xl p-4 sm:p-5 text-white shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/15 text-[11px] font-bold tracking-wide uppercase">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Sistema Oficial de la Universidad de Cornell · Generación Automática IA</span>
+                  </div>
+                  <h3 className="text-sm sm:text-base font-extrabold">
+                    Hoja Cornell Inteligente: {topic.title}
+                  </h3>
+                  <p className="text-xs text-indigo-100 max-w-2xl">
+                    La IA analiza tus documentos importados, apuntes y subtemas para estructurar automáticamente las 3 zonas del Método Cornell: Preguntas Detonadoras (Active Recall), Apuntes Estructurados y Síntesis Ejecutiva.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isStructuring}
+                    onClick={() => handleStructureWithAI(true)}
+                    className="px-4 py-2.5 rounded-xl bg-white text-indigo-950 hover:bg-indigo-50 font-extrabold text-xs shadow-sm transition-all cursor-pointer flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {isStructuring ? (
+                      <>
+                        <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+                        <span>Creando Método Cornell con IA...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4 text-indigo-600" />
+                        <span>Generar / Actualizar Cornell con IA</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsActiveRecallMask((prev) => !prev)}
+                    className={`px-3.5 py-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isActiveRecallMask
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-xs'
+                        : 'bg-indigo-950/40 hover:bg-indigo-950/60 text-white border-white/25'
+                    }`}
+                    title="Oculta temporalmente la columna derecha de apuntes para autoevaluarte respondiendo a las preguntas detonadoras"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    <span>
+                      {isActiveRecallMask ? 'Mostrar Apuntes' : 'Autoevaluar (Tapar Apuntes)'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsPdfExportModalOpen(true)}
+                    className="px-3.5 py-2.5 rounded-xl bg-indigo-950/40 hover:bg-indigo-950/60 border border-white/25 text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
+                    title="Descargar esta hoja Cornell maquetada en PDF"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>PDF Cornell</span>
+                  </button>
+                </div>
+              </div>
+
+              {isStructuring && (
+                <div className="p-4 bg-indigo-50 border border-indigo-200 rounded-2xl flex items-center gap-3 text-xs text-indigo-950 animate-pulse">
+                  <Loader2 className="w-5 h-5 text-indigo-600 animate-spin shrink-0" />
+                  <div>
+                    <div className="font-bold">
+                      Generando estructura del Método Cornell automáticamente con IA...
+                    </div>
+                    <div className="text-[11px] text-indigo-700 mt-0.5">
+                      Redactando preguntas detonadoras para Active Recall, estructurando apuntes por epígrafes y sintetizando el resumen ejecutivo para examen.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                {/* Columna Izquierda (4 cols): Preguntas Detonadoras (Cues) */}
-                <div className="lg:col-span-4 bg-slate-50/70 border border-slate-200 rounded-2xl p-4 space-y-3 flex flex-col justify-between">
-                  <div className="space-y-2">
+                {/* Columna Izquierda (4 cols): Preguntas Detonadoras (Cues) + Términos Clave */}
+                <div className="lg:col-span-4 bg-slate-50/80 border border-slate-200 rounded-2xl p-4 space-y-4 flex flex-col justify-between">
+                  <div className="space-y-3">
                     <div className="flex items-center justify-between border-b border-slate-200/80 pb-2">
                       <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                        <HelpCircle className="w-3.5 h-3.5 text-blue-600" />
-                        <span>Preguntas Detonadoras (Cues)</span>
+                        <HelpCircle className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>1. Columna de Indicios y Preguntas (Cues)</span>
                       </span>
-                      <span className="text-xs font-mono-numbers text-slate-500 font-bold">
+                      <span className="text-xs font-mono-numbers bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md font-bold">
                         {cues.length}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-500 leading-relaxed">
-                      Preguntas clave del Método Cornell para autoevaluarte con Active Recall sin mirar los apuntes.
+                      Preguntas clave del Método Cornell para autoevaluarte con Active Recall tapando la columna derecha. Puedes editar cualquiera haciendo clic sobre ella.
                     </p>
 
-                    <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+                    <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
                       {cues.map((cue, idx) => (
                         <div
                           key={idx}
-                          className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-start justify-between gap-2 text-xs hover:border-slate-300 transition-colors"
+                          className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-start justify-between gap-2 text-xs hover:border-indigo-300 transition-colors shadow-2xs"
                         >
-                          <span className="text-slate-800 font-medium leading-snug">
-                            {cue}
+                          <span className="w-5 h-5 rounded-md bg-indigo-50 text-indigo-700 font-mono-numbers font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                            {idx + 1}
                           </span>
+                          <input
+                            type="text"
+                            value={cue}
+                            onChange={(e) => {
+                              const next = [...cues];
+                              next[idx] = e.target.value;
+                              setCues(next);
+                            }}
+                            className="flex-1 text-slate-800 font-semibold leading-snug bg-transparent focus:outline-none focus:border-b focus:border-indigo-400"
+                          />
                           <button
                             onClick={() => handleRemoveCue(idx)}
                             className="text-slate-300 hover:text-rose-500 p-0.5 shrink-0 cursor-pointer"
+                            title="Eliminar pregunta"
                           >
-                            <Trash2 className="w-3 h-3" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       ))}
 
                       {cues.length === 0 && (
                         <div className="text-center py-6 text-[11px] text-slate-400 italic">
-                          Sin preguntas detonadoras aún. Añade una abajo o usa "Mejorar Formato IA".
+                          Sin preguntas detonadoras aún. Pulsa "Generar / Actualizar Cornell con IA" arriba.
                         </div>
                       )}
                     </div>
+
+                    {/* Glosario de Términos Clave extraídos por IA */}
+                    {cornellKeyTerms.length > 0 && (
+                      <div className="pt-3 border-t border-slate-200/80 space-y-2">
+                        <div className="text-[11px] font-bold text-indigo-900 uppercase tracking-wider flex items-center justify-between">
+                          <span>Conceptos Clave IA</span>
+                          <span className="font-mono-numbers text-indigo-600">{cornellKeyTerms.length}</span>
+                        </div>
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                          {cornellKeyTerms.map((kt, kIdx) => (
+                            <div
+                              key={kIdx}
+                              className="p-2 rounded-lg bg-indigo-50/60 border border-indigo-100 text-[11px]"
+                            >
+                              <span className="font-bold text-indigo-950">{kt.term}: </span>
+                              <span className="text-slate-700">{kt.definition}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Añadir pregunta */}
@@ -1843,12 +2131,12 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                       value={newCue}
                       onChange={(e) => setNewCue(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleAddCue()}
-                      placeholder="Nueva pregunta detonadora..."
-                      className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      placeholder="Añadir pregunta detonadora..."
+                      className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                     />
                     <button
                       onClick={handleAddCue}
-                      className="p-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl cursor-pointer"
+                      className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl cursor-pointer"
                       title="Añadir pregunta"
                     >
                       <Plus className="w-4 h-4" />
@@ -1856,12 +2144,12 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   </div>
                 </div>
 
-                {/* Columna Derecha (8 cols): Cuerpo de Apuntes */}
-                <div className="lg:col-span-8 space-y-2">
-                  <div className="flex items-center justify-between">
+                {/* Columna Derecha (8 cols): Cuerpo de Apuntes Cornell */}
+                <div className="lg:col-span-8 space-y-2 relative">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Cuerpo de Apuntes del Tema (Markdown / Texto)</span>
+                      <BookOpen className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>2. Columna Principal de Apuntes Estructurados Cornell</span>
                     </label>
                     <span className="text-[11px] text-slate-400 font-mono-numbers">
                       {currentEditorText.length} caracteres ·{' '}
@@ -1869,25 +2157,51 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                     </span>
                   </div>
 
-                  <textarea
-                    value={currentEditorText}
-                    onChange={(e) => handleEditorTextChange(e.target.value)}
-                    rows={17}
-                    placeholder="Escribe aquí los apuntes del tema. Puedes usar subtítulos con ##, listas con guiones (-), definiciones en negrita (**término**), y fórmulas..."
-                    className="w-full text-xs font-mono p-4 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 leading-relaxed resize-none"
-                  />
+                  <div className="relative">
+                    <textarea
+                      value={currentEditorText}
+                      onChange={(e) => handleEditorTextChange(e.target.value)}
+                      rows={18}
+                      placeholder="Pulsa 'Generar / Actualizar Cornell con IA' para desarrollar automáticamente los apuntes estructurados de este tema o escribe aquí..."
+                      className={`w-full text-xs font-mono p-4 bg-white border border-slate-200 rounded-2xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-y transition-all ${
+                        isActiveRecallMask ? 'blur-md select-none opacity-40' : ''
+                      }`}
+                    />
+                    {isActiveRecallMask && (
+                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/10 rounded-2xl p-6 text-center backdrop-blur-xs">
+                        <div className="bg-white/95 border border-indigo-200 rounded-2xl p-5 shadow-md max-w-md space-y-3">
+                          <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center mx-auto">
+                            <HelpCircle className="w-5 h-5" />
+                          </div>
+                          <h4 className="text-sm font-bold text-slate-900">
+                            Modo Autoevaluación Active Recall Activo
+                          </h4>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            Intenta responder en voz alta o mentalmente a las <strong>{cues.length} preguntas detonadoras</strong> de la columna izquierda antes de destapar tus apuntes.
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setIsActiveRecallMask(false)}
+                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                          >
+                            Destapar y Comprobar Apuntes
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              {/* Resumen Inferior */}
-              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-purple-600" />
-                    <span>Resumen Ejecutivo del Tema (Síntesis para Repaso Rápido)</span>
+              {/* Zona 3: Resumen Inferior Cornell */}
+              <div className="bg-indigo-50/50 border border-indigo-200/80 rounded-2xl p-4 space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <label className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>3. Síntesis y Resumen Ejecutivo Inferior (Pie de Hoja Cornell)</span>
                   </label>
-                  <span className="text-[10px] text-slate-400">
-                    2 a 3 párrafos con lo fundamental para exámenes
+                  <span className="text-[11px] text-indigo-700 font-medium">
+                    Destilado esencial de 2-3 párrafos para repaso rápido antes del examen
                   </span>
                 </div>
 
@@ -1895,8 +2209,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   value={summary}
                   onChange={(e) => setSummary(e.target.value)}
                   rows={3}
-                  placeholder="Escribe o genera aquí el resumen esencial de este tema..."
-                  className="w-full text-xs p-3 bg-white border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-purple-500 leading-relaxed resize-none"
+                  placeholder="Pulsa 'Generar / Actualizar Cornell con IA' para sintetizar automáticamente la esencia de este tema..."
+                  className="w-full text-xs p-3.5 bg-white border border-indigo-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-y"
                 />
               </div>
             </div>

@@ -30,6 +30,10 @@ interface AppHelpGuideModalProps {
   isOpen: boolean;
   onClose: () => void;
   onNavigateTab?: (tabId: string) => void;
+  onOpenPreferences?: () => void;
+  onOpenProgramManager?: () => void;
+  onOpenStreakModal?: () => void;
+  onStartOnboardingTour?: () => void;
 }
 
 interface GuideSection {
@@ -42,12 +46,18 @@ interface GuideSection {
   summary: string;
   bullets: string[];
   tabId?: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }
 
 export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
   isOpen,
   onClose,
   onNavigateTab,
+  onOpenPreferences,
+  onOpenProgramManager,
+  onOpenStreakModal,
+  onStartOnboardingTour,
 }) => {
   const [activeCategory, setActiveCategory] = useState<'all' | 'tabs' | 'methods' | 'tools'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -233,6 +243,8 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
           'Haz clic en el icono de fuego de la barra superior o del menú lateral en cualquier momento para ver tu racha y los días que faltan para tu siguiente medalla.',
           'Si dejas pasar más de 24 horas sin registrar ninguna sesión, la racha se reinicia a 1 día en tu siguiente sesión.',
         ],
+        actionLabel: 'Ver Racha',
+        onAction: onOpenStreakModal,
       },
       {
         id: 'tool-programas',
@@ -247,6 +259,8 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
           'Crea nuevos estudios o cursos desde el botón "+ Estudios" en la cabecera.',
           'Puedes seleccionar 1 curso específico o activar varios para tener una vista combinada de todas tus materias.',
         ],
+        actionLabel: 'Abrir Estudios',
+        onAction: onOpenProgramManager,
       },
       {
         id: 'tool-cloud-sync',
@@ -268,7 +282,7 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
         title: 'Personalización de Interfaz y Pestañas (⚙️)',
         badge: 'Herramienta',
         icon: SlidersHorizontal,
-        iconColor: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
+        iconColor: 'bg-blue-100 text-blue-700 dark:bg-blue-950/80 dark:text-blue-300',
         summary:
           'Adapta StudyFlow a tu flujo de trabajo: activa u oculta pestañas, alterna entre menú lateral y superior, y usa el modo oscuro.',
         bullets: [
@@ -276,9 +290,11 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
           'Menú Superior vs Lateral: alterna la posición de la barra de navegación con el icono de panel lateral.',
           'Modo Claro y Oscuro: cuida tu vista cambiando el tema con el botón de sol/luna.',
         ],
+        actionLabel: 'Abrir Personalización',
+        onAction: onOpenPreferences,
       },
     ],
-    []
+    [onOpenPreferences, onOpenProgramManager, onOpenStreakModal]
   );
 
   const filteredSections = useMemo(() => {
@@ -317,7 +333,7 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
               className="w-10 h-10 sm:w-11 sm:h-11 rounded-2xl object-contain shadow-2xs shrink-0"
             />
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white tracking-tight">
                   Guía Completa de StudyFlow
                 </h3>
@@ -331,14 +347,30 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
-            aria-label="Cerrar guía"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {onStartOnboardingTour && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onStartOnboardingTour();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+                title="Iniciar guía interactiva paso a paso"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Tutorial Interactivo</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+              aria-label="Cerrar guía"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Filter bar: Search + Category Pills */}
@@ -350,7 +382,7 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Buscar funcionalidad (ej: pomodoro, cornell, racha, feynman, examen, vueltas...)"
+              placeholder="Buscar funcionalidad (ej: pomodoro, cornell, racha, feynman, examen, pestañas...)"
               className="w-full pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/80 rounded-xl text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             {searchQuery && (
@@ -365,54 +397,70 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
           </div>
 
           {/* Category Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar text-xs">
-            <button
-              type="button"
-              onClick={() => setActiveCategory('all')}
-              className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap ${
-                activeCategory === 'all'
-                  ? 'bg-blue-600 text-white shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              Todo ({GUIDE_SECTIONS.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCategory('tabs')}
-              className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
-                activeCategory === 'tabs'
-                  ? 'bg-blue-600 text-white shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>Pestañas (6)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCategory('methods')}
-              className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
-                activeCategory === 'methods'
-                  ? 'bg-blue-600 text-white shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              <Brain className="w-3.5 h-3.5" />
-              <span>Metodologías de Estudio</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveCategory('tools')}
-              className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
-                activeCategory === 'tools'
-                  ? 'bg-blue-600 text-white shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>Funcionalidades & Ajustes</span>
-            </button>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar text-xs">
+              <button
+                type="button"
+                onClick={() => setActiveCategory('all')}
+                className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                  activeCategory === 'all'
+                    ? 'bg-blue-600 text-white shadow-2xs font-bold'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                Todo ({GUIDE_SECTIONS.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCategory('tabs')}
+                className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                  activeCategory === 'tabs'
+                    ? 'bg-blue-600 text-white shadow-2xs font-bold'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" />
+                <span>Pestañas (6)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCategory('methods')}
+                className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                  activeCategory === 'methods'
+                    ? 'bg-blue-600 text-white shadow-2xs font-bold'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <Brain className="w-3.5 h-3.5" />
+                <span>Metodologías de Estudio</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCategory('tools')}
+                className={`px-3 py-1.5 rounded-xl font-semibold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                  activeCategory === 'tools'
+                    ? 'bg-blue-600 text-white shadow-2xs font-bold'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Funcionalidades & Ajustes</span>
+              </button>
+            </div>
+
+            {onOpenPreferences && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenPreferences();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-blue-50 dark:bg-slate-800 dark:hover:bg-blue-950/60 text-slate-700 hover:text-blue-700 dark:text-slate-200 dark:hover:text-blue-300 border border-slate-200 dark:border-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                <span>Personalización de Interfaz y Pestañas</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -425,10 +473,24 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
           ) : (
             filteredSections.map((sec) => {
               const Icon = sec.icon;
+              const hasAction = Boolean((sec.tabId && onNavigateTab) || sec.onAction);
+              const handleCardAction = () => {
+                if (sec.onAction) {
+                  onClose();
+                  sec.onAction();
+                } else if (sec.tabId && onNavigateTab) {
+                  onClose();
+                  onNavigateTab(sec.tabId);
+                }
+              };
+
               return (
                 <div
                   key={sec.id}
-                  className="p-4 sm:p-5 rounded-2xl bg-slate-50/70 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 space-y-3 transition-all hover:border-blue-300 dark:hover:border-blue-700"
+                  onClick={hasAction ? handleCardAction : undefined}
+                  className={`p-4 sm:p-5 rounded-2xl bg-slate-50/70 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 space-y-3 transition-all hover:border-blue-300 dark:hover:border-blue-700 ${
+                    hasAction ? 'cursor-pointer hover:shadow-md' : ''
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -447,17 +509,17 @@ export const AppHelpGuideModal: React.FC<AppHelpGuideModalProps> = ({
                       </div>
                     </div>
 
-                    {sec.tabId && onNavigateTab && (
+                    {hasAction && (
                       <button
                         type="button"
-                        onClick={() => {
-                          onClose();
-                          onNavigateTab(sec.tabId!);
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCardAction();
                         }}
-                        className="px-2.5 py-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/60 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1 shrink-0"
-                        title="Ir a esta pestaña"
+                        className="px-3 py-1.5 text-[11px] font-bold text-blue-700 dark:text-blue-300 bg-blue-50/90 hover:bg-blue-100 dark:bg-blue-950/70 dark:hover:bg-blue-900/80 border border-blue-200/80 dark:border-blue-800 rounded-xl transition-colors cursor-pointer inline-flex items-center gap-1.5 shrink-0"
+                        title={sec.actionLabel || 'Abrir sección'}
                       >
-                        <span>Abrir</span>
+                        <span>{sec.actionLabel || 'Abrir'}</span>
                         <ArrowRight className="w-3 h-3" />
                       </button>
                     )}

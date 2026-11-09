@@ -27,8 +27,11 @@ const ai = new GoogleGenAI({
 });
 
 // Helper for model & automatic multi-model fallback on 503/429 spikes
-const GEMINI_MODEL = 'gemini-3.8-flash';
-const FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+const GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const FALLBACK_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+const keyPointsSummaryCache = new Map<string, any>();
+const quizGenerationCache = new Map<string, any>();
+const cornellStructureCache = new Map<string, any>();
 
 const waitDelay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -51,26 +54,18 @@ async function generateContentWithFallback(params: any) {
   let lastError: any = null;
   for (let i = 0; i < FALLBACK_MODELS.length; i++) {
     const modelName = FALLBACK_MODELS[i];
-    // Attempt up to 2 times for transient demand spikes before cascading
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        return await ai.models.generateContent({
-          ...params,
-          model: modelName,
-        });
-      } catch (err: any) {
-        lastError = err;
-        const transient = isTransientOverload(err);
-        if (transient && attempt === 1) {
-          // Micro-backoff with jitter before reattempting
-          await waitDelay(300 + Math.random() * 300);
-          continue;
-        }
-        if (i < FALLBACK_MODELS.length - 1) {
-          // Switch to next alternative model in the cascade
-          await waitDelay(150);
-        }
-        break;
+    try {
+      return await ai.models.generateContent({
+        ...params,
+        model: modelName,
+        config: {
+          ...(params?.config || {}),
+        },
+      });
+    } catch (err: any) {
+      lastError = err;
+      if (i < FALLBACK_MODELS.length - 1) {
+        await waitDelay(60);
       }
     }
   }
@@ -649,32 +644,47 @@ function buildQuizFallback(
 // 3. Generación de Cuestionarios Personalizados según tipo de examen (test, oral, desarrollo, preguntas_cortas, calculo, practico)
 app.post('/api/gemini/generate-quiz', async (req: Request, res: Response) => {
   try {
-    const { topicTitle, topicContent, examType = 'test', difficulty = 'intermedio', questionCount = 5 } = req.body;
+    const {
+      topicTitle,
+      topicContent,
+      examType = 'test',
+      difficulty = 'intermedio',
+      questionCount = 5,
+      forceRefresh = false,
+    } = req.body;
+
+    const trimmedContent = String(topicContent || topicTitle || 'Temario general de la asignatura')
+      .trim()
+      .slice(0, 9000);
+    const cacheKey = `${topicTitle}_${examType}_${difficulty}_${questionCount}_${trimmedContent.length}_${trimmedContent.slice(0, 180)}`;
+
+    if (!forceRefresh && quizGenerationCache.has(cacheKey)) {
+      res.json({ success: true, data: quizGenerationCache.get(cacheKey), cached: true });
+      return;
+    }
 
     let examInstructions = '';
     if (examType === 'test') {
-      examInstructions = `Genera preguntas tipo test de opción múltiple (exactamente 4 opciones A, B, C, D), indicando el índice de la opción correcta (0 a 3), una explicación general detallada ("explanation") y, de forma OBLIGATORIA, el array "optionExplanations" con exactamente 4 textos explicativos (uno para cada opción en el mismo orden 0, 1, 2, 3) donde expliques con rigor pedagógico por qué cada opción incorrecta es errónea (qué confusión conceptual, dato falso o trampa contiene) y por qué la opción correcta es acertada.`;
+      examInstructions = `Genera preguntas tipo test de opción múltiple (4 opciones A, B, C, D), índice correcto (0-3), "explanation" concisa (1-2 frases) y "optionExplanations" con 4 textos breves y directos (1 frase por opción indicando por qué acierta o falla).`;
     } else if (examType === 'oral') {
-      examInstructions = `Genera preguntas para examen oral. Incluye los puntos clave indispensables que el estudiante debe mencionar en voz alta, palabras técnicas obligatorias y criterios de evaluación de fluidez.`;
+      examInstructions = `Genera preguntas para examen oral. Incluye puntos clave indispensables ("keyPoints") y criterios breves de fluidez.`;
     } else if (examType === 'preguntas_cortas') {
-      examInstructions = `Genera preguntas de respuesta corta y directa (definición concisa, enunciado preciso o término específico). En explanation incluye la respuesta modelo exacta y en keyPoints las 2-3 palabras clave o conceptos obligatorios. Las options deben ser un array vacío.`;
+      examInstructions = `Genera preguntas de respuesta corta y directa. En explanation pon la respuesta modelo concisa y en keyPoints 2-3 conceptos clave. options debe ser [].`;
     } else if (examType === 'calculo') {
-      examInstructions = `Genera problemas o ejercicios prácticos de cálculo y aplicación numérica. En prompt incluye los datos del problema y enunciado claro. En explanation incluye la resolución matemática paso a paso con las fórmulas empleadas y el resultado numérico final exacto. En keyPoints indica la fórmula principal, pasos intermedios y el valor final con unidades. Las options deben ser un array vacío.`;
+      examInstructions = `Genera ejercicios prácticos de cálculo/aplicación. En explanation incluye pasos y resultado final; en keyPoints la fórmula y valor final. options debe ser [].`;
     } else if (examType === 'practico') {
-      examInstructions = `Genera un examen o caso eminentemente práctico (resolución de un supuesto práctico profesional, caso de estudio, análisis de laboratorio o situación real aplicada). En prompt plantea el caso con antecedentes claros y la consigna práctica. En explanation proporciona la resolución integral razonada paso a paso. En keyPoints detalla los criterios de éxito y elementos que demuestran dominio práctico. Las options deben ser un array vacío.`;
+      examInstructions = `Genera casos prácticos aplicados. En prompt plantea el supuesto; en explanation la resolución paso a paso; en keyPoints los criterios clave. options debe ser [].`;
     } else {
-      examInstructions = `Genera preguntas de examen de desarrollo / tema abierto. Incluye rúbrica detallada con los aspectos evaluables (introducción, conceptos técnicos, aplicación práctica, conclusión) y puntos asignados.`;
+      examInstructions = `Genera preguntas de desarrollo. Incluye rúbrica concisa y puntos clave en keyPoints. options debe ser [].`;
     }
 
-    const prompt = `Actúa como profesor universitario exigente y pedagógico.
-Crea un examen sobre: "${topicTitle}".
-Tipo de examen: ${examType} (Opciones: test, oral, desarrollo, preguntas_cortas, calculo, practico, mixto).
-Nivel de dificultad: ${difficulty}.
-Número de preguntas: ${questionCount}.
-Instrucciones específicas: ${examInstructions}
+    const prompt = `Eres un profesor universitario experto. Crea un examen ágil, preciso y riguroso sobre "${topicTitle}".
+Formato: ${examType} | Dificultad: ${difficulty} | Nº preguntas: ${questionCount}.
+Instrucciones: ${examInstructions}
+Sé directo y conciso para generar el cuestionario con máxima velocidad y rigor.
 
-Contenido base de los temas y apuntes seleccionados:
-"""${(topicContent || topicTitle || 'Temario general de la asignatura').slice(0, 28000)}"""`;
+Contenido base:
+"""${trimmedContent}"""`;
 
     let quizData: any = null;
     try {
@@ -682,6 +692,7 @@ Contenido base de los temas y apuntes seleccionados:
         model: GEMINI_MODEL,
         contents: prompt,
         config: {
+          temperature: 0.35,
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -699,28 +710,22 @@ Contenido base de los temas y apuntes seleccionados:
                     options: {
                       type: Type.ARRAY,
                       items: { type: Type.STRING },
-                      description: 'Solo para test (4 opciones); array vacío para otros formatos',
                     },
                     correctOptionIndex: {
                       type: Type.INTEGER,
-                      description: 'Índice de la respuesta correcta (0-3) para test, -1 para otros',
                     },
                     explanation: { type: Type.STRING },
                     optionExplanations: {
                       type: Type.ARRAY,
                       items: { type: Type.STRING },
-                      description:
-                        'Retroalimentación explicativa para cada una de las 4 opciones (índices 0, 1, 2, 3), explicando específicamente por qué cada respuesta incorrecta es falsa y por qué la correcta es verdadera',
                     },
                     keyPoints: {
                       type: Type.ARRAY,
                       items: { type: Type.STRING },
-                      description: 'Puntos clave indispensables para oral y desarrollo',
                     },
                     rubricCriteria: {
                       type: Type.ARRAY,
                       items: { type: Type.STRING },
-                      description: 'Criterios de corrección y peso',
                     },
                   },
                   required: ['id', 'prompt', 'explanation'],
@@ -740,6 +745,8 @@ Contenido base de los temas y apuntes seleccionados:
 
     if (!quizData || !Array.isArray(quizData.questions) || quizData.questions.length === 0) {
       quizData = buildQuizFallback(topicTitle, topicContent, examType, difficulty, questionCount);
+    } else {
+      quizGenerationCache.set(cacheKey, quizData);
     }
 
     res.json({ success: true, data: quizData });
@@ -1257,25 +1264,34 @@ function buildStructuredTopicNotesFallback(
 }
 
 app.post(['/api/gemini/structure-topic-notes', '/api/gemini/structure-notes'], async (req: Request, res: Response) => {
-  const { topicTitle, rawNotes, rawText, subjectName } = req.body || {};
+  const { topicTitle, rawNotes, rawText, subjectName, subtopics, forceRefresh } = req.body || {};
   const effectiveTitle = (topicTitle || 'Apuntes del Tema').trim();
-  const effectiveNotes = (rawNotes || rawText || effectiveTitle).trim();
+  const subtopicsList = Array.isArray(subtopics) && subtopics.length > 0 ? `\nSubtemas del programa: ${subtopics.join(', ')}` : '';
+  const effectiveNotes = ((rawNotes || rawText || effectiveTitle) + subtopicsList).trim().slice(0, 12000);
+  const cacheKey = `${subjectName}_${effectiveTitle}_${effectiveNotes.length}_${effectiveNotes.slice(0, 160)}`;
+
+  if (!forceRefresh && cornellStructureCache.has(cacheKey)) {
+    res.json({ success: true, data: cornellStructureCache.get(cacheKey), cached: true });
+    return;
+  }
 
   try {
-    const prompt = `Analiza estos apuntes preliminares sobre el tema "${effectiveTitle}" de la asignatura "${subjectName || 'General'}".
-Apuntes del estudiante:
-"""${effectiveNotes.slice(0, 28000)}"""
+    const prompt = `Eres un catedrático experto en el Método Cornell de la Universidad de Cornell.
+Genera una hoja completa del Método Cornell para el tema "${effectiveTitle}" de la asignatura "${subjectName || 'General'}".
+Contenido y apuntes de referencia:
+"""${effectiveNotes}"""
 
-Estructura y enriquece estos apuntes aplicando el Método Cornell y Active Recall:
-1. "notes": El cuerpo principal de apuntes estructurado en Markdown limpio (con títulos ##, listas con viñetas, términos clave en negrita y fórmulas si aplica).
-2. "cues": 4 a 6 preguntas detonadoras esenciales que sirvan para comprobar si se domina el tema sin mirar los apuntes.
-3. "summary": Un resumen ejecutivo de 2 párrafos que sintetice lo imprescindible para el examen.
-4. "keyTerms": Lista de 4-8 términos técnicos indispensables con su definición de 1 línea.`;
+Devuelve en JSON:
+1. "notes": Cuerpo principal de apuntes Cornell en Markdown claro y estructurado (secciones con ##, viñetas explicativas, conceptos en **negrita**, ejemplos y fórmulas si aplica). Si los apuntes de entrada son breves o solo tienen el título/subtemas, desarrolla tú mismo los contenidos fundamentales del tema con rigor académico.
+2. "cues": 5 a 7 preguntas detonadoras (Columna Izquierda Cornell / Active Recall) e ideas clave para autoevaluarse tapando la columna derecha.
+3. "summary": Resumen ejecutivo inferior (Síntesis Cornell de 2 párrafos) con la esencia para repaso rápido antes del examen.
+4. "keyTerms": 5 a 8 términos técnicos clave del tema con su definición concisa.`;
 
     const response = await generateContentWithFallback({
       model: GEMINI_MODEL,
       contents: prompt,
       config: {
+        temperature: 0.3,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1301,6 +1317,9 @@ Estructura y enriquece estos apuntes aplicando el Método Cornell y Active Recal
     });
 
     const parsed = JSON.parse(response.text || '{}');
+    if (parsed && parsed.notes && Array.isArray(parsed.cues)) {
+      cornellStructureCache.set(cacheKey, parsed);
+    }
     res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.warn('Fallback activated in /api/gemini/structure-topic-notes:', error?.message || error);
@@ -1929,34 +1948,34 @@ app.post('/api/gemini/summarize-document-keypoints', async (req: Request, res: R
   } = req.body || {};
 
   const sourceText = (documentContent || topicTitle || documentName || 'Tema académico').trim();
+  const trimmedSource = sourceText.slice(0, 10000);
+  const cacheKey = `${subjectName}|${topicTitle}|${documentName}|${trimmedSource.length}|${trimmedSource.slice(0, 180)}`;
+  const cachedResult = keyPointsSummaryCache.get(cacheKey);
+  if (cachedResult) {
+    res.json({ success: true, ...cachedResult, data: cachedResult, cached: true });
+    return;
+  }
 
   try {
-    const prompt = `Actúa como un catedrático universitario y especialista en síntesis académica y técnicas de estudio de alto rendimiento.
-Analiza el siguiente documento importado por el estudiante y genera un resumen automático exhaustivo junto con una lista estructurada de puntos clave accionables para que el alumno pueda editarlos y trabajarlos directamente en su vista de apuntes.
+    const prompt = `Extrae en español un resumen ejecutivo directo (1-2 párrafos breves) y 5 a 6 puntos clave accionables de alto valor para examen:
+- Archivo: "${documentName}" (${pageCount} págs) | Tema: "${topicTitle || documentName}" | Materia: "${subjectName}"
 
-Datos del documento:
-- Archivo: "${documentName}" (${pageCount} páginas/diapositivas)
-- Tema asociado: "${topicTitle || documentName}"
-- Asignatura: "${subjectName}"
-
-Contenido del documento / tema:
+Contenido:
 """
-${sourceText.slice(0, 28000)}
+${trimmedSource}
 """
 
-Genera un JSON riguroso en español con:
-1. "summary": Un resumen ejecutivo automático claro, denso en valor y bien redactado (de 2 a 3 párrafos) que sintetice la tesis central, los mecanismos principales y las conclusiones del documento.
-2. "keyPoints": Una lista de entre 5 y 8 puntos clave fundamentales extraídos del documento, pensados para convertirse en bloques editables en la vista de apuntes. Cada punto clave debe incluir:
-   - "title": Concepto o idea fuerza concisa (3 a 8 palabras).
-   - "detail": Explicación clara, precisa y completa (1 a 3 oraciones con definiciones, fórmulas, relaciones causa-efecto o datos de examen).
-   - "category": Etiqueta breve (ej. "Definición Clave", "Mecanismo", "Fórmula / Dato", "Conclusión", "Pregunta de Examen", "Caso Práctico").
-   - "importance": Nivel de prioridad para examen ("alta", "media" o "baja").
-3. "cues": De 4 a 5 preguntas detonadoras de Active Recall sobre los puntos clave del documento.`;
+JSON requerido:
+1. "summary": Resumen ejecutivo conciso (2-4 oraciones).
+2. "keyPoints": 5 a 6 puntos clave con "title" (3-7 palabras), "detail" (1-2 oraciones claras), "category" ("Definición Clave", "Mecanismo", "Fórmula / Dato", "Pregunta de Examen") e "importance" ("alta", "media", "baja").
+3. "cues": 3 a 4 preguntas de Active Recall.`;
 
     const response = await generateContentWithFallback({
       model: GEMINI_MODEL,
       contents: prompt,
       config: {
+        thinkingConfig: { thinkingBudget: 0 },
+        temperature: 0.2,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1986,6 +2005,7 @@ Genera un JSON riguroso en español con:
     });
 
     const parsed = JSON.parse(response.text || '{}');
+    keyPointsSummaryCache.set(cacheKey, parsed);
     res.json({ success: true, ...parsed, data: parsed });
   } catch (error: any) {
     console.warn('Fallback activated in /api/gemini/summarize-document-keypoints:', error?.message || error);

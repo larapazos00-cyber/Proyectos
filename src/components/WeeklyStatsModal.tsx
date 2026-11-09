@@ -70,6 +70,7 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
   const [pdfIncludePomodoroLogs, setPdfIncludePomodoroLogs] = useState<boolean>(true);
   const [pdfExportNotice, setPdfExportNotice] = useState<string | null>(null);
   const [showGoalEditor, setShowGoalEditor] = useState<boolean>(false);
+  const [subjectHoursChartScope, setSubjectHoursChartScope] = useState<'total' | 'semanal'>('total');
 
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -150,7 +151,7 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
       Math.round((weeklyTargetHours / Math.max(1, subjects.length)) * 2) / 2
     );
 
-  // Subject Summary Data (Topics + Hours vs Goal)
+  // Subject Summary Data (Topics + Planned Hours vs Real Registered Hours)
   const subjectComparisonData = useMemo(() => {
     return subjects.map((sub) => {
       const weekMins = subjectWeekMinutesById[sub.id] || 0;
@@ -162,15 +163,50 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
         0
       );
 
+      // Horas planificadas en el temario y en bloques del calendario para esta asignatura
+      const topicsPlannedHours = sub.topics.reduce(
+        (acc, t) => acc + (t.estimatedHours || 1.5),
+        0
+      );
+      const calendarPlannedMins = effectiveBlockedEvents
+        .filter(
+          (ev) =>
+            (ev as any).subjectId === sub.id ||
+            (ev.title && ev.title.toLowerCase().includes(sub.name.toLowerCase()))
+        )
+        .reduce((acc, ev) => {
+          const [sh, sm] = (ev.startTime || '09:00').split(':').map(Number);
+          const [eh, em] = (ev.endTime || '10:00').split(':').map(Number);
+          const diff = eh * 60 + em - (sh * 60 + sm);
+          return acc + (diff > 0 ? diff : 60);
+        }, 0);
+
+      const objectiveWeeklyHours =
+        preferences.subjectWeeklyGoalHours?.[sub.id] ?? defaultSubWeeklyGoal;
+
+      const totalPlannedHours =
+        Math.round(
+          Math.max(
+            topicsPlannedHours,
+            calendarPlannedMins / 60,
+            objectiveWeeklyHours
+          ) * 10
+        ) / 10;
+
+      const totalRealRegisteredHours =
+        Math.round(
+          Math.max(
+            allTimeSubMins / 60 + topicLoggedHours,
+            weekMins / 60
+          ) * 10
+        ) / 10;
+
       const realWeekHours =
         weekMins > 0
           ? Math.round((weekMins / 60) * 10) / 10
           : allTimeSubMins > 0
           ? Math.round((allTimeSubMins / 60) * 10) / 10
           : Math.round(topicLoggedHours * 10) / 10;
-
-      const objectiveHours =
-        preferences.subjectWeeklyGoalHours?.[sub.id] ?? defaultSubWeeklyGoal;
 
       const totalTopics = sub.topics.length;
       const completedTopics = sub.topics.filter(
@@ -182,13 +218,27 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
       const topicProgressPct =
         totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
 
+      const horasPlanificadas =
+        subjectHoursChartScope === 'total'
+          ? totalPlannedHours
+          : objectiveWeeklyHours;
+      const horasRealesRegistradas =
+        subjectHoursChartScope === 'total'
+          ? totalRealRegisteredHours
+          : realWeekHours;
+
       return {
         subjectId: sub.id,
         name: sub.name.length > 18 ? `${sub.name.slice(0, 16)}…` : sub.name,
         fullName: sub.name,
+        code: sub.code || sub.name.slice(0, 4).toUpperCase(),
         color: sub.color || '#3b82f6',
+        horasPlanificadas,
+        horasRealesRegistradas,
+        totalPlannedHours,
+        totalRealRegisteredHours,
         horasReales: realWeekHours,
-        objetivoPreferencias: objectiveHours,
+        objetivoPreferencias: objectiveWeeklyHours,
         completedTopics,
         inProgressTopics,
         totalTopics,
@@ -199,8 +249,10 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
     subjects,
     subjectWeekMinutesById,
     pomodoroLogs,
+    effectiveBlockedEvents,
     preferences.subjectWeeklyGoalHours,
     defaultSubWeeklyGoal,
+    subjectHoursChartScope,
   ]);
 
   // Current Week Daily Bar Data (Monday to Sunday)
@@ -626,6 +678,144 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
         onOpenExamsManager={onOpenExamsManager}
         onSelectSubject={onSelectSubject}
       />
+
+      {/* 2B. GRÁFICO DE BARRAS RECHARTS: HORAS PLANIFICADAS VS. HORAS REALES REGISTRADAS POR ASIGNATURA */}
+      <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div>
+            <h4 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              <span>
+                Horas de Estudio Planificadas vs. Horas Reales Registradas por Asignatura
+              </span>
+            </h4>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Comparativa directa entre la carga horaria planificada y el tiempo real registrado en sesiones Pomodoro y temas estudiados.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs font-semibold self-start sm:self-center shrink-0">
+            <button
+              type="button"
+              onClick={() => setSubjectHoursChartScope('total')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                subjectHoursChartScope === 'total'
+                  ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-2xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              Total Asignatura
+            </button>
+            <button
+              type="button"
+              onClick={() => setSubjectHoursChartScope('semanal')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                subjectHoursChartScope === 'semanal'
+                  ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-2xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              Meta Semanal
+            </button>
+          </div>
+        </div>
+
+        {/* Resumen rápido de totales del gráfico */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700 flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+              Total Planificado ({subjectHoursChartScope === 'total' ? 'Curso' : 'Semana'})
+            </span>
+            <span className="text-sm font-extrabold font-mono-numbers text-slate-900 dark:text-white">
+              {Math.round(
+                subjectComparisonData.reduce((acc, s) => acc + s.horasPlanificadas, 0) * 10
+              ) / 10}
+              h
+            </span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-blue-800 dark:text-blue-300">
+              Total Real Registrado
+            </span>
+            <span className="text-sm font-extrabold font-mono-numbers text-blue-700 dark:text-blue-300">
+              {Math.round(
+                subjectComparisonData.reduce((acc, s) => acc + s.horasRealesRegistradas, 0) * 10
+              ) / 10}
+              h
+            </span>
+          </div>
+
+          <div className="p-3 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-emerald-800 dark:text-emerald-300">
+              Cumplimiento Global
+            </span>
+            <span className="text-sm font-extrabold font-mono-numbers text-emerald-700 dark:text-emerald-300">
+              {(() => {
+                const planSum = subjectComparisonData.reduce(
+                  (acc, s) => acc + s.horasPlanificadas,
+                  0
+                );
+                const realSum = subjectComparisonData.reduce(
+                  (acc, s) => acc + s.horasRealesRegistradas,
+                  0
+                );
+                return planSum > 0 ? Math.min(100, Math.round((realSum / planSum) * 100)) : 0;
+              })()}
+              %
+            </span>
+          </div>
+        </div>
+
+        {/* Gráfico de Barras Agrupadas por Asignatura */}
+        <div className="h-72 w-full pt-2">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart
+              data={subjectComparisonData}
+              margin={{ top: 10, right: 20, left: -10, bottom: 10 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <XAxis
+                dataKey="name"
+                tick={{ fontSize: 11, fill: '#64748b' }}
+                axisLine={{ stroke: '#cbd5e1' }}
+              />
+              <YAxis
+                unit="h"
+                tick={{ fontSize: 11, fill: '#64748b' }}
+                axisLine={{ stroke: '#cbd5e1' }}
+              />
+              <Tooltip
+                formatter={(value: any, name: any) => [`${value} h`, name]}
+                labelFormatter={(label, payload) => {
+                  const row = payload?.[0]?.payload;
+                  return row ? `${row.fullName} (${row.completedTopics}/${row.totalTopics} temas)` : label;
+                }}
+                contentStyle={{
+                  borderRadius: '12px',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '12px',
+                }}
+              />
+              <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
+              <Bar
+                dataKey="horasPlanificadas"
+                name="Horas Planificadas"
+                fill="#94a3b8"
+                radius={[6, 6, 0, 0]}
+                maxBarSize={38}
+              />
+              <Bar
+                dataKey="horasRealesRegistradas"
+                name="Horas Reales Registradas"
+                fill="#2563eb"
+                radius={[6, 6, 0, 0]}
+                maxBarSize={38}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
 
       {/* 3. FILA DE ANÁLISIS ESENCIAL (2 COLUMNAS: RITMO SEMANAL + AVANCE POR ASIGNATURA) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

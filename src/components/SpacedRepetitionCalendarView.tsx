@@ -127,10 +127,10 @@ export const SpacedRepetitionCalendarView: React.FC<SpacedRepetitionCalendarView
   const [urgencyFilter, setUrgencyFilter] = useState<
     'all' | 'actionable' | 'upcoming' | 'stable' | 'unstarted'
   >('all');
-  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(true);
+  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(false);
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
 
-  // Calculate Spaced Repetition schedule & memory retention for all topics based on study history
+  // Calculate Spaced Repetition schedule & memory retention ONLY for topics/pages marked as studied/read
   const topicAnalyses: TopicReviewAnalysis[] = useMemo(() => {
     const results: TopicReviewAnalysis[] = [];
 
@@ -167,16 +167,13 @@ export const SpacedRepetitionCalendarView: React.FC<SpacedRepetitionCalendarView
 
         const pageInfo = schedulerService.getTopicStudiedPages(topic);
 
+        // REGLA ESTRICTA: Los repasos espaciados (1, 3, 7, 15, 30 días) SOLO se crean cuando el tema está estudiado/repasado o tiene páginas leídas > 0
         const hasStudyHistory =
           topic.status === 'estudiado' ||
           topic.status === 'repasado' ||
-          Boolean(topic.studiedAt) ||
-          historyRecords.length > 0 ||
-          pomodoroSessionsCount > 0 ||
-          (topic.actualHoursSpent || 0) > 0 ||
           pageInfo.studiedPages > 0;
 
-        // Determine Anchor Study Date (when the topic was first studied or is scheduled to be studied)
+        // Determine Anchor Study Date (when the topic/pages were studied)
         let anchorStudyDate = todayStr;
         if (topic.studiedAt) {
           anchorStudyDate = topic.studiedAt;
@@ -184,10 +181,11 @@ export const SpacedRepetitionCalendarView: React.FC<SpacedRepetitionCalendarView
           anchorStudyDate = historyDates[0];
         } else if (logDates.length > 0) {
           anchorStudyDate = logDates[0];
+        } else if (hasStudyHistory) {
+          anchorStudyDate = todayStr;
         } else if (topic.scheduledDate) {
           anchorStudyDate = topic.scheduledDate;
         } else {
-          // Stagger projected anchor dates for unstarted topics so they don't all pile on today
           anchorStudyDate = addDaysToDateStr(todayStr, idx * 2 + 1);
         }
 
@@ -200,6 +198,8 @@ export const SpacedRepetitionCalendarView: React.FC<SpacedRepetitionCalendarView
         const lastReviewDate =
           allActivityDates.length > 0
             ? allActivityDates[allActivityDates.length - 1]
+            : hasStudyHistory
+            ? anchorStudyDate
             : null;
 
         // Effective Review Level (0..5)
@@ -207,10 +207,8 @@ export const SpacedRepetitionCalendarView: React.FC<SpacedRepetitionCalendarView
         if (effectiveLevel === 0 && hasStudyHistory) {
           if (topic.status === 'repasado') {
             effectiveLevel = Math.max(2, historyRecords.length + 1);
-          } else if (topic.status === 'estudiado' || historyRecords.length > 0) {
-            effectiveLevel = Math.max(1, historyRecords.length);
-          } else if (pomodoroSessionsCount > 0 || (topic.actualHoursSpent || 0) >= 0.5) {
-            effectiveLevel = 1;
+          } else {
+            effectiveLevel = Math.max(1, historyRecords.length || 1);
           }
         }
         effectiveLevel = Math.min(5, effectiveLevel);

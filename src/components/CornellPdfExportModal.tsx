@@ -38,13 +38,6 @@ export const CornellPdfExportModal: React.FC<CornellPdfExportModalProps> = ({
   defaultScope = 'single',
   onExportComplete,
 }) => {
-  if (!isOpen) return null;
-
-  const allSubjectNotes = pdfCornellExportService.getExportableNotesForSubject(
-    subject,
-    subject.topics
-  );
-
   const [exportScope, setExportScope] = useState<'single' | 'subject'>(
     activeNote ? defaultScope : 'subject'
   );
@@ -55,6 +48,13 @@ export const CornellPdfExportModal: React.FC<CornellPdfExportModalProps> = ({
   const [includeTopicMetadata, setIncludeTopicMetadata] = useState<boolean>(true);
   const [studentName, setStudentName] = useState<string>('');
   const [exportSuccess, setExportSuccess] = useState<boolean>(false);
+
+  if (!isOpen) return null;
+
+  const allSubjectNotes = pdfCornellExportService.getExportableNotesForSubject(
+    subject,
+    subject.topics
+  );
 
   const previewNote: CornellNote = activeNote ||
     allSubjectNotes[0] || {
