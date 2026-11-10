@@ -20,6 +20,7 @@ import { SubjectDetailView } from './components/SubjectDetailView';
 import { PomodoroTimer } from './components/PomodoroTimer';
 import { SmartCalendarModal } from './components/SmartCalendarModal';
 import { SpacedRepetitionCalendarView } from './components/SpacedRepetitionCalendarView';
+import { HabitsTracker } from './components/HabitsTracker';
 import { PracticeQuizModule } from './components/PracticeQuizModule';
 import { WeeklyStatsModal } from './components/WeeklyStatsModal';
 import { ProgramManagerModal } from './components/ProgramManagerModal';
@@ -29,10 +30,11 @@ import { ExamsManagerModal } from './components/ExamsManagerModal';
 import { AuthModal } from './components/AuthModal';
 import { InteractiveOnboardingTour } from './components/InteractiveOnboardingTour';
 import { notificationService } from './services/notificationService';
-import { ArrowLeft, BookOpen, Plus, LayoutGrid, Kanban, AlertTriangle, AlertCircle, List, ChevronRight, FileText, PanelRight, Sparkles, Clock, RotateCcw, HelpCircle, ArrowRight, Brain } from 'lucide-react';
+import { ArrowLeft, BookOpen, Plus, LayoutGrid, Kanban, AlertTriangle, AlertCircle, List, ChevronRight, FileText, PanelRight, Sparkles, Clock, RotateCcw, HelpCircle, ArrowRight, Brain, Zap } from 'lucide-react';
 import { TopicKanbanBoard } from './components/TopicKanbanBoard';
 import { SubjectDocumentsSidePanel } from './components/SubjectDocumentsSidePanel';
 import { SubjectSpacedRepetitionInfoPopover } from './components/SubjectSpacedRepetitionInfoPopover';
+import { SubjectQuickReviewOverlay } from './components/SubjectQuickReviewOverlay';
 import { FeynmanChallenge } from './components/FeynmanChallenge';
 import { checkSubjectProgressAlert, getYearSubjectsWithAlert, getSubjectSpacedRepetitionAlert } from './utils/courseAlerts';
 import { User } from 'firebase/auth';
@@ -107,6 +109,7 @@ export default function App() {
   const [subjectLayoutMode, setSubjectLayoutMode] = useState<'detailed' | 'compact'>('detailed');
   const [kanbanFilterSubjectId, setKanbanFilterSubjectId] = useState<string>('all');
   const [isDocsSidePanelOpen, setIsDocsSidePanelOpen] = useState<boolean>(true);
+  const [quickReviewSubjectId, setQuickReviewSubjectId] = useState<string | null>(null);
 
   // Active navigation tab
   const [activeTab, setActiveTab] = useState<NavTabId>('curso');
@@ -868,9 +871,11 @@ export default function App() {
       storageService.savePreferences(updatedPrefs);
     }
 
-    // If linked to a topic, accumulate actual hours spent across any study program
-    if (log.subjectId && log.topicTitle) {
+    // If linked to a topic, accumulate actual hours spent and optionally auto-mark topic as studied
+    if (log.subjectId && (log.topicId || log.topicTitle)) {
       const hours = log.durationMinutes / 60;
+      const tomorrowStr = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+
       const updatedPrograms = programs.map((p) => ({
         ...p,
         years: p.years.map((y) => ({
@@ -880,10 +885,31 @@ export default function App() {
               return {
                 ...s,
                 topics: s.topics.map((t) => {
-                  if (t.title === log.topicTitle) {
+                  const isTargetTopic =
+                    (log.topicId && t.id === log.topicId) || t.title === log.topicTitle;
+                  if (isTargetTopic) {
+                    const nextHours = Math.round((t.actualHoursSpent + hours) * 10) / 10;
+                    if (log.autoMarkTopicStudied) {
+                      const wasPendingOrInProgress =
+                        t.status === 'pendiente' || t.status === 'en_progreso';
+                      return {
+                        ...t,
+                        actualHoursSpent: nextHours,
+                        status:
+                          t.status === 'repasado'
+                            ? ('repasado' as const)
+                            : ('estudiado' as const),
+                        studiedAt: todayStr,
+                        reviewLevel: Math.max(1, t.reviewLevel || 1),
+                        nextReviewDate: t.nextReviewDate || tomorrowStr,
+                        vueltasCount: wasPendingOrInProgress
+                          ? (t.vueltasCount || 0) + 1
+                          : Math.max(1, t.vueltasCount || 1),
+                      };
+                    }
                     return {
                       ...t,
-                      actualHoursSpent: Math.round((t.actualHoursSpent + hours) * 10) / 10,
+                      actualHoursSpent: nextHours,
                     };
                   }
                   return t;
@@ -896,6 +922,7 @@ export default function App() {
       }));
 
       setPrograms(updatedPrograms);
+      storageService.savePrograms(updatedPrograms);
     }
   };
 
@@ -1133,61 +1160,97 @@ export default function App() {
             }))
           }
           onStartOnboardingTour={() => setIsOnboardingTourOpen(true)}
+          preferences={preferences}
+          onUpdatePreferences={(updated) => setPreferences(updated)}
         />
       )}
 
       {/* Main Content Viewport */}
       <main className="flex-1 min-w-0 w-full max-w-6xl overflow-x-hidden mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
+        {/* Sección desplegable compacta de HabitsTracker en el componente principal */}
+        {!isPomodoroFocusMode && activeTab !== 'calendario' && activeTab !== 'repaso' && (
+          <div className="mb-5">
+            <HabitsTracker
+              preferences={preferences}
+              onUpdatePreferences={(updated) => setPreferences(updated)}
+              onScheduleHabitOneDay={(title, dateStr, startTime, endTime, category, notes) => {
+                handleAddBlockedEvent({
+                  id: `block-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  title,
+                  date: dateStr,
+                  startTime,
+                  endTime,
+                  category,
+                  notes,
+                });
+              }}
+              onScheduleHabitWeekly={(title, category, days, startTime, endTime, notes) => {
+                handleAddBlockedEvent({
+                  id: `block-weekly-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  title,
+                  recurringDays: days,
+                  startTime,
+                  endTime,
+                  category: category === 'gimnasio' ? 'deporte' : category === 'domestico' ? 'personal' : (category as any),
+                  notes,
+                });
+              }}
+            />
+          </div>
+        )}
+
         {/* Tab 1: Pestaña General por Curso */}
         {activeTab === 'curso' && activeYear && (
-          <CourseGeneralView
-            programName={combinedProgramTitle}
-            year={{
-              ...activeYear,
-              name:
-                activeYears.length > 1
-                  ? activeYears.map((y) => y.name).join(' + ')
-                  : activeYear.name,
-              targetWeeklyHours:
-                activeYears.length > 0
-                  ? activeYears.reduce((sum, y) => sum + (y.targetWeeklyHours || 20), 0)
-                  : activeYear.targetWeeklyHours || 20,
-              subjects: activeSubjects,
-            }}
-            activeProgramsCount={effectiveActivePrograms.length}
-            activeYearsCount={activeYears.length}
-            totalProgramsCount={programs.length}
-            totalYearsCount={programs.reduce((acc, p) => acc + p.years.length, 0)}
-            onSelectAllProgramsAndYears={handleSelectAllProgramsAndYears}
-            streakDays={preferences.streakDays}
-            preferences={preferences}
-            onUpdatePreferences={(updated) => setPreferences(updated)}
-            onOpenPreferences={() => setIsPreferencesModalOpen(true)}
-            pomodoroLogs={pomodoroLogs}
-            onPomodoroSessionComplete={handlePomodoroComplete}
-            blockedEvents={blockedEvents}
-            onAddBlockedEvent={handleAddBlockedEvent}
-            onDeleteBlockedEvent={handleDeleteBlockedEvent}
-            onSelectSubject={(subId) => {
-              setSelectedSubjectId(subId);
-              setActiveTab('asignaturas');
-            }}
-            onOpenNewSubject={() => setIsProgramModalOpen(true)}
-            onToggleTask={handleToggleTask}
-            onSelectForPomodoro={handleStartPomodoroWithSubject}
-            onOpenScheduler={() => setActiveTab('calendario')}
-            onAddTaskToSubject={handleAddTaskToSubject}
-            onAddExamToSubject={handleAddExamToSubject}
-            onUpdateTopicsSchedule={handleUpdateTopicsSchedule}
-            onUpdateSubject={handleUpdateSubject}
-            onOpenExamsManager={(subId?: string) => {
-              setExamsManagerSubjectId(subId);
-              setIsExamsManagerOpen(true);
-            }}
-            onOpenQuizzesForSubject={(subId: string, topicIds?: string[]) => {
-              handleJumpToSubjectQuizzes(subId, topicIds);
-            }}
-          />
+          <div className="space-y-5">
+            <CourseGeneralView
+              programName={combinedProgramTitle}
+              year={{
+                ...activeYear,
+                name:
+                  activeYears.length > 1
+                    ? activeYears.map((y) => y.name).join(' + ')
+                    : activeYear.name,
+                targetWeeklyHours:
+                  activeYears.length > 0
+                    ? activeYears.reduce((sum, y) => sum + (y.targetWeeklyHours || 20), 0)
+                    : activeYear.targetWeeklyHours || 20,
+                subjects: activeSubjects,
+              }}
+              activeProgramsCount={effectiveActivePrograms.length}
+              activeYearsCount={activeYears.length}
+              totalProgramsCount={programs.length}
+              totalYearsCount={programs.reduce((acc, p) => acc + p.years.length, 0)}
+              onSelectAllProgramsAndYears={handleSelectAllProgramsAndYears}
+              streakDays={preferences.streakDays}
+              preferences={preferences}
+              onUpdatePreferences={(updated) => setPreferences(updated)}
+              onOpenPreferences={() => setIsPreferencesModalOpen(true)}
+              pomodoroLogs={pomodoroLogs}
+              onPomodoroSessionComplete={handlePomodoroComplete}
+              blockedEvents={blockedEvents}
+              onAddBlockedEvent={handleAddBlockedEvent}
+              onDeleteBlockedEvent={handleDeleteBlockedEvent}
+              onSelectSubject={(subId) => {
+                setSelectedSubjectId(subId);
+                setActiveTab('asignaturas');
+              }}
+              onOpenNewSubject={() => setIsProgramModalOpen(true)}
+              onToggleTask={handleToggleTask}
+              onSelectForPomodoro={handleStartPomodoroWithSubject}
+              onOpenScheduler={() => setActiveTab('calendario')}
+              onAddTaskToSubject={handleAddTaskToSubject}
+              onAddExamToSubject={handleAddExamToSubject}
+              onUpdateTopicsSchedule={handleUpdateTopicsSchedule}
+              onUpdateSubject={handleUpdateSubject}
+              onOpenExamsManager={(subId?: string) => {
+                setExamsManagerSubjectId(subId);
+                setIsExamsManagerOpen(true);
+              }}
+              onOpenQuizzesForSubject={(subId: string, topicIds?: string[]) => {
+                handleJumpToSubjectQuizzes(subId, topicIds);
+              }}
+            />
+          </div>
         )}
 
         {/* Tab 2: Materias y Temarios + Panel lateral de PDFs/Documentos */}
@@ -1393,14 +1456,21 @@ export default function App() {
                         subject={targetFeynmanSubject}
                         subjects={activeSubjects}
                         onSelectSubject={(subId) => setFeynmanSubjectId(subId)}
-                        onSaveSession={(session) => {
+                        onSaveSession={(session, autoFlashcards) => {
                           handleUpdateSubject({
                             ...targetFeynmanSubject,
                             feynmanSessions: [
                               session,
                               ...(targetFeynmanSubject.feynmanSessions || []),
                             ],
+                            flashcards:
+                              autoFlashcards && autoFlashcards.length > 0
+                                ? [...(targetFeynmanSubject.flashcards || []), ...autoFlashcards]
+                                : targetFeynmanSubject.flashcards,
                           });
+                        }}
+                        onAddFlashcards={(newCards) => {
+                          handleSaveFlashcardsToSubject(targetFeynmanSubject.id, newCards);
                         }}
                         onDeleteSession={(sessionId) => {
                           handleUpdateSubject({
@@ -1927,6 +1997,19 @@ export default function App() {
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
+                                    setQuickReviewSubjectId(sub.id);
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-500 text-amber-800 hover:text-white dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-[11px] font-bold transition-colors cursor-pointer"
+                                  title="Revisión Rápida: puntos clave y conceptos Cornell de esta materia"
+                                >
+                                  <Zap className="w-3 h-3 text-amber-500 group-hover:text-current shrink-0" />
+                                  <span className="hidden sm:inline">Revisión Rápida</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     handleStartPomodoroWithSubject(sub.id);
                                   }}
                                   className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-blue-600 text-slate-700 hover:text-white dark:bg-slate-800 dark:text-slate-300 text-[11px] font-semibold transition-colors cursor-pointer"
@@ -2244,7 +2327,20 @@ export default function App() {
 
                               {/* Pie de acciones directas en 1 clic */}
                               <div className="px-5 py-3 border-t border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30 flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setQuickReviewSubjectId(sub.id);
+                                    }}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-500 dark:bg-amber-950/60 dark:hover:bg-amber-600 text-amber-800 dark:text-amber-200 hover:text-white border border-amber-200 dark:border-amber-800 text-[11px] font-bold transition-colors cursor-pointer"
+                                    title={`Revisión Rápida de puntos clave y apuntes Cornell (${sub.name})`}
+                                  >
+                                    <Zap className="w-3 h-3 text-amber-500 shrink-0" />
+                                    <span>Revisión Rápida</span>
+                                  </button>
+
                                   <button
                                     type="button"
                                     onClick={(e) => {
@@ -2541,6 +2637,19 @@ export default function App() {
             setSelectedSubjectId(activeSubjects[0].id);
           }
         }}
+      />
+
+      {/* Revisión Rápida Overlay (Puntos Clave y Apuntes Cornell por Materia) */}
+      <SubjectQuickReviewOverlay
+        subject={activeSubjects.find((s) => s.id === quickReviewSubjectId) || null}
+        isOpen={Boolean(quickReviewSubjectId)}
+        onClose={() => setQuickReviewSubjectId(null)}
+        onStartPomodoro={(subId, topId) => handleStartPomodoroWithSubject(subId, topId)}
+        onOpenSubjectDetail={(subId) => {
+          setSelectedSubjectId(subId);
+          setActiveTab('asignaturas');
+        }}
+        onOpenQuizzes={(subId, topIds) => handleJumpToSubjectQuizzes(subId, topIds)}
       />
     </div>
   );

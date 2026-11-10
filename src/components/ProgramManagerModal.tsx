@@ -33,6 +33,7 @@ import {
   Search,
   ChevronDown,
   Award,
+  Target,
 } from 'lucide-react';
 import {
   StudyProgram,
@@ -123,10 +124,61 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   preferences,
   onUpdatePreferences,
 }) => {
-  // Modal Top Navigation: 'all' (Vista Completa · Árbol y Panorama Académico) o 'hierarchy' (Gestión de Estudios, Cursos y Materias)
-  const [activeModalTab, setActiveModalTab] = useState<'all' | 'hierarchy'>('all');
+  // Modal Top Navigation: 'all' (Vista Completa), 'hierarchy' (Gestión de Estudios), o 'smart_goals' (Objetivos SMART con IA)
+  const [activeModalTab, setActiveModalTab] = useState<'all' | 'hierarchy' | 'smart_goals'>('all');
   const [panoramaSearch, setPanoramaSearch] = useState('');
   const [panoramaProgramFilter, setPanoramaProgramFilter] = useState<string>('all');
+
+  // SMART Goals AI State
+  const [smartGoalsTimeframe, setSmartGoalsTimeframe] = useState<'semanal' | 'mensual' | 'examenes'>('semanal');
+  const [isGeneratingSmartGoals, setIsGeneratingSmartGoals] = useState(false);
+  const [smartGoalsError, setSmartGoalsError] = useState<string | null>(null);
+  const [smartGoalsData, setSmartGoalsData] = useState<{
+    workloadDiagnosis: string;
+    recommendedWeeklyHours: number;
+    generatedAt?: string;
+    timeframe?: string;
+    smartGoals: Array<{
+      id: string;
+      title: string;
+      subjectName: string;
+      priority: 'alta' | 'media' | 'baja';
+      specific: string;
+      measurable: string;
+      achievable: string;
+      relevant: string;
+      timeBound: string;
+      milestones: string[];
+    }>;
+  } | null>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_smart_goals_v1');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [completedMilestones, setCompletedMilestones] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_smart_milestones_v1');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const handleToggleMilestone = (goalId: string, milestoneIdx: number) => {
+    const key = `${goalId}__${milestoneIdx}`;
+    setCompletedMilestones((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      try {
+        localStorage.setItem('studyflow_smart_milestones_v1', JSON.stringify(next));
+      } catch {
+        // ignore quota errors
+      }
+      return next;
+    });
+  };
 
   // Add Study Program State
   const [newProgramName, setNewProgramName] = useState('');
@@ -275,6 +327,101 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
       internalPreferences.weeklyFixedObligations || []
     );
   }, [subjectsInScope, internalPreferences, internalBlockedEvents]);
+
+  const handleGenerateSmartGoals = async () => {
+    setIsGeneratingSmartGoals(true);
+    setSmartGoalsError(null);
+
+    try {
+      const targetSubjects =
+        subjectsInScope.length > 0
+          ? subjectsInScope
+          : programs.flatMap((p) => p.years.flatMap((y) => y.subjects));
+
+      const subjectsSummary = targetSubjects.map((sub) => {
+        const prog = schedulerService.calculateSubjectAcademicProgress(sub.topics || []);
+        const upcomingExams = (sub.exams || [])
+          .filter((ex) => ex.date >= new Date().toISOString().split('T')[0])
+          .sort((a, b) => a.date.localeCompare(b.date));
+        const nextExam = upcomingExams[0];
+        const pendingTopics = (sub.topics || []).filter(
+          (t) => t.status === 'pendiente' || t.status === 'en_progreso'
+        ).length;
+        const studiedTopics = (sub.topics || []).filter(
+          (t) => t.status === 'estudiado' || t.status === 'repasado'
+        ).length;
+
+        return {
+          name: sub.name,
+          code: sub.code || '',
+          credits: sub.credits || 6,
+          totalTopics: (sub.topics || []).length,
+          studiedTopics,
+          pendingTopics,
+          progressPercentage: prog.progressPct,
+          remainingHours: prog.remainingHours,
+          nextExamDate: nextExam ? `${nextExam.title} (${nextExam.date})` : 'Sin fecha asignada',
+          pendingTasksCount: (sub.tasks || []).filter((tk) => !tk.completed).length,
+          unresolvedErrorsCount: (sub.errorLogs || []).filter((er) => !er.resolved).length,
+        };
+      });
+
+      const response = await fetch('/api/gemini/generate-smart-goals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          programName: currentProgram?.name || 'Plan Académico General',
+          yearName: currentYear?.name || 'Curso Actual',
+          targetWeeklyHours: currentYear?.targetWeeklyHours || 20,
+          dailyAvailableHours: dailyNeeds.realAvailableHoursDaily || 4,
+          blockedWeeklyHours: dailyNeeds.totalBlockedHoursWeekly || 0,
+          focusTimeframe: smartGoalsTimeframe,
+          subjectsSummary,
+        }),
+      });
+
+      if (!response.ok) {
+        const errPayload = await response.json().catch(() => ({}));
+        throw new Error(errPayload.error || 'No se pudieron generar los objetivos SMART.');
+      }
+
+      const data = await response.json();
+      const enriched = {
+        ...data,
+        generatedAt: new Date().toISOString(),
+        timeframe: smartGoalsTimeframe,
+      };
+      setSmartGoalsData(enriched);
+      try {
+        localStorage.setItem('studyflow_smart_goals_v1', JSON.stringify(enriched));
+      } catch {
+        // ignore storage errors
+      }
+    } catch (error: any) {
+      setSmartGoalsError(error?.message || 'Error al conectar con el motor de IA.');
+    } finally {
+      setIsGeneratingSmartGoals(false);
+    }
+  };
+
+  const handleApplyRecommendedHoursToYear = (recHours: number) => {
+    if (!currentProgram || !currentYear) return;
+    const validHours = Math.max(2, Math.min(70, Math.round(recHours)));
+    const updatedPrograms = programs.map((prog) => {
+      if (prog.id !== currentProgram.id) return prog;
+      return {
+        ...prog,
+        years: prog.years.map((yr) =>
+          yr.id === currentYear.id ? { ...yr, targetWeeklyHours: validHours } : yr
+        ),
+      };
+    });
+    onUpdatePrograms(updatedPrograms);
+    setImportNotice(
+      `Meta semanal de "${currentYear.name}" actualizada a ${validHours}h/semana según el diagnóstico SMART.`
+    );
+    setTimeout(() => setImportNotice(null), 4000);
+  };
 
   // Filter only recurring blocked events
   const recurringBlockedEvents = useMemo(() => {
@@ -916,6 +1063,22 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
           >
             <FolderTree className="w-4 h-4" />
             <span>Gestión y Edición (Estudios, Cursos y Materias)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveModalTab('smart_goals')}
+            className={`pb-3 px-3.5 text-xs font-bold flex items-center gap-2 border-b-2 transition-colors cursor-pointer ${
+              activeModalTab === 'smart_goals'
+                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Target className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            <span>Objetivos SMART (IA)</span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300">
+              Gemini
+            </span>
           </button>
         </div>
 
@@ -2304,6 +2467,344 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
           )}
         </div>
       )}
+
+          {/* ========================================================== */}
+          {/* TAB 3: GENERADOR DE OBJETIVOS SMART PERSONALIZADOS CON IA  */}
+          {/* ========================================================== */}
+          {activeModalTab === 'smart_goals' && (
+            <div className="space-y-6">
+              {/* Cabecera y Controles de Generación IA */}
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950 via-slate-900 to-blue-950 text-white border border-indigo-800/60 shadow-sm">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="space-y-1.5 max-w-2xl">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-500/20 border border-indigo-400/30 text-indigo-200 text-[11px] font-bold">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>Motor Analítico Gemini · Metodología SMART</span>
+                    </div>
+                    <h4 className="text-base sm:text-lg font-extrabold tracking-tight text-white">
+                      Objetivos Académicos SMART Personalizados
+                    </h4>
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      Analiza tu carga real ({subjectsInScope.length} asignaturas,{' '}
+                      <span className="font-mono-numbers font-bold text-white">
+                        {Math.round(
+                          subjectsInScope.reduce(
+                            (acc, s) =>
+                              acc +
+                              schedulerService.calculateSubjectAcademicProgress(s.topics || [])
+                                .remainingHours,
+                            0
+                          ) * 10
+                        ) / 10}
+                        h
+                      </span>{' '}
+                      de temario pendiente y{' '}
+                      <span className="font-mono-numbers font-bold text-white">
+                        {dailyNeeds.totalBlockedHoursWeekly}h/sem
+                      </span>{' '}
+                      bloqueadas) para diseñar metas Específicas, Medibles, Alcanzables, Relevantes y con Plazo definido.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                    <div className="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700 text-xs">
+                      {(
+                        [
+                          { id: 'semanal', label: 'Sprint 7 días' },
+                          { id: 'mensual', label: 'Mes (4 sem)' },
+                          { id: 'examenes', label: 'Recta Exámenes' },
+                        ] as const
+                      ).map((tf) => (
+                        <button
+                          key={tf.id}
+                          type="button"
+                          onClick={() => setSmartGoalsTimeframe(tf.id)}
+                          className={`px-2.5 py-1.5 rounded-lg font-bold transition-colors cursor-pointer ${
+                            smartGoalsTimeframe === tf.id
+                              ? 'bg-indigo-600 text-white shadow-2xs'
+                              : 'text-slate-300 hover:text-white'
+                          }`}
+                        >
+                          {tf.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleGenerateSmartGoals}
+                      disabled={isGeneratingSmartGoals}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-60 text-slate-950 font-extrabold text-xs transition-all cursor-pointer shadow-sm"
+                    >
+                      {isGeneratingSmartGoals ? (
+                        <>
+                          <RotateCw className="w-4 h-4 animate-spin" />
+                          <span>Analizando carga con IA...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4" />
+                          <span>
+                            {smartGoalsData ? 'Regenerar Objetivos SMART' : 'Generar Objetivos SMART con IA'}
+                          </span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Resumen de métricas de entrada analizadas */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-4 pt-4 border-t border-white/10 text-xs">
+                  <div className="bg-white/5 rounded-xl px-3 py-2 border border-white/10">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Curso Analizado
+                    </span>
+                    <span className="font-bold text-white truncate block">
+                      {currentProgram?.name || 'Estudio'} · {currentYear?.name || 'General'}
+                    </span>
+                  </div>
+                  <div className="bg-white/5 rounded-xl px-3 py-2 border border-white/10">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Temas Completados
+                    </span>
+                    <span className="font-mono-numbers font-bold text-emerald-300">
+                      {allGlobalStats.completedTopics}/{allGlobalStats.totalTopics} ({allGlobalStats.completionPct}%)
+                    </span>
+                  </div>
+                  <div className="bg-white/5 rounded-xl px-3 py-2 border border-white/10">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Carga Neta Diaria
+                    </span>
+                    <span className="font-mono-numbers font-bold text-amber-300">
+                      {dailyNeeds.totalHoursNeededDaily}h/día requeridas
+                    </span>
+                  </div>
+                  <div className="bg-white/5 rounded-xl px-3 py-2 border border-white/10">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Capacidad Libre Real
+                    </span>
+                    <span className="font-mono-numbers font-bold text-sky-300">
+                      {dailyNeeds.realAvailableHoursDaily}h/día disponibles
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {smartGoalsError && (
+                <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs text-rose-700 dark:text-rose-200 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                    <span>{smartGoalsError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGenerateSmartGoals}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-500 cursor-pointer shrink-0"
+                  >
+                    Reintentar
+                  </button>
+                </div>
+              )}
+
+              {/* Resultados SMART Generados */}
+              {smartGoalsData ? (
+                <div className="space-y-5">
+                  {/* Diagnóstico de Carga y Meta Semanal Recomendada */}
+                  <div className="p-4 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                        <span className="text-xs font-extrabold uppercase tracking-wider text-indigo-900 dark:text-indigo-200">
+                          Diagnóstico de Carga Académica (IA)
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                        {smartGoalsData.workloadDiagnosis}
+                      </p>
+                    </div>
+
+                    {smartGoalsData.recommendedWeeklyHours > 0 && currentYear && (
+                      <div className="shrink-0 bg-white dark:bg-slate-800 p-3 rounded-xl border border-indigo-200 dark:border-indigo-800 flex items-center gap-3">
+                        <div>
+                          <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                            Meta Semanal Sugerida
+                          </span>
+                          <span className="text-base font-extrabold font-mono-numbers text-indigo-600 dark:text-indigo-400">
+                            {smartGoalsData.recommendedWeeklyHours}h / semana
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleApplyRecommendedHoursToYear(smartGoalsData.recommendedWeeklyHours)
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-colors cursor-pointer"
+                          title="Aplicar esta meta de horas semanales al curso activo"
+                        >
+                          Aplicar al Curso
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tarjetas de Objetivos SMART */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {(smartGoalsData.smartGoals || []).map((goal, idx) => {
+                      const priorityBadge =
+                        goal.priority === 'alta'
+                          ? 'bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-950/70 dark:text-rose-300 dark:border-rose-800'
+                          : goal.priority === 'media'
+                          ? 'bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800'
+                          : 'bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800';
+
+                      const totalMilestones = (goal.milestones || []).length;
+                      const doneMilestones = (goal.milestones || []).filter(
+                        (_, mIdx) => completedMilestones[`${goal.id || idx}__${mIdx}`]
+                      ).length;
+
+                      return (
+                        <div
+                          key={goal.id || idx}
+                          className="p-4 rounded-2xl bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/80 shadow-2xs flex flex-col justify-between space-y-4"
+                        >
+                          <div className="space-y-3">
+                            {/* Cabecera de la meta */}
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 block">
+                                  {goal.subjectName}
+                                </span>
+                                <h5 className="text-sm font-extrabold text-slate-900 dark:text-slate-100 mt-0.5">
+                                  {goal.title}
+                                </h5>
+                              </div>
+                              <span
+                                className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md border shrink-0 ${priorityBadge}`}
+                              >
+                                Prioridad {goal.priority}
+                              </span>
+                            </div>
+
+                            {/* Desglose S-M-A-R-T */}
+                            <div className="space-y-1.5 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-xl border border-slate-100 dark:border-slate-800 text-xs">
+                              <div className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded bg-blue-600 text-white font-extrabold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                  S
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300">
+                                  <strong className="text-slate-900 dark:text-slate-100">Específico:</strong>{' '}
+                                  {goal.specific}
+                                </p>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded bg-indigo-600 text-white font-extrabold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                  M
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300">
+                                  <strong className="text-slate-900 dark:text-slate-100">Medible:</strong>{' '}
+                                  {goal.measurable}
+                                </p>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded bg-emerald-600 text-white font-extrabold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                  A
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300">
+                                  <strong className="text-slate-900 dark:text-slate-100">Alcanzable:</strong>{' '}
+                                  {goal.achievable}
+                                </p>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded bg-amber-500 text-slate-950 font-extrabold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                  R
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300">
+                                  <strong className="text-slate-900 dark:text-slate-100">Relevante:</strong>{' '}
+                                  {goal.relevant}
+                                </p>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <span className="w-5 h-5 rounded bg-purple-600 text-white font-extrabold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                  T
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300">
+                                  <strong className="text-slate-900 dark:text-slate-100">Plazo temporal:</strong>{' '}
+                                  {goal.timeBound}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Hitos accionables verificables */}
+                          {totalMilestones > 0 && (
+                            <div className="pt-2 border-t border-slate-100 dark:border-slate-700/70 space-y-2">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="font-bold text-slate-700 dark:text-slate-300">
+                                  Hitos Verificables ({doneMilestones}/{totalMilestones})
+                                </span>
+                                <span className="font-mono-numbers text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                                  {Math.round((doneMilestones / totalMilestones) * 100)}% completado
+                                </span>
+                              </div>
+                              <div className="space-y-1.5">
+                                {goal.milestones.map((ms, mIdx) => {
+                                  const isDone = Boolean(
+                                    completedMilestones[`${goal.id || idx}__${mIdx}`]
+                                  );
+                                  return (
+                                    <label
+                                      key={mIdx}
+                                      onClick={() => handleToggleMilestone(goal.id || String(idx), mIdx)}
+                                      className={`flex items-start gap-2 p-2 rounded-lg border text-xs cursor-pointer transition-colors ${
+                                        isDone
+                                          ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800/60 text-emerald-900 dark:text-emerald-200 line-through opacity-80'
+                                          : 'bg-slate-50/60 dark:bg-slate-900/40 border-slate-200/70 dark:border-slate-700/70 text-slate-700 dark:text-slate-200 hover:bg-slate-100/70'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={isDone}
+                                        onChange={() => {}}
+                                        className="mt-0.5 rounded text-emerald-600 focus:ring-0 cursor-pointer"
+                                      />
+                                      <span className="leading-snug">{ms}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-8 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 text-center space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-100 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mx-auto">
+                    <Target className="w-6 h-6" />
+                  </div>
+                  <div className="space-y-1 max-w-md mx-auto">
+                    <h5 className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                      Genera tu Hoja de Ruta con Objetivos SMART
+                    </h5>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Pulsa en «Generar Objetivos SMART con IA» para que Gemini analice tus asignaturas, temas pendientes, fechas de examen y horas libres, proponiéndote hitos semanales o mensuales realistas.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGenerateSmartGoals}
+                    disabled={isGeneratingSmartGoals}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Generar Objetivos SMART Ahora</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Backup & Exportación/Importación de Datos */}
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">

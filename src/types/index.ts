@@ -542,6 +542,47 @@ export interface StudyPreferences {
   timeBlockMode?: boolean; // Activar vista en bloque horario
   studyDayStartHour?: number; // hora de inicio del día (ej: 8 para 08:00)
   studyDayEndHour?: number; // hora de fin del día (ej: 22 para 22:00)
+  // Control de Hábitos y Mood Tracker
+  habits?: HabitItem[];
+  moodEntries?: MoodEntry[];
+}
+
+export type HabitCategory =
+  | 'deporte'
+  | 'domestico'
+  | 'mascota'
+  | 'salud'
+  | 'descanso'
+  | 'estudio'
+  | 'personal';
+
+export type HabitPreferredPeriod = 'manana' | 'mediodia' | 'tarde' | 'noche' | 'cualquiera';
+
+export interface HabitItem {
+  id: string;
+  title: string;
+  emoji: string;
+  category: HabitCategory;
+  frequencyDays: number[]; // 0 = Dom, 1 = Lun ... 6 = Sab
+  requiresCalendarSlot: boolean;
+  durationMinutes?: number; // ej: 30, 45, 60, 90
+  location?: string; // ej: "Casa", "Gimnasio", "Parque"
+  preferredPeriod?: HabitPreferredPeriod;
+  scheduledStartTime?: string; // HH:mm
+  scheduledEndTime?: string; // HH:mm
+  completedDates: string[]; // YYYY-MM-DD
+  createdAt: string;
+}
+
+export type MoodType = 'excelente' | 'motivado' | 'equilibrado' | 'cansado' | 'estresado';
+
+export interface MoodEntry {
+  id: string;
+  date: string; // YYYY-MM-DD
+  mood: MoodType;
+  energyLevel: number; // 1..5
+  note?: string;
+  updatedAt: string;
 }
 
 export interface ForgettingCurveProfile {
@@ -590,10 +631,12 @@ export interface PomodoroLog {
   id: string;
   subjectId: string;
   subjectName: string;
+  topicId?: string;
   topicTitle?: string;
   durationMinutes: number;
   date: string; // YYYY-MM-DD
   timestamp: string;
+  autoMarkTopicStudied?: boolean;
 }
 
 export interface ScheduledStudySession {
@@ -613,4 +656,5 @@ export interface ScheduledStudySession {
   type: 'estudio_nuevo' | 'repaso_espaciado' | 'simulacro_examen';
   completed: boolean;
 }
+
 

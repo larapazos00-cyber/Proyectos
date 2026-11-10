@@ -2098,6 +2098,214 @@ Responde íntegramente en español.`;
   }
 });
 
+// 14. Generación de Objetivos SMART personalizados basados en la carga académica actual del estudiante
+app.post('/api/gemini/generate-smart-goals', async (req: Request, res: Response) => {
+  const {
+    programName = 'Grado Universitario',
+    yearName = 'Curso Actual',
+    targetWeeklyHours = 20,
+    dailyAvailableHours = 4,
+    blockedWeeklyHours = 15,
+    focusTimeframe = 'semanal',
+    subjectsSummary = [],
+  } = req.body || {};
+
+  const buildSmartGoalsFallback = () => {
+    const subs = Array.isArray(subjectsSummary) ? subjectsSummary : [];
+    const totalTopics = subs.reduce((acc: number, s: any) => acc + (Number(s.totalTopics) || 0), 0);
+    const completedTopics = subs.reduce(
+      (acc: number, s: any) => acc + (Number(s.completedTopics) || 0),
+      0
+    );
+    const pendingTopics = Math.max(0, totalTopics - completedTopics);
+    const globalPct = totalTopics > 0 ? Math.round((completedTopics / totalTopics) * 100) : 0;
+
+    const sortedByUrgency = [...subs].sort((a: any, b: any) => {
+      const aPct = Number(a.progressPct) || 0;
+      const bPct = Number(b.progressPct) || 0;
+      return aPct - bPct;
+    });
+
+    const prioritySubjects = sortedByUrgency.slice(0, 3);
+    const smartGoals = prioritySubjects.map((sub: any, idx: number) => {
+      const subTotal = Number(sub.totalTopics) || 6;
+      const subDone = Number(sub.completedTopics) || 0;
+      const subRemaining = Math.max(1, subTotal - subDone);
+      const stepTopics = Math.min(subRemaining, focusTimeframe === 'semanal' ? 2 : 5);
+      const estHoursNeeded = Math.max(2, Math.round((Number(sub.remainingHours) || stepTopics * 2) * 10) / 10);
+
+      return {
+        id: `smart-goal-${Date.now()}-${idx}`,
+        title: `Avanzar ${stepTopics} ${stepTopics === 1 ? 'tema clave' : 'temas clave'} en ${sub.name}`,
+        subjectName: sub.name,
+        priority: idx === 0 ? 'alta' : 'media',
+        specific: `Completar el estudio comprensivo y síntesis Cornell de ${stepTopics} ${
+          stepTopics === 1 ? 'tema pendiente' : 'temas pendientes'
+        } de ${sub.name}.`,
+        measurable: `Pasar de ${subDone}/${subTotal} (${sub.progressPct || 0}%) a ${Math.min(
+          subTotal,
+          subDone + stepTopics
+        )}/${subTotal} temas estudiados.`,
+        achievable: `Distribuido en bloques de ${Math.min(
+          dailyAvailableHours,
+          2
+        )}h aprovechando tus ${dailyAvailableHours}h diarias disponibles (~${estHoursNeeded}h en total).`,
+        relevant: sub.nextExamDate
+          ? `Prioritario para llegar con margen al examen del ${sub.nextExamDate} (${sub.credits || 6} ECTS).`
+          : `Impulsa el dominio de una asignatura de ${sub.credits || 6} ECTS y evita cuellos de botella.`,
+        timeBound:
+          focusTimeframe === 'semanal'
+            ? 'En los próximos 7 días (cierre de semana).'
+            : focusTimeframe === 'mensual'
+            ? 'En las próximas 4 semanas.'
+            : sub.nextExamDate
+            ? `Antes del examen (${sub.nextExamDate}).`
+            : 'En los próximos 14 días.',
+        milestones: [
+          `Completar lectura activa y apuntes Cornell del primer tema pendiente de ${sub.name}`,
+          `Realizar 2 bloques Pomodoro con meta de tema activa para consolidar conceptos`,
+          `Superar un cuestionario de autoevaluación con al menos 80% de acierto`,
+        ],
+      };
+    });
+
+    if (smartGoals.length === 0) {
+      smartGoals.push({
+        id: `smart-goal-${Date.now()}-general`,
+        title: `Consolidar ritmo semanal de ${targetWeeklyHours}h en ${programName}`,
+        subjectName: yearName,
+        priority: 'alta',
+        specific: `Estructurar y cumplir ${targetWeeklyHours}h semanales de estudio efectivo con método Cornell y Pomodoro.`,
+        measurable: `Completar al menos 3 temas nuevos y 2 sesiones de repaso espaciado por semana.`,
+        achievable: `Ajustado a tu disponibilidad real de ${dailyAvailableHours}h/día descontando ${blockedWeeklyHours}h bloqueadas.`,
+        relevant: `Base indispensable para mantener la constancia académica en ${programName}.`,
+        timeBound: 'Durante los próximos 7 días.',
+        milestones: [
+          'Bloquear las franjas de estudio principales en el calendario inteligente',
+          'Completar los primeros 3 ciclos Pomodoro de la semana',
+          'Registrar un repaso de puntos clave antes del domingo',
+        ],
+      });
+    }
+
+    return {
+      workloadDiagnosis: `Actualmente acumulas un ${globalPct}% de avance global (${completedTopics}/${totalTopics} temas completados, ${pendingTopics} pendientes) en ${programName} (${yearName}). Con ${dailyAvailableHours}h libres al día y ${blockedWeeklyHours}h semanales bloqueadas, la carga es manejable si priorizas las materias con menor porcentaje de avance.`,
+      recommendedWeeklyHours: Math.max(
+        10,
+        Math.min(45, Math.round(dailyAvailableHours * 5 * 0.85))
+      ),
+      smartGoals,
+    };
+  };
+
+  try {
+    const subjectsContext = Array.isArray(subjectsSummary)
+      ? subjectsSummary
+          .map(
+            (s: any) =>
+              `- ${s.name} (${s.code || 'ASIG'}, ${s.credits || 6} ECTS): ${s.completedTopics || 0}/${
+                s.totalTopics || 0
+              } temas (${s.progressPct || 0}%), horas restantes estimadas: ${
+                s.remainingHours || 0
+              }h, tareas pendientes: ${s.pendingTasksCount || 0}, próximo examen: ${
+                s.nextExamDate || 'sin fecha'
+              }`
+          )
+          .join('\n')
+      : 'Sin asignaturas detalladas';
+
+    const prompt = `Actúa como un mentor académico experto en planificación universitaria, neuroeducación y metodología de objetivos SMART (Specific, Measurable, Achievable, Relevant, Time-bound).
+Analiza los datos académicos reales del estudiante y genera un diagnóstico ejecutivo de su carga de estudio junto con 4 objetivos SMART altamente personalizados y accionables.
+
+Contexto académico actual del usuario:
+- Estudio / Programa: "${programName}"
+- Curso: "${yearName}"
+- Horizonte temporal solicitado: "${focusTimeframe}" (semanal, mensual o preparación de exámenes)
+- Meta semanal actual configurada: ${targetWeeklyHours}h/semana
+- Disponibilidad real estimada: ${dailyAvailableHours}h libres/día (${blockedWeeklyHours}h bloqueadas/semana por clases u obligaciones)
+- Estado por asignatura:
+${subjectsContext}
+
+Devuelve un objeto JSON estructurado con:
+1. "workloadDiagnosis": Diagnóstico claro, motivador y analítico (2-3 frases) sobre el equilibrio entre el temario pendiente, los exámenes próximos y el tiempo disponible real del estudiante.
+2. "recommendedWeeklyHours": Número entero de horas semanales recomendadas según su carga real y disponibilidad.
+3. "smartGoals": Lista de 4 objetivos SMART concretos. Cada objetivo debe incluir:
+   - "id": Identificador único breve
+   - "title": Título directo del objetivo
+   - "subjectName": Nombre de la asignatura objetivo (o "Global" si aplica a todo el curso)
+   - "priority": "alta", "media" o "baja"
+   - "specific": Qué debe lograr exactamente (S - Específico)
+   - "measurable": Indicador numérico concreto de éxito en temas, páginas, horas o calificación (M - Medible)
+   - "achievable": Por qué es realista según sus horas disponibles por día (A - Alcanzable)
+   - "relevant": Qué impacto directo tiene en sus exámenes, créditos ECTS o retención (R - Relevante)
+   - "timeBound": Plazo concreto para completarlo (T - Temporal)
+   - "milestones": Array de 3 hitos paso a paso muy concretos y verificables para lograr este objetivo SMART.
+Responde íntegramente en español.`;
+
+    const response = await generateContentWithFallback({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            workloadDiagnosis: { type: Type.STRING },
+            recommendedWeeklyHours: { type: Type.INTEGER },
+            smartGoals: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  title: { type: Type.STRING },
+                  subjectName: { type: Type.STRING },
+                  priority: { type: Type.STRING },
+                  specific: { type: Type.STRING },
+                  measurable: { type: Type.STRING },
+                  achievable: { type: Type.STRING },
+                  relevant: { type: Type.STRING },
+                  timeBound: { type: Type.STRING },
+                  milestones: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                },
+                required: [
+                  'id',
+                  'title',
+                  'subjectName',
+                  'priority',
+                  'specific',
+                  'measurable',
+                  'achievable',
+                  'relevant',
+                  'timeBound',
+                  'milestones',
+                ],
+              },
+            },
+          },
+          required: ['workloadDiagnosis', 'recommendedWeeklyHours', 'smartGoals'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    if (!Array.isArray(parsed.smartGoals) || parsed.smartGoals.length === 0) {
+      const fb = buildSmartGoalsFallback();
+      res.json({ success: true, ...fb, data: fb, fallbackUsed: true });
+      return;
+    }
+
+    res.json({ success: true, ...parsed, data: parsed });
+  } catch (error: any) {
+    console.warn('Fallback activated in /api/gemini/generate-smart-goals:', error?.message || error);
+    const fb = buildSmartGoalsFallback();
+    res.json({ success: true, ...fb, data: fb, fallbackUsed: true });
+  }
+});
+
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

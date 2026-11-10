@@ -31,6 +31,7 @@ import {
   GraduationCap,
   Briefcase,
   Coffee,
+  Download,
 } from 'lucide-react';
 import {
   Subject,
@@ -48,6 +49,8 @@ import {
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
 import { WeeklyAvailabilityPlanner } from './WeeklyAvailabilityPlanner';
+import { HabitsAndMoodTrackerBar } from './HabitsAndMoodTrackerBar';
+import { IcsCalendarExportModal } from './IcsCalendarExportModal';
 import {
   ProjectedReviewMilestone,
   TopicReviewAnalysis,
@@ -176,6 +179,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   const [isRecalculatingAll, setIsRecalculatingAll] = useState<boolean>(false);
   const [showQuickBlockBar, setShowQuickBlockBar] = useState<boolean>(false);
   const [showDraggableTray, setShowDraggableTray] = useState<boolean>(false);
+  const [showIcsExportModal, setShowIcsExportModal] = useState<boolean>(false);
 
   // Universal Drag-and-Drop state for Tasks, Study Topics, Spaced Reviews, and Blocked Events across Days & Hours
   const [draggedItem, setDraggedItem] = useState<DraggedCalendarItem | null>(null);
@@ -2660,6 +2664,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               <RotateCw className={`w-3.5 h-3.5 shrink-0 ${isRecalculatingAll ? 'animate-spin' : ''}`} />
               <span className="truncate">Recalcular Plan</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setShowIcsExportModal(true)}
+              className="w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl shadow-xs transition-all cursor-pointer"
+              title="Exportar eventos bloqueados (estudio, hábitos y exámenes) a un archivo .ics para Google Calendar o Apple Calendar"
+            >
+              <Download className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Sincronizar .ICS</span>
+            </button>
           </div>
         </div>
 
@@ -2788,6 +2802,21 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* BARRA COMPACTA DESPLEGABLE: CONTROL DE HÁBITOS (CON BUSCADOR DE HUECOS) Y MOOD TRACKER */}
+      <HabitsAndMoodTrackerBar
+        preferences={preferences}
+        onUpdatePreferences={onUpdatePreferences}
+        selectedDayStr={selectedDayStr}
+        sessionsByDate={sessionsByDate}
+        getEffectiveBlockedForDate={getEffectiveBlockedForDate}
+        onScheduleHabitOneDay={(title, dateStr, startTime, endTime, category, notes) =>
+          handleQuickAddOnTheFlyPlan(title, dateStr, startTime, endTime, category, true, notes)
+        }
+        onScheduleHabitWeekly={(title, category, days, startTime, endTime, notes) =>
+          handleQuickBlockWeeklyRecurring(title, category, days, startTime, endTime, true, notes)
+        }
+      />
 
       {/* SECCIÓN VISUAL: META DIARIA Y HORAS LIBRES DEL CALENDARIO (Disponibilidad de Estudio) */}
       {showDailyGoalAvailabilitySection && (
@@ -7287,6 +7316,17 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de exportación .ICS para sincronizar con Google Calendar o Apple Calendar */}
+      <IcsCalendarExportModal
+        isOpen={showIcsExportModal}
+        onClose={() => setShowIcsExportModal(false)}
+        subjects={subjects}
+        preferences={preferences}
+        blockedEvents={blockedEvents}
+        precomputedStudySessions={allGeneratedSessions}
+        initialSubjectFilterId={selectedSubjectId}
+      />
     </div>
   );
 };

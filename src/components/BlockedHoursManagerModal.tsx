@@ -22,6 +22,7 @@ import {
   Layers,
   ArrowRight,
   ShieldAlert,
+  Download,
 } from 'lucide-react';
 import {
   Subject,
@@ -34,6 +35,7 @@ import {
   schedulerService,
   BLOCKED_REASON_DEFINITIONS,
 } from '../services/schedulerService';
+import { IcsCalendarExportModal } from './IcsCalendarExportModal';
 
 interface BlockedHoursManagerModalProps {
   isOpen: boolean;
@@ -82,6 +84,7 @@ export const BlockedHoursManagerModal: React.FC<BlockedHoursManagerModalProps> =
   const [notes, setNotes] = useState('');
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalculateFeedback, setRecalculateFeedback] = useState<string | null>(null);
+  const [showIcsExportModal, setShowIcsExportModal] = useState(false);
 
   // Calcular la duración en horas del formulario actual
   const computedDurationHours = useMemo(() => {
@@ -618,18 +621,37 @@ export const BlockedHoursManagerModal: React.FC<BlockedHoursManagerModalProps> =
         </div>
 
         {/* Pie de modal */}
-        <div className="px-6 py-4 bg-slate-50 dark:bg-slate-800/40 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <div className="px-6 py-4 bg-slate-50 dark:bg-slate-800/40 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <span className="text-xs text-slate-500">
             Al recalcular, los temas se asignan automáticamente a tus horas libres reales.
           </span>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-bold text-xs transition-colors cursor-pointer"
-          >
-            Cerrar
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowIcsExportModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-2xs transition-colors cursor-pointer"
+              title="Exportar eventos bloqueados, sesiones de estudio, hábitos y exámenes en formato .ics para Google Calendar o Apple Calendar"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Exportar a Google / Apple Calendar (.ics)</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-bold text-xs transition-colors cursor-pointer"
+            >
+              Cerrar
+            </button>
+          </div>
         </div>
       </div>
+
+      <IcsCalendarExportModal
+        isOpen={showIcsExportModal}
+        onClose={() => setShowIcsExportModal(false)}
+        subjects={subjects}
+        preferences={preferences}
+        blockedEvents={blockedEvents}
+      />
     </div>
   );
 };

@@ -5659,10 +5659,20 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           subject={subject}
           initialTopicId={feynmanChallengeTopicId}
           initialSubtopic={feynmanChallengeSubtopic}
-          onSaveSession={(session) => {
+          onSaveSession={(session, autoFlashcards) => {
             onUpdateSubject({
               ...subject,
               feynmanSessions: [session, ...subject.feynmanSessions],
+              flashcards:
+                autoFlashcards && autoFlashcards.length > 0
+                  ? [...(subject.flashcards || []), ...autoFlashcards]
+                  : subject.flashcards,
+            });
+          }}
+          onAddFlashcards={(newCards) => {
+            onUpdateSubject({
+              ...subject,
+              flashcards: [...(subject.flashcards || []), ...newCards],
             });
           }}
           onDeleteSession={(sessionId) => {

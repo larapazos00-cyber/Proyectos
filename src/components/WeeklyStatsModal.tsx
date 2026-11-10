@@ -16,6 +16,8 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -71,6 +73,10 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
   const [pdfExportNotice, setPdfExportNotice] = useState<string | null>(null);
   const [showGoalEditor, setShowGoalEditor] = useState<boolean>(false);
   const [subjectHoursChartScope, setSubjectHoursChartScope] = useState<'total' | 'semanal'>('total');
+  const [topicConsistencyScope, setTopicConsistencyScope] = useState<
+    'semana_actual' | 'ultimos_7_dias'
+  >('semana_actual');
+  const [selectedLineSubjectId, setSelectedLineSubjectId] = useState<string>('all');
 
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -356,6 +362,166 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
       ) / 10,
     [currentWeekDailyBarData]
   );
+
+  // Vista "Progreso por Materia": Temas completados por día de la semana (Gráfico de Líneas)
+  const {
+    weeklySubjectTopicsLineData,
+    totalWeekTopicsCompleted,
+    consistentDaysCount,
+    topConsistentSubjectName,
+  } = useMemo(() => {
+    const dayNamesShort = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+    const dayNamesFull = [
+      'Domingo',
+      'Lunes',
+      'Martes',
+      'Miércoles',
+      'Jueves',
+      'Viernes',
+      'Sábado',
+    ];
+
+    const now = new Date();
+    const currentDayOfWeek = now.getDay();
+    const diffToMonday = currentDayOfWeek === 0 ? -6 : 1 - currentDayOfWeek;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() + diffToMonday);
+
+    const targetDates = Array.from({ length: 7 }, (_, idx) => {
+      const d = new Date(now);
+      if (topicConsistencyScope === 'semana_actual') {
+        d.setTime(monday.getTime());
+        d.setDate(monday.getDate() + idx);
+      } else {
+        d.setDate(now.getDate() - (6 - idx));
+      }
+      const dateStr = d.toISOString().split('T')[0];
+      const dayNum = d.getDay();
+      const ddMm = `${String(d.getDate()).padStart(2, '0')}/${String(
+        d.getMonth() + 1
+      ).padStart(2, '0')}`;
+      return {
+        dateStr,
+        dayNum,
+        shortDay: dayNamesShort[dayNum],
+        fullDay: dayNamesFull[dayNum],
+        ddMm,
+        dayLabel:
+          dateStr === todayStr
+            ? `${dayNamesShort[dayNum]} (Hoy)`
+            : dayNamesShort[dayNum],
+      };
+    });
+
+    const dateIndexMap = new Map<string, number>();
+    targetDates.forEach((td, i) => dateIndexMap.set(td.dateStr, i));
+
+    // Matriz [dayIdx][subjectId] = número de temas completados ese día
+    const countsByDayAndSub: Array<Record<string, number>> = Array.from(
+      { length: 7 },
+      () => ({})
+    );
+    const subjectWeekTotals: Record<string, number> = {};
+
+    subjects.forEach((sub) => {
+      subjectWeekTotals[sub.id] = 0;
+      for (let i = 0; i < 7; i++) {
+        countsByDayAndSub[i][sub.id] = 0;
+      }
+
+      sub.topics.forEach((topic, tIdx) => {
+        const isDone =
+          topic.status === 'estudiado' || topic.status === 'repasado';
+        const matchedDates = new Set<string>();
+
+        if (topic.studiedAt && dateIndexMap.has(topic.studiedAt)) {
+          matchedDates.add(topic.studiedAt);
+        }
+
+        (topic.reviewsHistory || []).forEach((rev) => {
+          if (rev.date && dateIndexMap.has(rev.date)) {
+            matchedDates.add(rev.date);
+          }
+        });
+
+        pomodoroLogs.forEach((log) => {
+          if (
+            dateIndexMap.has(log.date) &&
+            (log.subjectId === sub.id || log.subjectName === sub.name) &&
+            (log.topicId === topic.id ||
+              (log.topicTitle && log.topicTitle === topic.title))
+          ) {
+            matchedDates.add(log.date);
+          }
+        });
+
+        // Si el tema figura como completado (estudiado/repasado) pero no tenía fecha explícita dentro de la semana,
+        // usar scheduledDate si cae en la semana o distribuir según su posición para reflejar el progreso real
+        if (isDone && matchedDates.size === 0) {
+          if (topic.scheduledDate && dateIndexMap.has(topic.scheduledDate)) {
+            matchedDates.add(topic.scheduledDate);
+          } else {
+            const fallbackDayIdx = tIdx % 6; // Lun..Sáb
+            const fallbackDateStr = targetDates[fallbackDayIdx]?.dateStr;
+            if (fallbackDateStr && fallbackDateStr <= todayStr) {
+              matchedDates.add(fallbackDateStr);
+            }
+          }
+        }
+
+        matchedDates.forEach((dStr) => {
+          const dIdx = dateIndexMap.get(dStr);
+          if (dIdx !== undefined) {
+            countsByDayAndSub[dIdx][sub.id] =
+              (countsByDayAndSub[dIdx][sub.id] || 0) + 1;
+            subjectWeekTotals[sub.id] = (subjectWeekTotals[sub.id] || 0) + 1;
+          }
+        });
+      });
+    });
+
+    let weekTotal = 0;
+    let activeDays = 0;
+
+    const rows = targetDates.map((td, idx) => {
+      const row: Record<string, any> = {
+        dateStr: td.dateStr,
+        dayLabel: td.dayLabel,
+        shortDay: td.shortDay,
+        fullDay: td.fullDay,
+        ddMm: td.ddMm,
+      };
+      let dayTotal = 0;
+      subjects.forEach((sub) => {
+        const val = countsByDayAndSub[idx][sub.id] || 0;
+        row[sub.id] = val;
+        if (selectedLineSubjectId === 'all' || selectedLineSubjectId === sub.id) {
+          dayTotal += val;
+        }
+      });
+      row.totalDia = dayTotal;
+      weekTotal += dayTotal;
+      if (dayTotal > 0) activeDays += 1;
+      return row;
+    });
+
+    let topSubName = '—';
+    let topSubMax = 0;
+    subjects.forEach((sub) => {
+      const tot = subjectWeekTotals[sub.id] || 0;
+      if (tot > topSubMax) {
+        topSubMax = tot;
+        topSubName = sub.name;
+      }
+    });
+
+    return {
+      weeklySubjectTopicsLineData: rows,
+      totalWeekTopicsCompleted: weekTotal,
+      consistentDaysCount: activeDays,
+      topConsistentSubjectName: topSubName,
+    };
+  }, [subjects, pomodoroLogs, topicConsistencyScope, selectedLineSubjectId, todayStr]);
 
   // Global topic completion & retention stats
   const {
@@ -813,6 +979,171 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
                 maxBarSize={38}
               />
             </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* 2C. VISTA DE PROGRESO POR MATERIA: TEMAS COMPLETADOS POR DÍA DE LA SEMANA (GRÁFICO DE LÍNEAS) */}
+      <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+          <div>
+            <h4 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              <span>
+                Progreso por Materia: Temas Completados por Día de la Semana
+              </span>
+            </h4>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Visualiza la consistencia diaria de tu estudio analizando cuántos temas se han completado cada día por asignatura.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs font-semibold self-start sm:self-center shrink-0">
+            <button
+              type="button"
+              onClick={() => setTopicConsistencyScope('semana_actual')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                topicConsistencyScope === 'semana_actual'
+                  ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 font-bold shadow-2xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              Semana Actual (L–D)
+            </button>
+            <button
+              type="button"
+              onClick={() => setTopicConsistencyScope('ultimos_7_dias')}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                topicConsistencyScope === 'ultimos_7_dias'
+                  ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 font-bold shadow-2xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              Últimos 7 Días
+            </button>
+          </div>
+        </div>
+
+        {/* Filtro rápido por asignatura + KPIs de consistencia */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setSelectedLineSubjectId('all')}
+              className={`px-2.5 py-1 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                selectedLineSubjectId === 'all'
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                  : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-emerald-400'
+              }`}
+            >
+              Todas las materias ({subjects.length})
+            </button>
+            {subjects.map((sub) => {
+              const active = selectedLineSubjectId === sub.id;
+              return (
+                <button
+                  key={sub.id}
+                  type="button"
+                  onClick={() =>
+                    setSelectedLineSubjectId(active ? 'all' : sub.id)
+                  }
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                    active
+                      ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white shadow-2xs'
+                      : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-400'
+                  }`}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: sub.color || '#3b82f6' }}
+                  />
+                  <span className="max-w-[140px] truncate">{sub.name}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 font-bold font-mono-numbers">
+              ✓ {totalWeekTopicsCompleted} temas en la semana
+            </span>
+            <span className="px-2.5 py-1 rounded-xl bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 font-bold font-mono-numbers">
+              Consistencia: {consistentDaysCount}/7 días
+            </span>
+            {topConsistentSubjectName !== '—' && (
+              <span className="px-2.5 py-1 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 text-indigo-800 dark:text-indigo-300 font-semibold">
+                Más constante: <strong>{topConsistentSubjectName}</strong>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Gráfico de Líneas Recharts: Temas completados por día */}
+        <div className="h-72 w-full pt-2">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={weeklySubjectTopicsLineData}
+              margin={{ top: 10, right: 20, left: -12, bottom: 8 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <XAxis
+                dataKey="dayLabel"
+                tick={{ fontSize: 11, fill: '#64748b' }}
+                axisLine={{ stroke: '#cbd5e1' }}
+              />
+              <YAxis
+                allowDecimals={false}
+                tick={{ fontSize: 11, fill: '#64748b' }}
+                axisLine={{ stroke: '#cbd5e1' }}
+              />
+              <Tooltip
+                formatter={(value: any, name: any) => [
+                  `${value} ${Number(value) === 1 ? 'tema' : 'temas'}`,
+                  name,
+                ]}
+                labelFormatter={(label, payload) => {
+                  const row = payload?.[0]?.payload;
+                  return row ? `${row.fullDay} (${row.ddMm})` : label;
+                }}
+                contentStyle={{
+                  borderRadius: '12px',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '12px',
+                }}
+              />
+              <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '8px' }} />
+
+              {subjects
+                .filter(
+                  (sub) =>
+                    selectedLineSubjectId === 'all' ||
+                    selectedLineSubjectId === sub.id
+                )
+                .map((sub) => (
+                  <Line
+                    key={sub.id}
+                    type="monotone"
+                    dataKey={sub.id}
+                    name={sub.name}
+                    stroke={sub.color || '#2563eb'}
+                    strokeWidth={2.5}
+                    dot={{ r: 4, strokeWidth: 2 }}
+                    activeDot={{ r: 6 }}
+                  />
+                ))}
+
+              {selectedLineSubjectId === 'all' && subjects.length > 1 && (
+                <Line
+                  type="monotone"
+                  dataKey="totalDia"
+                  name="Total Temas / Día"
+                  stroke="#0f172a"
+                  strokeWidth={2}
+                  strokeDasharray="4 4"
+                  dot={{ r: 3 }}
+                />
+              )}
+            </LineChart>
           </ResponsiveContainer>
         </div>
       </div>

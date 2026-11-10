@@ -24,6 +24,7 @@ import {
   Target,
   BarChart3,
   RefreshCw,
+  Zap,
 } from 'lucide-react';
 import {
   AcademicYear,
@@ -41,6 +42,7 @@ import { StreakModal } from './StreakModal';
 import { StreakHeatmapPanel } from './StreakHeatmapPanel';
 import { DashboardStudyStreakCard } from './DashboardStudyStreakCard';
 import { SubjectStudyHoursChart } from './SubjectStudyHoursChart';
+import { SubjectQuickReviewOverlay } from './SubjectQuickReviewOverlay';
 
 interface CourseGeneralViewProps {
   programName: string;
@@ -113,6 +115,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
   const computedYearsCount = activeYearsCount || Math.max(1, uniqueYearIds.size);
 
   const today = new Date().toISOString().split('T')[0];
+  const [quickReviewSubjectId, setQuickReviewSubjectId] = useState<string | null>(null);
 
   // Avance académico global
   const globalAcademicProgress = useMemo(
@@ -1746,12 +1749,26 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                   </div>
                 </div>
 
-                <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px]">
-                  <span className="text-slate-500 font-mono-numbers">
-                    {subStudiedTopics}/{sub.topics?.length || 0} temas
-                  </span>
+                <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between gap-2 text-[11px]">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-slate-500 font-mono-numbers">
+                      {subStudiedTopics}/{sub.topics?.length || 0} temas
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setQuickReviewSubjectId(sub.id);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 hover:bg-amber-500 text-amber-800 hover:text-white border border-amber-200 text-[10px] font-bold transition-colors cursor-pointer"
+                      title={`Revisión Rápida: puntos clave y apuntes Cornell de ${sub.name}`}
+                    >
+                      <Zap className="w-2.5 h-2.5 text-amber-500 group-hover:text-current shrink-0" />
+                      <span>Revisión Rápida</span>
+                    </button>
+                  </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     {srAlert.hasPendingToday && (
                       <span
                         onClick={(e) => {
@@ -2145,6 +2162,20 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
         onClose={() => setShowStreakModal(false)}
         streakDays={streakDays}
         onStartStudy={() => onSelectForPomodoro(allSubjects[0]?.id || '')}
+      />
+
+      {/* Revisión Rápida Overlay (Puntos Clave y Apuntes Cornell por Materia) */}
+      <SubjectQuickReviewOverlay
+        subject={allSubjects.find((s) => s.id === quickReviewSubjectId) || null}
+        isOpen={Boolean(quickReviewSubjectId)}
+        onClose={() => setQuickReviewSubjectId(null)}
+        onStartPomodoro={(subId) => onSelectForPomodoro(subId)}
+        onOpenSubjectDetail={(subId) => onSelectSubject(subId)}
+        onOpenQuizzes={(subId, topIds) => {
+          if (onOpenQuizzesForSubject) {
+            onOpenQuizzesForSubject(subId, topIds);
+          }
+        }}
       />
     </div>
   );

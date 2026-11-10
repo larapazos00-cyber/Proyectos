@@ -220,14 +220,21 @@ export const notificationService = {
    */
   send(
     title: string,
-    options?: NotificationOptions & { soundType?: 'pomodoro' | 'review' | 'task' | 'exam' }
+    options?: NotificationOptions & {
+      soundType?: 'pomodoro' | 'review' | 'task' | 'exam';
+      ignoreFocusSilence?: boolean;
+      skipServiceChime?: boolean;
+    }
   ): boolean {
-    // Suprimir todas las notificaciones del sistema mientras el Modo Enfoque está activo
-    if (this._focusModeSilenced) {
+    // Suprimir notificaciones externas mientras el Modo Enfoque está activo,
+    // excepto los avisos de fin de sesión del propio Pomodoro y las pruebas manuales
+    if (this._focusModeSilenced && !options?.ignoreFocusSilence) {
       return false;
     }
 
-    this.playChime(options?.soundType || 'pomodoro');
+    if (!options?.skipServiceChime) {
+      this.playChime(options?.soundType || 'pomodoro');
+    }
 
     if (!this.isSupported() || Notification.permission !== 'granted') {
       return false;
@@ -310,26 +317,38 @@ export const notificationService = {
       });
       return true;
     }
-    return this.send(title, { body, soundType: 'review' });
+    return this.send(title, { body, soundType: 'review', ignoreFocusSilence: true });
   },
 
-  notifyPomodoro(mode: 'focus' | 'shortBreak' | 'longBreak', topicName?: string): void {
+  notifyPomodoro(
+    mode: 'focus' | 'shortBreak' | 'longBreak',
+    topicName?: string,
+    options?: { skipServiceChime?: boolean }
+  ): boolean {
     if (mode === 'focus') {
-      this.send('⏱️ ¡Tiempo de descanso terminado!', {
+      return this.send('🌿 ¡Sesión de enfoque Pomodoro completada!', {
+        body: topicName
+          ? `Has completado el bloque de estudio de "${topicName}". Tómate un descanso para recuperar energía.`
+          : 'Has terminado tu sesión de estudio. Tómate un descanso, estira y relaja la vista.',
+        soundType: 'pomodoro',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
+      });
+    } else if (mode === 'shortBreak') {
+      return this.send('⏱️ ¡Pausa corta terminada!', {
         body: topicName
           ? `Es hora de volver al foco con: ${topicName}. ¡Mantén la concentración!`
           : 'Es hora de reanudar tu bloque de estudio profundo.',
         soundType: 'pomodoro',
-      });
-    } else if (mode === 'shortBreak') {
-      this.send('🌿 ¡Bloque de Pomodoro completado!', {
-        body: 'Has terminado tu sesión de estudio. Tómate un descanso, estira y relaja la vista.',
-        soundType: 'pomodoro',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     } else {
-      this.send('🎉 ¡Cuatro ciclos de Pomodoro superados!', {
-        body: 'Excelente rendimiento. Disfruta de una pausa larga de 15 minutos para consolidar lo aprendido.',
+      return this.send('🎉 ¡Descanso largo finalizado!', {
+        body: 'Excelente rendimiento. Preparado para iniciar un nuevo ciclo de concentración.',
         soundType: 'pomodoro',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
   },
@@ -596,6 +615,7 @@ export const notificationService = {
     return this.send('🔔 Notificaciones de StudyFlow Activadas', {
       body: 'Recibirás recordatorios personalizados de inicio de clase, vencimiento de tareas y repasos espaciados.',
       soundType: 'exam',
+      ignoreFocusSilence: true,
     });
   },
 
@@ -607,42 +627,55 @@ export const notificationService = {
       | 'exam'
       | 'pomodoro'
       | 'contextual_rule'
-      | 'general'
+      | 'general',
+    options?: { skipServiceChime?: boolean }
   ): boolean {
     if (eventType === 'class_start') {
       return this.send('🏫 Inicio de Clase: Anatomía Humana', {
         body: 'Comienza en 15 min (09:00 - 11:00) · Aula Magna. ¡Prepara tus apuntes Cornell!',
         soundType: 'task',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     if (eventType === 'task_deadline') {
       return this.send('📋 Vencimiento de Tarea: Entrega de Práctica', {
         body: 'Fisiología · Vence MAÑANA (Prioridad ALTA). Aprovecha tu bloque de estudio de hoy.',
         soundType: 'task',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     if (eventType === 'spaced_repetition') {
       return this.send('🧠 Recordatorio de Repaso Espaciado · Bioquímica', {
         body: 'Hoy toca repasar "Tema 2: Enzimología y Cinética". Aplicar Active Recall hoy garantiza su fijación.',
         soundType: 'review',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     if (eventType === 'exam') {
       return this.send('🎓 Recordatorio de Examen: Farmacología', {
         body: 'El examen "Parcial Bloque I" (TEST) es en 3 días. ¡Momento de repasar!',
         soundType: 'exam',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     if (eventType === 'pomodoro') {
       return this.send('🌿 ¡Sesión Pomodoro Completada!', {
         body: 'Has completado tu bloque de enfoque. Tómate 5 minutos de pausa corta para descansar la vista.',
         soundType: 'pomodoro',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     if (eventType === 'contextual_rule') {
       return this.send('🎯 Alerta Contextual: Meta Semanal de Estudio', {
         body: 'Tiempo acumulado en Anatomía Humana (1.5h) menor a la meta semanal establecida (4.0h). Dedica 25 min al siguiente tema pendiente.',
         soundType: 'review',
+        ignoreFocusSilence: true,
+        skipServiceChime: options?.skipServiceChime,
       });
     }
     return this.sendTestNotification();

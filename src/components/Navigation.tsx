@@ -31,6 +31,8 @@ import { notificationService } from '../services/notificationService';
 import studyflowLogo from '../assets/images/studyflow_logo_1793994920234.jpg';
 import { StreakModal } from './StreakModal';
 import { AppHelpGuideModal } from './AppHelpGuideModal';
+import { MoodTracker } from './MoodTracker';
+import { StudyPreferences } from '../types';
 
 export type NavTabId =
   | 'curso'
@@ -59,6 +61,8 @@ interface NavigationProps {
   navigationPosition?: 'top' | 'sidebar';
   onToggleNavigationPosition?: () => void;
   onStartOnboardingTour?: () => void;
+  preferences?: StudyPreferences;
+  onUpdatePreferences?: (updated: StudyPreferences) => void;
 }
 
 export const Navigation: React.FC<NavigationProps> = ({
@@ -79,6 +83,8 @@ export const Navigation: React.FC<NavigationProps> = ({
   navigationPosition = 'top',
   onToggleNavigationPosition,
   onStartOnboardingTour,
+  preferences,
+  onUpdatePreferences,
 }) => {
   const [notifGranted, setNotifGranted] = useState(
     () => notificationService.getPermission() === 'granted'
@@ -248,8 +254,15 @@ export const Navigation: React.FC<NavigationProps> = ({
         </nav>
       </div>
 
-      {/* Bottom Controls: Streak, Quick Tools & User Account */}
+      {/* Bottom Controls: Mood Tracker, Streak, Quick Tools & User Account */}
       <div className="space-y-3 pt-3 border-t border-slate-200 dark:border-slate-800">
+        {/* Collapsible Mood Tracker in Sidebar */}
+        <MoodTracker
+          variant="nav-sidebar"
+          preferences={preferences}
+          onUpdatePreferences={onUpdatePreferences}
+        />
+
         {/* Streak & Cloud Sync */}
         <div className="flex items-center justify-between px-1">
           <button
@@ -437,6 +450,13 @@ export const Navigation: React.FC<NavigationProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0">
+              {/* Collapsible Mood Tracker Dropdown in Mobile Sidebar Header */}
+              <MoodTracker
+                variant="nav-top"
+                preferences={preferences}
+                onUpdatePreferences={onUpdatePreferences}
+              />
+
               {/* Streak Counter Button */}
               <button
                 type="button"
@@ -538,12 +558,14 @@ export const Navigation: React.FC<NavigationProps> = ({
   // Render Top Bar Mode (Desktop & Mobile unified design)
   return (
     <>
-      <header className="sticky top-0 z-40 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200/60 dark:border-slate-800/60 transition-colors">
-        <div className="max-w-6xl mx-auto px-3.5 sm:px-8 lg:px-10">
-          <div className="flex items-center justify-between gap-3 sm:gap-6 h-16">
+      <header className="sticky top-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 transition-colors">
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 lg:px-8">
+          {/* Row 1: Brand, Active Study Context & Utility Cluster + "+ Estudios" Button */}
+          <div className="flex items-center justify-between gap-2 sm:gap-4 min-h-14 py-1.5">
             {/* Zone 1: Brand logo & contextual breadcrumb */}
-            <div className="flex items-center gap-2 sm:gap-3 shrink-0 min-w-0">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
               <button
+                type="button"
                 onClick={() => onSelectTab('curso')}
                 className="flex items-center gap-2 text-left group cursor-pointer focus:outline-none shrink-0"
               >
@@ -557,61 +579,52 @@ export const Navigation: React.FC<NavigationProps> = ({
                 </span>
               </button>
 
-              {/* Context Breadcrumb - Now visible on both desktop & mobile */}
-              <div className="flex items-center text-xs text-slate-400 dark:text-slate-500 min-w-0">
-                <span className="mx-1 sm:mx-2 text-slate-300 dark:text-slate-700">/</span>
+              {/* Context Breadcrumb */}
+              <div className="hidden xs:flex sm:flex items-center text-xs text-slate-400 dark:text-slate-500 min-w-0 overflow-hidden">
+                <span className="mx-1 sm:mx-1.5 text-slate-300 dark:text-slate-700 shrink-0">/</span>
                 <button
+                  type="button"
                   onClick={onOpenProgramManager}
-                  className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors whitespace-nowrap max-w-[100px] sm:max-w-[180px] truncate cursor-pointer font-medium"
-                  title={`${programName} · ${yearName}`}
+                  className="text-slate-700 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors truncate cursor-pointer font-semibold max-w-[110px] sm:max-w-[180px] md:max-w-[240px]"
+                  title={`${programName} · ${yearName} (Haz clic para gestionar estudios)`}
                 >
                   {programName}
                 </button>
-                <span className="hidden sm:inline mx-1.5 text-slate-300 dark:text-slate-700">·</span>
-                <span className="hidden sm:inline text-slate-400 dark:text-slate-500 whitespace-nowrap">{yearName}</span>
+                <span className="hidden lg:inline mx-1.5 text-slate-300 dark:text-slate-700 shrink-0">·</span>
+                <span className="hidden lg:inline text-slate-400 dark:text-slate-500 truncate max-w-[140px]">
+                  {yearName}
+                </span>
               </div>
             </div>
 
-            {/* Zone 2: Navigation links on desktop */}
-            <nav className="hidden md:flex items-center gap-4 lg:gap-6 text-xs font-medium">
-              {visibleTabs.map((tab) => {
-                const Icon = tab.icon;
-                const isActive = activeTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    onClick={() => onSelectTab(tab.id)}
-                    className={`whitespace-nowrap transition-colors py-1 border-b-2 cursor-pointer flex items-center gap-1.5 ${
-                      isActive
-                        ? 'border-blue-600 text-slate-900 dark:text-white font-bold'
-                        : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                    }`}
-                  >
-                    <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`} />
-                    <span>{tab.label}</span>
-                  </button>
-                );
-              })}
+            {/* Zone 2: Utility cluster + MoodTracker + Streak + "+ Estudios" (Always visible, shrink-0) */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+              {/* Primary Action Button: + Estudios (Placed prominently so it is always visible) */}
               <button
                 type="button"
-                onClick={onOpenPreferences}
-                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1 rounded-lg transition-colors cursor-pointer"
-                title="Personalizar, activar o quitar pestañas"
+                onClick={onOpenProgramManager}
+                className="inline-flex items-center gap-1 px-2.5 sm:px-3 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500 rounded-xl transition-all whitespace-nowrap cursor-pointer shadow-2xs shrink-0"
+                title="Abrir gestor de Estudios, Cursos, Asignaturas y Objetivos SMART"
               >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <Plus className="w-3.5 h-3.5 shrink-0" />
+                <span>Estudios</span>
               </button>
-            </nav>
 
-            {/* Zone 3: Utility cluster + Streak + Actions */}
-            <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-              {/* Streak Counter - Always visible on mobile & desktop */}
+              {/* Collapsible Mood Tracker Dropdown in Top Navigation Bar */}
+              <MoodTracker
+                variant="nav-top"
+                preferences={preferences}
+                onUpdatePreferences={onUpdatePreferences}
+              />
+
+              {/* Streak Counter */}
               <button
                 type="button"
                 onClick={() => setShowStreakModal(true)}
-                className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400 font-bold font-mono-numbers hover:bg-amber-50 dark:hover:bg-amber-950/40 px-2 py-1 rounded-lg transition-colors cursor-pointer"
+                className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400 font-bold font-mono-numbers hover:bg-amber-50 dark:hover:bg-amber-950/40 px-2 py-1 rounded-lg transition-colors cursor-pointer shrink-0"
                 title="Cómo funciona la racha de estudio"
               >
-                <Flame className="w-3.5 h-3.5 fill-amber-500 text-amber-600 animate-pulse" />
+                <Flame className="w-3.5 h-3.5 fill-amber-500 text-amber-600 animate-pulse shrink-0" />
                 <span>{streakDays}d</span>
               </button>
 
@@ -621,7 +634,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                   <button
                     type="button"
                     onClick={onToggleNavigationPosition}
-                    className="p-1.5 sm:p-2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                    className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
                     title="Cambiar a menú lateral izquierdo"
                     aria-label="Cambiar posición del menú a lateral"
                   >
@@ -630,6 +643,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                 )}
 
                 <button
+                  type="button"
                   onClick={async () => {
                     if (!notifGranted) {
                       const granted = await notificationService.requestPermission();
@@ -639,7 +653,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                       notificationService.sendTestNotification();
                     }
                   }}
-                  className={`p-1.5 sm:p-2 rounded-lg transition-colors cursor-pointer ${
+                  className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
                     notifGranted
                       ? 'text-blue-600 dark:text-blue-400 hover:bg-slate-100/70 dark:hover:bg-slate-800'
                       : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800'
@@ -653,7 +667,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <button
                   type="button"
                   onClick={onToggleTheme}
-                  className="p-1.5 sm:p-2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
                   title={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
                   aria-label="Cambiar tema"
                 >
@@ -661,8 +675,9 @@ export const Navigation: React.FC<NavigationProps> = ({
                 </button>
 
                 <button
+                  type="button"
                   onClick={onOpenPreferences}
-                  className="p-1.5 sm:p-2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer hidden sm:inline-flex"
+                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer hidden sm:inline-flex"
                   title="Preferencias"
                   aria-label="Configuración"
                 >
@@ -672,12 +687,12 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowHelpModal(true)}
-                  className="p-1.5 sm:p-2 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-blue-50/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1"
+                  className="p-1.5 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-blue-50/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1"
                   title="Guía y Ayuda de StudyFlow"
                   aria-label="Guía y Ayuda"
                 >
                   <HelpCircle className="w-4 h-4" />
-                  <span className="hidden lg:inline text-xs font-semibold">Ayuda</span>
+                  <span className="hidden xl:inline text-xs font-semibold">Ayuda</span>
                 </button>
               </div>
 
@@ -687,7 +702,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowUserMenu(!showUserMenu)}
-                    className="flex items-center gap-1.5 p-1 sm:p-1.5 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-xl transition-colors cursor-pointer"
+                    className="flex items-center gap-1.5 p-1 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-xl transition-colors cursor-pointer"
                     title={user.email || 'Mi Cuenta'}
                   >
                     <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold uppercase">
@@ -730,53 +745,58 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <button
                   type="button"
                   onClick={onOpenAuth}
-                  className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all cursor-pointer whitespace-nowrap"
+                  className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all cursor-pointer whitespace-nowrap"
                   title="Iniciar sesión o registrarse"
                 >
                   <LogIn className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                  <span className="hidden sm:inline">Cuenta</span>
+                  <span className="hidden lg:inline">Cuenta</span>
                 </button>
               )}
-
-              {/* Primary Action Button */}
-              <button
-                onClick={onOpenProgramManager}
-                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-700 rounded-lg transition-all whitespace-nowrap cursor-pointer shadow-2xs"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Estudios</span>
-              </button>
             </div>
           </div>
 
-          {/* Mobile Tabs Bar - Now with the EXACT same icons, full titles and pill/border styling */}
-          <div className="flex md:hidden overflow-x-auto py-2 gap-1.5 border-t border-slate-100 dark:border-slate-800 text-xs font-medium no-scrollbar">
-            {visibleTabs.map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => onSelectTab(tab.id)}
-                  className={`whitespace-nowrap py-1.5 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer shrink-0 ${
-                    isActive
-                      ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 shadow-2xs font-bold'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/60 dark:hover:bg-slate-800/60'
-                  }`}
-                >
-                  <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`} />
-                  <span>{tab.label}</span>
-                </button>
-              );
-            })}
+          {/* Row 2: Horizontal Navigation Tabs Bar (Visible across all screen sizes in Top Mode) */}
+          <div className="flex items-center justify-between gap-2 overflow-x-auto py-1.5 border-t border-slate-100 dark:border-slate-800/80 text-xs font-medium no-scrollbar">
+            <nav className="flex items-center gap-1.5 sm:gap-2">
+              {visibleTabs.map((tab) => {
+                const Icon = tab.icon;
+                const isActive =
+                  activeTab === tab.id || (tab.id === 'calendario' && activeTab === 'repaso');
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => onSelectTab(tab.id)}
+                    className={`whitespace-nowrap py-1.5 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer shrink-0 ${
+                      isActive
+                        ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 shadow-2xs font-bold'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/60 dark:hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`} />
+                    <span>{tab.label}</span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={onOpenPreferences}
+                className="whitespace-nowrap py-1.5 px-2.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100/60 dark:hover:bg-slate-800/60 flex items-center gap-1 text-xs font-medium cursor-pointer shrink-0"
+                title="Personalizar, activar o quitar pestañas"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Pestañas</span>
+              </button>
+            </nav>
+
             <button
               type="button"
-              onClick={onOpenPreferences}
-              className="whitespace-nowrap py-1.5 px-2.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100/60 flex items-center gap-1 text-xs font-medium cursor-pointer shrink-0"
-              title="Personalizar pestañas"
+              onClick={onOpenProgramManager}
+              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 px-2.5 py-1 rounded-lg hover:bg-blue-50/70 dark:hover:bg-blue-950/40 transition-colors whitespace-nowrap cursor-pointer shrink-0"
+              title="Gestionar estudios, cursos y asignaturas"
             >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>Pestañas</span>
+              <Plus className="w-3 h-3" />
+              <span>Gestionar Estudios</span>
             </button>
           </div>
         </div>

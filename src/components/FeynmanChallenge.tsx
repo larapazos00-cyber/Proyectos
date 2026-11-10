@@ -25,13 +25,31 @@ import {
   Zap,
   Loader2,
   Volume2,
+  BarChart3,
+  Layers,
+  Plus,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from 'recharts';
 import {
   Subject,
   Topic,
   FeynmanSession,
   FeynmanConceptCorrection,
   ErrorLogEntry,
+  Flashcard,
 } from '../types';
 
 export interface SyllabusComparisonItem {
@@ -50,10 +68,11 @@ interface FeynmanChallengeProps {
   onSelectSubject?: (subjectId: string) => void;
   initialTopicId?: string;
   initialSubtopic?: string;
-  onSaveSession: (session: FeynmanSession) => void;
+  onSaveSession: (session: FeynmanSession, autoFlashcards?: Flashcard[]) => void;
   onDeleteSession?: (sessionId: string) => void;
   onLogMistake?: (mistake: ErrorLogEntry) => void;
   onMarkTopicReviewed?: (topicId: string, retentionPct: number) => void;
+  onAddFlashcards?: (newCards: Flashcard[]) => void;
 }
 
 export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
@@ -66,6 +85,7 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
   onDeleteSession,
   onLogMistake,
   onMarkTopicReviewed,
+  onAddFlashcards,
 }) => {
   // Selected topic & subtopic state
   const [selectedTopicId, setSelectedTopicId] = useState<string>(
@@ -90,7 +110,21 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
   const [syllabusComparison, setSyllabusComparison] = useState<SyllabusComparisonItem[]>([]);
   const [loggedCorrectionIndices, setLoggedCorrectionIndices] = useState<number[]>([]);
   const [appliedCorrectionIndices, setAppliedCorrectionIndices] = useState<number[]>([]);
-  const [activeSubView, setActiveSubView] = useState<'challenge' | 'history'>('challenge');
+  const [activeSubView, setActiveSubView] = useState<'challenge' | 'analytics' | 'history'>('challenge');
+  const [showInlineAnalytics, setShowInlineAnalytics] = useState<boolean>(true);
+
+  // Flashcards auto-conversion & manual conversion states
+  const [autoConvertFlashcards, setAutoConvertFlashcards] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_feynman_autoconvert_fc_v1');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+  const [convertedSessionIds, setConvertedSessionIds] = useState<string[]>([]);
+  const [lastGeneratedFlashcards, setLastGeneratedFlashcards] = useState<Flashcard[]>([]);
+  const [flashcardBannerMsg, setFlashcardBannerMsg] = useState<string | null>(null);
 
   // Audio recording states
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -592,7 +626,21 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
     };
 
     setCurrentEvaluation(session);
-    onSaveSession(session);
+    const overallVal = session.overallScore ?? overall;
+    let autoCards: Flashcard[] | undefined = undefined;
+    if (autoConvertFlashcards && overallVal >= 65) {
+      const built = buildFlashcardsFromSession(session, sylResult.items);
+      if (built.length > 0) {
+        autoCards = built;
+        setLastGeneratedFlashcards(built);
+        setConvertedSessionIds((prev) => [...prev, session.id]);
+        setFlashcardBannerMsg(
+          `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
+        );
+        setTimeout(() => setFlashcardBannerMsg(null), 6000);
+      }
+    }
+    onSaveSession(session, autoCards);
     if (activeTopic && onMarkTopicReviewed) {
       onMarkTopicReviewed(activeTopic.id, overall);
     }
@@ -687,7 +735,20 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
         };
 
         setCurrentEvaluation(session);
-        onSaveSession(session);
+        let autoCards: Flashcard[] | undefined = undefined;
+        if (autoConvertFlashcards && overall >= 65) {
+          const built = buildFlashcardsFromSession(session, audioSylResult.items);
+          if (built.length > 0) {
+            autoCards = built;
+            setLastGeneratedFlashcards(built);
+            setConvertedSessionIds((prev) => [...prev, session.id]);
+            setFlashcardBannerMsg(
+              `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
+            );
+            setTimeout(() => setFlashcardBannerMsg(null), 6000);
+          }
+        }
+        onSaveSession(session, autoCards);
         if (activeTopic && onMarkTopicReviewed) {
           onMarkTopicReviewed(activeTopic.id, overall);
         }
@@ -753,7 +814,20 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
         };
 
         setCurrentEvaluation(session);
-        onSaveSession(session);
+        let autoCards: Flashcard[] | undefined = undefined;
+        if (autoConvertFlashcards && overall >= 65) {
+          const built = buildFlashcardsFromSession(session, sylComparisonResult.items);
+          if (built.length > 0) {
+            autoCards = built;
+            setLastGeneratedFlashcards(built);
+            setConvertedSessionIds((prev) => [...prev, session.id]);
+            setFlashcardBannerMsg(
+              `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
+            );
+            setTimeout(() => setFlashcardBannerMsg(null), 6000);
+          }
+        }
+        onSaveSession(session, autoCards);
         if (activeTopic && onMarkTopicReviewed) {
           onMarkTopicReviewed(activeTopic.id, overall);
         }
@@ -877,6 +951,253 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
     };
   };
 
+  // Build Flashcards automatically from a FeynmanSession's key points, strengths, analogies & corrections
+  function buildFlashcardsFromSession(
+    session: FeynmanSession,
+    sylItems?: SyllabusComparisonItem[]
+  ): Flashcard[] {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const existingQuestions = new Set(
+      (subject.flashcards || []).map((fc) => normalizeText(fc.question))
+    );
+    const rawCards: Array<{
+      question: string;
+      answer: string;
+      concept: string;
+      hint?: string;
+    }> = [];
+
+    // 1. Core synthesis card from improvedDraft or user explanation
+    const coreSynthesis = (session.improvedDraft || session.explanation || '').trim();
+    if (coreSynthesis.length >= 20) {
+      rawCards.push({
+        question: `¿Cómo explicarías de forma sencilla y precisa «${session.concept}» (Método Feynman)?`,
+        answer: coreSynthesis.slice(0, 480),
+        concept: session.concept,
+        hint: session.intuitiveAnalogies?.[0]
+          ? `Analogía: ${session.intuitiveAnalogies[0].slice(0, 120)}`
+          : 'Explica qué es, cómo funciona y pon un ejemplo cotidiano.',
+      });
+    }
+
+    // 2. Cards from mastered strengths
+    (session.strengths || []).forEach((st, idx) => {
+      const cleanSt = st
+        .replace(/^Cubriste correctamente el apartado del temario:\s*/i, '')
+        .replace(/^"|"$/g, '')
+        .trim();
+      if (cleanSt.length >= 8) {
+        rawCards.push({
+          question: `Punto clave de «${session.concept}»: ¿Por qué es esencial recordar que "${cleanSt.slice(0, 110)}"?`,
+          answer: `${cleanSt}. Concepto dominado durante el reto explicativo Feynman de ${subject.name}.`,
+          concept: `${session.concept} · Punto Clave ${idx + 1}`,
+        });
+      }
+    });
+
+    // 3. Cards from covered syllabus comparison items
+    if (sylItems && sylItems.length > 0) {
+      sylItems
+        .filter((it) => it.status === 'cubierto')
+        .forEach((it) => {
+          rawCards.push({
+            question: `En «${session.concept}», explica con tus propias palabras el epígrafe: ${it.title}`,
+            answer: `${it.guidanceHint} (Palabras clave: ${
+              it.matchedKeywords.join(', ') || it.title
+            }).`,
+            concept: it.title,
+          });
+        });
+    }
+
+    // 4. Cards from intuitive analogies
+    (session.intuitiveAnalogies || []).forEach((analogy, idx) => {
+      if (analogy.trim().length >= 15) {
+        rawCards.push({
+          question: `¿Qué analogía cotidiana ayuda a comprender y memorizar «${session.concept}»?`,
+          answer: analogy.trim(),
+          concept: `${session.concept} · Analogía ${idx + 1}`,
+        });
+      }
+    });
+
+    // 5. Cards from corrections so the student reinforces clarified concepts
+    (session.corrections || []).forEach((corr) => {
+      if (corr.concept && corr.correction) {
+        rawCards.push({
+          question: `Clarificación Feynman sobre «${corr.concept}»: ¿Cuál es la explicación correcta y sin confusiones?`,
+          answer: corr.correction,
+          concept: corr.concept,
+          hint: `Evita el error frecuente: ${corr.userMistake.slice(0, 100)}`,
+        });
+      }
+    });
+
+    const created: Flashcard[] = [];
+    rawCards.forEach((rc, idx) => {
+      const normQ = normalizeText(rc.question);
+      if (!existingQuestions.has(normQ) && created.length < 8) {
+        existingQuestions.add(normQ);
+        created.push({
+          id: `fc-feyn-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+          topicId: session.topicId || activeTopic?.id,
+          question: rc.question,
+          answer: rc.answer,
+          concept: rc.concept,
+          definition: rc.answer,
+          sourceDocName: `Reto Feynman: ${session.concept}`,
+          hint: rc.hint,
+          conceptTag: `Feynman · ${session.concept.slice(0, 32)}`,
+          interval: 1,
+          repetitions: 0,
+          easeFactor: 2.5,
+          nextReview: todayStr,
+        });
+      }
+    });
+
+    return created;
+  }
+
+  const handleManualConvertSessionToFlashcards = (
+    session: FeynmanSession,
+    sylItems?: SyllabusComparisonItem[]
+  ) => {
+    const cards = buildFlashcardsFromSession(session, sylItems);
+    if (cards.length === 0) {
+      setFlashcardBannerMsg(
+        `ℹ️ Los puntos clave de esta sesión de "${session.concept}" ya están guardados en tus flashcards de ${subject.name}.`
+      );
+      setTimeout(() => setFlashcardBannerMsg(null), 4500);
+      return;
+    }
+
+    if (onAddFlashcards) {
+      onAddFlashcards(cards);
+    }
+    setLastGeneratedFlashcards(cards);
+    setConvertedSessionIds((prev) => (prev.includes(session.id) ? prev : [...prev, session.id]));
+    setFlashcardBannerMsg(
+      `✅ Se han creado y guardado ${cards.length} flashcards en "${subject.name}" a partir de los puntos clave de "${session.concept}".`
+    );
+    setTimeout(() => setFlashcardBannerMsg(null), 6000);
+  };
+
+  // Compute Feynman Analytics: Mastered Concepts vs. Detected Gaps across sessions & topics
+  const feynmanAnalytics = (() => {
+    const sessions = subject.feynmanSessions || [];
+
+    // Per-session / topic chart data
+    const chartData =
+      sessions.length > 0
+        ? [...sessions]
+            .slice(0, 10)
+            .reverse()
+            .map((sess, i) => {
+              const simp = sess.simplicityScore ?? sess.clarityScore ?? 75;
+              const acc = sess.accuracyScore ?? sess.clarityScore ?? 75;
+              const overall = sess.overallScore ?? Math.round((simp + acc) / 2);
+
+              const masteredCount = Math.max(
+                1,
+                (sess.strengths?.length || 0) +
+                  (sess.intuitiveAnalogies?.length || 0) +
+                  (overall >= 80 ? 2 : overall >= 65 ? 1 : 0)
+              );
+              const gapsCount =
+                (sess.conceptualGaps?.length || 0) +
+                (sess.corrections?.length || 0) +
+                (sess.identifiedJargon?.length || 0);
+
+              const shortName =
+                sess.concept.length > 18 ? `${sess.concept.slice(0, 18)}…` : sess.concept;
+
+              return {
+                id: sess.id,
+                label: `R${i + 1}: ${shortName}`,
+                fullTitle: sess.concept,
+                dominados: masteredCount,
+                lagunas: gapsCount,
+                simplicidad: simp,
+                precision: acc,
+                dominio: overall,
+              };
+            })
+        : (subject.topics || []).slice(0, 8).map((top, i) => {
+            const subCount = top.subtopics?.length || 2;
+            const isStudied = top.status === 'estudiado' || top.status === 'repasado';
+            const isInProg = top.status === 'en_progreso';
+            const mastered = isStudied ? subCount : isInProg ? Math.ceil(subCount / 2) : 0;
+            const gaps = Math.max(0, subCount - mastered);
+            return {
+              id: top.id,
+              label: `T${i + 1}: ${top.title.slice(0, 15)}…`,
+              fullTitle: top.title,
+              dominados: mastered,
+              lagunas: gaps,
+              simplicidad: isStudied ? 85 : isInProg ? 65 : 0,
+              precision: isStudied ? 80 : isInProg ? 60 : 0,
+              dominio: top.perceivedRetentionPct || (isStudied ? 82 : isInProg ? 62 : 0),
+            };
+          });
+
+    const totalMastered = chartData.reduce((acc, d) => acc + d.dominados, 0);
+    const totalGaps = chartData.reduce((acc, d) => acc + d.lagunas, 0);
+    const totalEvaluated = totalMastered + totalGaps;
+    const masteryRatioPct =
+      totalEvaluated > 0 ? Math.round((totalMastered / totalEvaluated) * 100) : 0;
+
+    const avgOverallScore =
+      sessions.length > 0
+        ? Math.round(
+            sessions.reduce((acc, s) => {
+              const sp = s.simplicityScore ?? s.clarityScore ?? 75;
+              const ac = s.accuracyScore ?? s.clarityScore ?? 75;
+              return acc + (s.overallScore ?? Math.round((sp + ac) / 2));
+            }, 0) / sessions.length
+          )
+        : 0;
+
+    const feynmanFlashcardsCount = (subject.flashcards || []).filter(
+      (fc) =>
+        fc.conceptTag?.toLowerCase().includes('feynman') ||
+        fc.sourceDocName?.toLowerCase().includes('feynman')
+    ).length;
+
+    const allMasteredList = sessions
+      .flatMap((s) =>
+        (s.strengths || []).map((st) => ({
+          text: st.replace(/^Cubriste correctamente el apartado del temario:\s*/i, '').trim(),
+          topic: s.concept,
+        }))
+      )
+      .slice(0, 8);
+
+    const allGapsList = sessions
+      .flatMap((s) => [
+        ...(s.corrections || []).map((c) => ({
+          text: `${c.concept}: ${c.userMistake}`,
+          topic: s.concept,
+        })),
+        ...(s.conceptualGaps || []).map((g) => ({
+          text: g,
+          topic: s.concept,
+        })),
+      ])
+      .slice(0, 8);
+
+    return {
+      chartData,
+      totalMastered,
+      totalGaps,
+      masteryRatioPct,
+      avgOverallScore,
+      feynmanFlashcardsCount,
+      allMasteredList,
+      allGapsList,
+    };
+  })();
+
   return (
     <div className="space-y-6">
       {/* Header Banner */}
@@ -898,32 +1219,63 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
             </p>
           </div>
 
-          {/* Sub-view Switcher: Nuevo Reto vs Historial */}
-          <div className="flex items-center gap-1.5 bg-white/10 p-1 rounded-xl border border-white/15 shrink-0">
-            <button
-              type="button"
-              onClick={() => setActiveSubView('challenge')}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubView === 'challenge'
-                  ? 'bg-white text-purple-950 shadow-xs'
-                  : 'text-purple-100 hover:bg-white/10'
-              }`}
+          {/* Sub-view Switcher: Nuevo Reto vs Analíticas vs Historial */}
+          <div className="flex flex-col items-end gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-1.5 bg-white/10 p-1 rounded-xl border border-white/15">
+              <button
+                type="button"
+                onClick={() => setActiveSubView('challenge')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeSubView === 'challenge'
+                    ? 'bg-white text-purple-950 shadow-xs'
+                    : 'text-purple-100 hover:bg-white/10'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Guía Paso a Paso</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubView('analytics')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeSubView === 'analytics'
+                    ? 'bg-white text-purple-950 shadow-xs'
+                    : 'text-purple-100 hover:bg-white/10'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Analíticas Feynman</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubView('history')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                  activeSubView === 'history'
+                    ? 'bg-white text-purple-950 shadow-xs'
+                    : 'text-purple-100 hover:bg-white/10'
+                }`}
+              >
+                <History className="w-3.5 h-3.5" />
+                <span>Historial ({subject.feynmanSessions.length})</span>
+              </button>
+            </div>
+
+            {/* Auto-Convert Successful Sessions to Flashcards Toggle */}
+            <label
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-[11px] text-purple-100 cursor-pointer transition-colors select-none"
+              title="Convierte automáticamente los puntos clave de cada sesión explicativa exitosa (≥65/100) en un set de flashcards de la materia"
             >
-              <Zap className="w-3.5 h-3.5" />
-              <span>Guía Paso a Paso</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSubView('history')}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubView === 'history'
-                  ? 'bg-white text-purple-950 shadow-xs'
-                  : 'text-purple-100 hover:bg-white/10'
-              }`}
-            >
-              <History className="w-3.5 h-3.5" />
-              <span>Historial ({subject.feynmanSessions.length})</span>
-            </button>
+              <input
+                type="checkbox"
+                checked={autoConvertFlashcards}
+                onChange={(e) => setAutoConvertFlashcards(e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-emerald-400 cursor-pointer"
+              />
+              <Layers className="w-3.5 h-3.5 text-emerald-300" />
+              <span className="font-semibold">
+                Auto-crear Flashcards al superar reto (≥65%)
+              </span>
+            </label>
           </div>
         </div>
 
@@ -958,11 +1310,325 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
               4
             </span>
             <span className="text-purple-100/90 text-[11px] leading-snug">
-              <strong>Completa lo omitido</strong> y simplifica al 100%
+              <strong>Convierte puntos clave</strong> en Flashcards de repaso
             </span>
           </div>
         </div>
       </div>
+
+      {/* Flashcard Generation Notification Banner */}
+      {flashcardBannerMsg && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-xs animate-in fade-in duration-200">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+              <Layers className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-emerald-950">{flashcardBannerMsg}</p>
+              <p className="text-[11px] text-emerald-700">
+                Disponibles en la sección Active Recall / Flashcards de {subject.name} con repetición espaciada SM-2.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFlashcardBannerMsg(null)}
+            className="text-xs font-bold text-emerald-800 hover:text-emerald-950 px-2.5 py-1 rounded-lg hover:bg-emerald-100 cursor-pointer"
+          >
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {/* SECCIÓN DE ANALÍTICAS FEYNMAN (Visible como pestaña dedicada o bloque desplegable rápido) */}
+      {(activeSubView === 'analytics' || showInlineAnalytics) && (
+        <div className="bg-white rounded-2xl border border-indigo-200 shadow-xs p-6 space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center">
+                <BarChart3 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-slate-900">
+                  Analíticas Feynman · Conceptos Dominados vs. Lagunas Detectadas
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Evolución del dominio conceptual en <strong>{subject.name}</strong> durante tus retos explicativos
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {activeSubView === 'analytics' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveSubView('challenge')}
+                  className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Ir al Reto Explicativo</span>
+                </button>
+              )}
+              {activeSubView === 'challenge' && (
+                <button
+                  type="button"
+                  onClick={() => setShowInlineAnalytics(false)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Ocultar gráfico
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* KPI Summary Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Conceptos Dominados</span>
+              </div>
+              <div className="text-2xl font-bold font-mono-numbers text-emerald-950 mt-1">
+                {feynmanAnalytics.totalMastered}
+              </div>
+              <p className="text-[11px] text-emerald-700 mt-0.5">
+                Explicados con claridad y precisión
+              </p>
+            </div>
+
+            <div className="rounded-xl bg-amber-50/70 border border-amber-200 p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-800 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                <span>Lagunas Detectadas</span>
+              </div>
+              <div className="text-2xl font-bold font-mono-numbers text-amber-950 mt-1">
+                {feynmanAnalytics.totalGaps}
+              </div>
+              <p className="text-[11px] text-amber-700 mt-0.5">
+                Puntos omitidos o por reforzar
+              </p>
+            </div>
+
+            <div className="rounded-xl bg-purple-50/70 border border-purple-200 p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-purple-800 flex items-center gap-1.5">
+                <Award className="w-3.5 h-3.5 text-purple-600" />
+                <span>Tasa de Dominio</span>
+              </div>
+              <div className="text-2xl font-bold font-mono-numbers text-purple-950 mt-1">
+                {feynmanAnalytics.masteryRatioPct}%
+              </div>
+              <p className="text-[11px] text-purple-700 mt-0.5">
+                Media global: {feynmanAnalytics.avgOverallScore}/100
+              </p>
+            </div>
+
+            <div className="rounded-xl bg-indigo-50/70 border border-indigo-200 p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-800 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Flashcards Feynman</span>
+              </div>
+              <div className="text-2xl font-bold font-mono-numbers text-indigo-950 mt-1">
+                {feynmanAnalytics.feynmanFlashcardsCount}
+              </div>
+              <p className="text-[11px] text-indigo-700 mt-0.5">
+                Tarjetas creadas desde retos
+              </p>
+            </div>
+          </div>
+
+          {feynmanAnalytics.chartData.length === 0 ? (
+            <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-8 text-center space-y-2">
+              <BarChart3 className="w-8 h-8 text-slate-400 mx-auto" />
+              <p className="text-xs font-bold text-slate-800">
+                Aún no hay sesiones registradas en {subject.name} para graficar el progreso
+              </p>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Completa tu primer reto explicativo Feynman para visualizar la comparativa entre conceptos dominados y lagunas detectadas.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              {/* Chart 1: Conceptos Dominados vs Lagunas Detectadas por Sesión */}
+              <div className="rounded-2xl border border-slate-200 p-4 bg-slate-50/50 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-xs font-bold text-slate-800">
+                    Progreso de Conceptos Dominados vs. Lagunas por Reto
+                  </h5>
+                  <span className="text-[10px] font-mono-numbers text-slate-500">
+                    {feynmanAnalytics.chartData.length} sesiones
+                  </span>
+                </div>
+                <div className="h-60 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={feynmanAnalytics.chartData}
+                      margin={{ top: 10, right: 12, left: -16, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fontSize: 10, fill: '#475569' }}
+                      />
+                      <YAxis
+                        allowDecimals={false}
+                        tick={{ fontSize: 10, fill: '#475569' }}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          borderRadius: '12px',
+                          border: '1px solid #e2e8f0',
+                          fontSize: '12px',
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: '11px' }} />
+                      <Bar
+                        dataKey="dominados"
+                        name="Conceptos Dominados"
+                        fill="#10b981"
+                        radius={[6, 6, 0, 0]}
+                      />
+                      <Bar
+                        dataKey="lagunas"
+                        name="Lagunas Detectadas"
+                        fill="#f59e0b"
+                        radius={[6, 6, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Chart 2: Evolución de Simplicidad y Precisión Conceptual */}
+              <div className="rounded-2xl border border-slate-200 p-4 bg-slate-50/50 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-xs font-bold text-slate-800">
+                    Curva de Simplicidad y Precisión Conceptual (0-100%)
+                  </h5>
+                  <span className="text-[10px] font-mono-numbers text-purple-700 font-semibold">
+                    Meta de éxito: ≥65%
+                  </span>
+                </div>
+                <div className="h-60 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={feynmanAnalytics.chartData}
+                      margin={{ top: 10, right: 12, left: -16, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis
+                        dataKey="label"
+                        tick={{ fontSize: 10, fill: '#475569' }}
+                      />
+                      <YAxis
+                        domain={[0, 100]}
+                        tick={{ fontSize: 10, fill: '#475569' }}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          borderRadius: '12px',
+                          border: '1px solid #e2e8f0',
+                          fontSize: '12px',
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: '11px' }} />
+                      <Area
+                        type="monotone"
+                        dataKey="simplicidad"
+                        name="Simplicidad (%)"
+                        stroke="#7c3aed"
+                        fill="#ddd6fe"
+                        strokeWidth={2}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="precision"
+                        name="Precisión (%)"
+                        stroke="#2563eb"
+                        fill="#bfdbfe"
+                        strokeWidth={2}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Detailed breakdown of Mastered Concepts vs Detected Knowledge Gaps */}
+          {(feynmanAnalytics.allMasteredList.length > 0 ||
+            feynmanAnalytics.allGapsList.length > 0) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <div className="rounded-xl bg-emerald-50/40 border border-emerald-200 p-4 space-y-2.5">
+                <h5 className="text-xs font-bold uppercase tracking-wider text-emerald-900 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Conceptos Dominados Recientes ({feynmanAnalytics.allMasteredList.length})</span>
+                </h5>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {feynmanAnalytics.allMasteredList.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-white rounded-lg border border-emerald-100 px-3 py-2 text-xs text-slate-700 flex items-start justify-between gap-2"
+                    >
+                      <span className="font-medium text-emerald-950">{item.text}</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 shrink-0">
+                        {item.topic}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-amber-50/40 border border-amber-200 p-4 space-y-2.5">
+                <h5 className="text-xs font-bold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600" />
+                  <span>Lagunas Detectadas a Reforzar ({feynmanAnalytics.allGapsList.length})</span>
+                </h5>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {feynmanAnalytics.allGapsList.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-white rounded-lg border border-amber-100 px-3 py-2 text-xs text-slate-700 flex items-start justify-between gap-2"
+                    >
+                      <span className="font-medium text-amber-950">{item.text}</span>
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-800 shrink-0">
+                        {item.topic}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Collapsible quick-toggle bar when in Challenge mode and inline analytics is hidden */}
+      {activeSubView === 'challenge' && !showInlineAnalytics && (
+        <div className="bg-white rounded-2xl border border-slate-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="inline-flex items-center gap-1.5 font-bold text-slate-800">
+              <BarChart3 className="w-4 h-4 text-indigo-600" />
+              Resumen Analíticas Feynman:
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-mono-numbers font-bold">
+              {feynmanAnalytics.totalMastered} dominados
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 font-mono-numbers font-bold">
+              {feynmanAnalytics.totalGaps} lagunas
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-800 border border-indigo-200 font-mono-numbers font-bold">
+              {feynmanAnalytics.feynmanFlashcardsCount} flashcards creadas
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowInlineAnalytics(true)}
+            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1 cursor-pointer"
+          >
+            <span>Desplegar gráfico de progreso</span>
+            <ChevronDown className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* VIEW 1: ACTIVE FEYNMAN CHALLENGE */}
       {activeSubView === 'challenge' && (
@@ -1900,6 +2566,75 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     </div>
                   </div>
                 )}
+
+              {/* Conversión de Puntos Clave de la Sesión en un Set de Flashcards */}
+              <div className="bg-gradient-to-r from-emerald-950 via-teal-950 to-slate-900 rounded-2xl p-5 text-white border border-emerald-700/40 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/30 text-emerald-200 text-[10px] font-bold uppercase tracking-wider">
+                      <Layers className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>Active Recall · Conversión Directa a Flashcards</span>
+                    </div>
+                    <h5 className="text-sm font-bold text-white">
+                      Convierte los puntos clave de esta sesión explicativa en un set de Flashcards
+                    </h5>
+                    <p className="text-xs text-emerald-100/80 max-w-2xl">
+                      Extrae automáticamente la síntesis Feynman, los conceptos dominados, las analogías y las correcciones clave para guardarlos como tarjetas de repetición espaciada en <strong>{subject.name}</strong>.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleManualConvertSessionToFlashcards(
+                        currentEvaluation,
+                        syllabusComparison
+                      )
+                    }
+                    className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition-all cursor-pointer flex items-center gap-2 shadow-sm shrink-0"
+                  >
+                    {convertedSessionIds.includes(currentEvaluation.id) ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Flashcards Guardadas en {subject.name} (Generar nuevas)</span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="w-4 h-4" />
+                        <span>Convertir Puntos Clave en Set de Flashcards</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {lastGeneratedFlashcards.length > 0 && (
+                  <div className="pt-3 border-t border-white/10 space-y-2.5">
+                    <div className="text-[11px] font-bold text-emerald-200 flex items-center justify-between">
+                      <span>
+                        Último set generado ({lastGeneratedFlashcards.length} flashcards guardadas en {subject.name}):
+                      </span>
+                      <span className="font-mono-numbers text-emerald-300">
+                        Listas para repaso SM-2
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      {lastGeneratedFlashcards.slice(0, 4).map((fc) => (
+                        <div
+                          key={fc.id}
+                          className="rounded-xl bg-white/10 border border-white/15 p-3 space-y-1 text-xs"
+                        >
+                          <div className="font-bold text-emerald-200 line-clamp-1">
+                            P: {fc.question}
+                          </div>
+                          <div className="text-white/85 text-[11px] line-clamp-2">
+                            R: {fc.answer}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1935,6 +2670,7 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                 const simp = session.simplicityScore ?? session.clarityScore ?? 75;
                 const acc = session.accuracyScore ?? session.clarityScore ?? 75;
                 const corrCount = session.corrections ? session.corrections.length : 0;
+                const isConverted = convertedSessionIds.includes(session.id);
 
                 return (
                   <div
@@ -1967,7 +2703,21 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleManualConvertSessionToFlashcards(session)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
+                            isConverted
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          }`}
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          <span>
+                            {isConverted ? 'Flashcards Creadas' : 'Convertir a Flashcards'}
+                          </span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => {

@@ -27,6 +27,9 @@ import {
   BookOpen,
   Coffee,
   Target,
+  CheckCircle2,
+  Clock,
+  ListChecks,
 } from 'lucide-react';
 import { Subject, PomodoroLog, StudyPreferences } from '../types';
 import { notificationService } from '../services/notificationService';
@@ -67,6 +70,74 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [isCustomizing, setIsCustomizing] = useState<boolean>(false);
   const [showAdvancedAcoustic, setShowAdvancedAcoustic] = useState<boolean>(false);
+  const [showSessionEndAlertsConfig, setShowSessionEndAlertsConfig] = useState<boolean>(false);
+  const [sessionEndChimeEnabled, setSessionEndChimeEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_chime_enabled');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+  const [sessionEndChimeVolume, setSessionEndChimeVolume] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_chime_volume');
+      return saved !== null ? Number(saved) : 0.85;
+    } catch {
+      return 0.85;
+    }
+  });
+  const [sessionEndChimeType, setSessionEndChimeType] = useState<
+    'campana_zen' | 'acorde_cristal' | 'doble_pulso'
+  >(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_chime_type');
+      if (saved === 'campana_zen' || saved === 'acorde_cristal' || saved === 'doble_pulso') {
+        return saved;
+      }
+      return 'campana_zen';
+    } catch {
+      return 'campana_zen';
+    }
+  });
+  const [sessionEndVisualBannerEnabled, setSessionEndVisualBannerEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_visual_alert');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+  const [sessionEndBrowserNotifEnabled, setSessionEndBrowserNotifEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_browser_notif');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+  const [browserPermissionStatus, setBrowserPermissionStatus] = useState<NotificationPermission>(
+    () => notificationService.getPermission()
+  );
+  const [sessionAlertBanner, setSessionAlertBanner] = useState<{
+    title: string;
+    subtitle: string;
+    isTest?: boolean;
+  } | null>(null);
+
+  // Metas de Temas de la Sesión: configurar metas antes de iniciar y marcar automáticamente como estudiado al completar
+  const [showTopicGoalsPanel, setShowTopicGoalsPanel] = useState<boolean>(true);
+  const [autoMarkTopicStudied, setAutoMarkTopicStudied] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('studyflow_pomodoro_auto_mark_topic');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+  const [topicGoalCustomMinutes, setTopicGoalCustomMinutes] = useState<number | null>(null);
+  const [queuedGoalTopicIds, setQueuedGoalTopicIds] = useState<string[]>([]);
+  const [completedGoalTopicIds, setCompletedGoalTopicIds] = useState<string[]>([]);
 
   // Modo Enfoque: oculta menú de navegación y silencia notificaciones del sistema mientras el temporizador corre
   const [isFocusModeEnabled, setIsFocusModeEnabled] = useState<boolean>(() => {
@@ -159,14 +230,28 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     autoPlayAmbientWithTimer,
   ]);
 
-  // Persistir preferencia de Modo Enfoque
+  // Persistir preferencia de Modo Enfoque y Avisos de fin de sesión
   useEffect(() => {
     try {
       localStorage.setItem('studyflow_pomodoro_focus_mode', JSON.stringify(isFocusModeEnabled));
+      localStorage.setItem('studyflow_pomodoro_chime_enabled', JSON.stringify(sessionEndChimeEnabled));
+      localStorage.setItem('studyflow_pomodoro_chime_volume', String(sessionEndChimeVolume));
+      localStorage.setItem('studyflow_pomodoro_chime_type', sessionEndChimeType);
+      localStorage.setItem('studyflow_pomodoro_visual_alert', JSON.stringify(sessionEndVisualBannerEnabled));
+      localStorage.setItem('studyflow_pomodoro_browser_notif', JSON.stringify(sessionEndBrowserNotifEnabled));
+      localStorage.setItem('studyflow_pomodoro_auto_mark_topic', JSON.stringify(autoMarkTopicStudied));
     } catch {
       // ignore storage errors
     }
-  }, [isFocusModeEnabled]);
+  }, [
+    isFocusModeEnabled,
+    sessionEndChimeEnabled,
+    sessionEndChimeVolume,
+    sessionEndChimeType,
+    sessionEndVisualBannerEnabled,
+    sessionEndBrowserNotifEnabled,
+    autoMarkTopicStudied,
+  ]);
 
   // Sincronizar estado de Modo Enfoque con App y notificaciones
   useEffect(() => {
@@ -204,8 +289,10 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     setCustomLongBreak(pomodoroConfig.longBreakMinutes);
   }, [pomodoroConfig]);
 
+  const effectiveFocusMinutes = topicGoalCustomMinutes ?? pomodoroConfig.focusMinutes;
+
   const getDurationSeconds = (currentMode: 'focus' | 'shortBreak' | 'longBreak') => {
-    if (currentMode === 'focus') return pomodoroConfig.focusMinutes * 60;
+    if (currentMode === 'focus') return effectiveFocusMinutes * 60;
     if (currentMode === 'shortBreak') return pomodoroConfig.shortBreakMinutes * 60;
     return pomodoroConfig.longBreakMinutes * 60;
   };
@@ -213,33 +300,134 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const [timeLeft, setTimeLeft] = useState<number>(getDurationSeconds('focus'));
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const playChime = () => {
+  const playChime = (
+    overrideType?: 'campana_zen' | 'acorde_cristal' | 'doble_pulso',
+    forcePlay: boolean = false,
+    overrideVol?: number
+  ) => {
+    if (!sessionEndChimeEnabled && !forcePlay) return;
+    const tone = overrideType || sessionEndChimeType;
+    const volScale = Math.max(0.05, Math.min(1, overrideVol ?? sessionEndChimeVolume));
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
+      const now = audioCtx.currentTime;
 
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.3);
-
-      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 1.2);
-
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-
-      osc.start();
-      osc.stop(audioCtx.currentTime + 1.2);
+      if (tone === 'campana_zen') {
+        // Campana tibetana armónica (fundamental + armónico de quinta)
+        const freqs = [528, 792, 1056];
+        freqs.forEach((f, idx) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(f, now);
+          const baseAmp = idx === 0 ? 0.32 : idx === 1 ? 0.14 : 0.07;
+          const amp = baseAmp * volScale;
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.linearRampToValueAtTime(amp, now + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0008, now + 2.2 - idx * 0.3);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(now);
+          osc.stop(now + 2.3);
+        });
+      } else if (tone === 'acorde_cristal') {
+        // Arpegio ascendente cristalino (Do5 - Mi5 - Sol5 - Si5)
+        const notes = [523.25, 659.25, 783.99, 987.77];
+        notes.forEach((freq, idx) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          const start = now + idx * 0.11;
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, start);
+          gain.gain.setValueAtTime(0.001, start);
+          gain.gain.linearRampToValueAtTime(0.25 * volScale, start + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, start + 1.1);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(start);
+          osc.stop(start + 1.15);
+        });
+      } else {
+        // Doble pulso suave de finalización
+        [0, 0.24].forEach((offset, idx) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          const start = now + offset;
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(idx === 0 ? 587.33 : 880, start);
+          gain.gain.setValueAtTime(0.001, start);
+          gain.gain.linearRampToValueAtTime(0.3 * volScale, start + 0.015);
+          gain.gain.exponentialRampToValueAtTime(0.001, start + 0.35);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(start);
+          osc.stop(start + 0.38);
+        });
+      }
     } catch (e) {
       console.warn('Audio chime unavailable', e);
+    }
+  };
+
+  const triggerTestSessionAlert = async (
+    customTone?: 'campana_zen' | 'acorde_cristal' | 'doble_pulso'
+  ) => {
+    if (sessionEndChimeEnabled || customTone) {
+      playChime(customTone, true);
+    }
+
+    let browserNotifSent = false;
+    try {
+      if (sessionEndBrowserNotifEnabled && notificationService.isSupported()) {
+        const currentPerm = notificationService.getPermission();
+        setBrowserPermissionStatus(currentPerm);
+        if (currentPerm !== 'granted') {
+          const granted = await notificationService.requestPermission();
+          setBrowserPermissionStatus(notificationService.getPermission());
+          if (granted) {
+            browserNotifSent = notificationService.sendTestNotificationByType('pomodoro', {
+              skipServiceChime: true,
+            });
+          }
+        } else {
+          browserNotifSent = notificationService.sendTestNotificationByType('pomodoro', {
+            skipServiceChime: true,
+          });
+        }
+      }
+    } catch {
+      // Fallback visual y sonoro interno activo
+    }
+
+    if (sessionEndVisualBannerEnabled || !sessionEndChimeEnabled) {
+      const activeChannels: string[] = [];
+      if (sessionEndChimeEnabled || customTone) activeChannels.push('alerta sonora');
+      if (sessionEndVisualBannerEnabled) activeChannels.push('alerta visual en pantalla');
+      if (browserNotifSent) activeChannels.push('notificación del navegador');
+
+      setSessionAlertBanner({
+        title: '🔔 Aviso de fin de sesión comprobado',
+        subtitle:
+          activeChannels.length > 0
+            ? `Canales activos al terminar el temporizador: ${activeChannels.join(' + ')}.`
+            : 'Has silenciado los avisos. Activa el sonido o la alerta visual en el panel inferior.',
+        isTest: true,
+      });
+    }
+  };
+
+  const handleSessionEndAlertsButtonClick = async () => {
+    const nextOpen = !showSessionEndAlertsConfig;
+    setShowSessionEndAlertsConfig(nextOpen);
+    if (nextOpen) {
+      await triggerTestSessionAlert();
     }
   };
 
   useEffect(() => {
     setTimeLeft(getDurationSeconds(mode));
     setIsRunning(false);
-  }, [mode, pomodoroConfig]);
+  }, [mode, pomodoroConfig, topicGoalCustomMinutes]);
 
   useEffect(() => {
     if (defaultSubId) setSelectedSubjectId(defaultSubId);
@@ -252,14 +440,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   useEffect(() => {
     if (isRunning) {
       timerRef.current = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(timerRef.current!);
-            handleComplete();
-            return 0;
-          }
-          return prev - 1;
-        });
+        setTimeLeft((prev) => (prev <= 1 ? 0 : prev - 1));
       }, 1000);
     } else if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -420,10 +601,47 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   };
 
   const handleComplete = () => {
-    playChime();
+    if (sessionEndChimeEnabled) {
+      playChime();
+    }
     setIsRunning(false);
     notificationService.setFocusModeSilenced(false);
-    notificationService.notifyPomodoro(mode, selectedTopic?.title);
+
+    if (sessionEndBrowserNotifEnabled) {
+      notificationService.notifyPomodoro(mode, selectedTopic?.title, {
+        skipServiceChime: true,
+      });
+    }
+
+    const completedMinutes = effectiveFocusMinutes;
+    const willAutoMarkTopic = Boolean(
+      mode === 'focus' && autoMarkTopicStudied && selectedSubject && selectedTopic
+    );
+
+    if (sessionEndVisualBannerEnabled) {
+      if (mode === 'focus') {
+        if (willAutoMarkTopic && selectedTopic && selectedSubject) {
+          setSessionAlertBanner({
+            title: '🎯 ¡Meta de tema completada y marcada como Estudiado!',
+            subtitle: `Has completado los ${completedMinutes} min asignados. «${selectedTopic.title}» (${selectedSubject.name}) se ha marcado automáticamente como ESTUDIADO.`,
+          });
+        } else {
+          setSessionAlertBanner({
+            title: '🎉 ¡Sesión de enfoque completada!',
+            subtitle: selectedSubject
+              ? `Has registrado ${completedMinutes} min en ${selectedSubject.name}${
+                  selectedTopic ? ` · ${selectedTopic.title}` : ''
+                }. ¡Tómate un respiro!`
+              : `Has completado ${completedMinutes} min de concentración profunda.`,
+          });
+        }
+      } else {
+        setSessionAlertBanner({
+          title: '⚡ ¡Descanso terminado! Hora de volver al estudio',
+          subtitle: 'Tu mente está despejada para el siguiente bloque de enfoque.',
+        });
+      }
+    }
 
     if (mode === 'focus') {
       const newCycles = cycleCount + 1;
@@ -434,22 +652,51 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
           id: `pom-${Date.now()}`,
           subjectId: selectedSubject.id,
           subjectName: selectedSubject.name,
+          topicId: selectedTopic?.id,
           topicTitle: selectedTopic?.title || 'Estudio general',
-          durationMinutes: pomodoroConfig.focusMinutes,
+          durationMinutes: completedMinutes,
           date: new Date().toISOString().split('T')[0],
           timestamp: new Date().toISOString(),
+          autoMarkTopicStudied: willAutoMarkTopic,
         });
+      }
+
+      if (willAutoMarkTopic && selectedTopic) {
+        const nextCompletedIds = Array.from(
+          new Set([...completedGoalTopicIds, selectedTopic.id])
+        );
+        setCompletedGoalTopicIds(nextCompletedIds);
+
+        // Si hay más temas configurados en la cola de metas de la sesión, avanzar al siguiente pendiente
+        const nextGoalId = queuedGoalTopicIds.find(
+          (id) => id !== selectedTopic.id && !nextCompletedIds.includes(id)
+        );
+        if (nextGoalId) {
+          setSelectedTopicId(nextGoalId);
+        }
       }
 
       if (newCycles % pomodoroConfig.longBreakInterval === 0) {
         setMode('longBreak');
+        setTimeLeft(getDurationSeconds('longBreak'));
       } else {
         setMode('shortBreak');
+        setTimeLeft(getDurationSeconds('shortBreak'));
       }
     } else {
       setMode('focus');
+      setTimeLeft(getDurationSeconds('focus'));
     }
   };
+
+  useEffect(() => {
+    if (isRunning && timeLeft === 0) {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      handleComplete();
+    }
+  }, [timeLeft, isRunning]);
 
   const handleToggle = () => {
     setIsRunning(!isRunning);
@@ -1083,11 +1330,241 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
                   </option>
                   {selectedSubject?.topics.map((t) => (
                     <option key={t.id} value={t.id} className="bg-white dark:bg-slate-900">
-                      {t.title}
+                      {t.title} {t.status === 'estudiado' || t.status === 'repasado' ? '✓' : ''}
                     </option>
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* Configurar Metas de Temas antes de iniciar la sesión */}
+            <div className="rounded-2xl border border-indigo-200/80 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/25 overflow-hidden transition-all">
+              <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowTopicGoalsPanel(!showTopicGoalsPanel)}
+                  className="flex items-center gap-2 text-left cursor-pointer group"
+                >
+                  <div className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-xs">
+                    <ListChecks className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
+                        Metas de Temas de la Sesión
+                      </span>
+                      {autoMarkTopicStudied && selectedTopic && (
+                        <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60">
+                          Auto-Estudiado Activo ({effectiveFocusMinutes}m)
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                      Configura tus metas antes de iniciar para marcar el tema como estudiado al terminar el contador
+                    </p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowTopicGoalsPanel(!showTopicGoalsPanel)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800/60 cursor-pointer"
+                  title={showTopicGoalsPanel ? 'Ocultar configuración de metas' : 'Configurar metas de temas'}
+                >
+                  {showTopicGoalsPanel ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+
+              {showTopicGoalsPanel && (
+                <div className="px-3.5 pb-3.5 pt-2 border-t border-indigo-100/80 dark:border-indigo-900/40 space-y-3">
+                  {/* Switch de auto-marcado al completar el contador */}
+                  <div className="flex items-center justify-between gap-3 p-2.5 rounded-xl bg-white/90 dark:bg-slate-900/80 border border-slate-200/70 dark:border-slate-800">
+                    <div className="flex items-center gap-2.5">
+                      <CheckCircle2
+                        className={`w-4 h-4 shrink-0 ${
+                          autoMarkTopicStudied
+                            ? 'text-emerald-500'
+                            : 'text-slate-400'
+                        }`}
+                      />
+                      <div>
+                        <p className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                          Marcar tema automáticamente como «Estudiado»
+                        </p>
+                        <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                          {selectedTopic
+                            ? `Al completar los ${effectiveFocusMinutes} min asignados, «${selectedTopic.title}» pasará a estado Estudiado.`
+                            : 'Selecciona un tema arriba o en la lista inferior antes de iniciar el temporizador.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setAutoMarkTopicStudied(!autoMarkTopicStudied)}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                        autoMarkTopicStudied
+                          ? 'bg-emerald-500'
+                          : 'bg-slate-300 dark:bg-slate-700'
+                      }`}
+                      role="switch"
+                      aria-checked={autoMarkTopicStudied}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs transition duration-200 ease-in-out ${
+                          autoMarkTopicStudied ? 'translate-x-4' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Selector de tiempo asignado a la meta antes de iniciar */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-indigo-500" />
+                      Tiempo asignado a la meta:
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1">
+                      {[
+                        { label: `Base (${pomodoroConfig.focusMinutes}m)`, value: null },
+                        { label: '15m', value: 15 },
+                        { label: '25m', value: 25 },
+                        { label: '45m', value: 45 },
+                        { label: '60m', value: 60 },
+                        ...(selectedTopic?.estimatedHours
+                          ? [
+                              {
+                                label: `Est. Tema (${Math.max(
+                                  5,
+                                  Math.min(180, Math.round(selectedTopic.estimatedHours * 60))
+                                )}m)`,
+                                value: Math.max(
+                                  5,
+                                  Math.min(180, Math.round(selectedTopic.estimatedHours * 60))
+                                ),
+                              },
+                            ]
+                          : []),
+                      ].map((opt, idx) => {
+                        const isSelected = topicGoalCustomMinutes === opt.value;
+                        return (
+                          <button
+                            key={`${opt.label}-${idx}`}
+                            type="button"
+                            disabled={isRunning}
+                            onClick={() => {
+                              setTopicGoalCustomMinutes(opt.value);
+                              if (!isRunning && mode === 'focus') {
+                                const mins = opt.value ?? pomodoroConfig.focusMinutes;
+                                setTimeLeft(mins * 60);
+                              }
+                            }}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer disabled:opacity-50 ${
+                              isSelected
+                                ? 'bg-indigo-600 text-white shadow-xs'
+                                : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Selección rápida de temas meta de la asignatura activa */}
+                  {selectedSubject && selectedSubject.topics.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          Temas objetivo en {selectedSubject.name} (haz clic para fijar como meta activa):
+                        </span>
+                        {queuedGoalTopicIds.length > 0 && (
+                          <span className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400">
+                            {
+                              queuedGoalTopicIds.filter((id) =>
+                                completedGoalTopicIds.includes(id)
+                              ).length
+                            }
+                            /{queuedGoalTopicIds.length} metas completadas
+                          </span>
+                        )}
+                      </div>
+                      <div className="max-h-28 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                        {selectedSubject.topics.map((topic) => {
+                          const isCurrentTarget = selectedTopicId === topic.id;
+                          const isQueuedGoal = queuedGoalTopicIds.includes(topic.id);
+                          const isAlreadyStudied =
+                            topic.status === 'estudiado' ||
+                            topic.status === 'repasado' ||
+                            completedGoalTopicIds.includes(topic.id);
+
+                          return (
+                            <div
+                              key={topic.id}
+                              onClick={() => {
+                                if (!isRunning) {
+                                  setSelectedTopicId(topic.id);
+                                }
+                                if (!queuedGoalTopicIds.includes(topic.id)) {
+                                  setQueuedGoalTopicIds((prev) => [...prev, topic.id]);
+                                }
+                              }}
+                              className={`px-2.5 py-1.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-all cursor-pointer ${
+                                isCurrentTarget
+                                  ? 'bg-indigo-600/10 dark:bg-indigo-500/20 border-indigo-500 text-indigo-950 dark:text-white'
+                                  : isQueuedGoal
+                                  ? 'bg-white dark:bg-slate-900 border-indigo-300 dark:border-indigo-800 text-slate-800 dark:text-slate-200'
+                                  : 'bg-white/70 dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={isQueuedGoal || isCurrentTarget}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    if (isQueuedGoal) {
+                                      setQueuedGoalTopicIds((prev) =>
+                                        prev.filter((id) => id !== topic.id)
+                                      );
+                                    } else {
+                                      setQueuedGoalTopicIds((prev) => [...prev, topic.id]);
+                                      if (!selectedTopicId && !isRunning) {
+                                        setSelectedTopicId(topic.id);
+                                      }
+                                    }
+                                  }}
+                                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                                  title="Incluir en la cola de metas de la sesión"
+                                />
+                                <span className="text-[11px] font-semibold truncate">
+                                  {topic.title}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {isAlreadyStudied ? (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300">
+                                    ✓ Estudiado
+                                  </span>
+                                ) : isCurrentTarget ? (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-indigo-600 text-white">
+                                    En meta
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 px-1">
@@ -1100,20 +1577,252 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
               </span>
               <button
                 type="button"
-                onClick={async () => {
-                  if (notificationService.getPermission() !== 'granted') {
-                    const granted = await notificationService.requestPermission();
-                    if (granted) notificationService.sendTestNotification();
-                  } else {
-                    notificationService.sendTestNotification();
-                  }
-                }}
-                className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-semibold hover:underline cursor-pointer"
+                onClick={handleSessionEndAlertsButtonClick}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
+                  showSessionEndAlertsConfig
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/60 border border-blue-200/70 dark:border-blue-800/70'
+                }`}
               >
-                <BellRing className="w-3 h-3" />
+                <BellRing className="w-3.5 h-3.5 animate-pulse" />
                 <span>Avisos fin de sesión</span>
+                {showSessionEndAlertsConfig ? (
+                  <ChevronUp className="w-3 h-3" />
+                ) : (
+                  <ChevronDown className="w-3 h-3" />
+                )}
               </button>
             </div>
+
+            {/* Banner emergente de aviso de fin de sesión / prueba */}
+            {sessionAlertBanner && (
+              <div className="p-3.5 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md flex items-start justify-between gap-3 animate-in fade-in duration-200">
+                <div className="flex items-start gap-2.5">
+                  <div className="p-1.5 rounded-xl bg-white/20 shrink-0 mt-0.5">
+                    <BellRing className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-extrabold leading-snug">
+                      {sessionAlertBanner.title}
+                    </p>
+                    <p className="text-[11px] text-blue-100 mt-0.5 leading-relaxed">
+                      {sessionAlertBanner.subtitle}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSessionAlertBanner(null)}
+                  className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white shrink-0 cursor-pointer"
+                >
+                  Entendido
+                </button>
+              </div>
+            )}
+
+            {/* Panel desplegable de configuración y prueba de Avisos Fin de Sesión */}
+            {showSessionEndAlertsConfig && (
+              <div className="p-4 rounded-2xl bg-slate-50/95 dark:bg-slate-800/80 border border-blue-200/80 dark:border-blue-900/60 space-y-3.5 animate-in fade-in duration-150">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/70 dark:border-slate-700/70 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <Bell className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <div>
+                      <h5 className="text-xs font-bold text-slate-900 dark:text-white">
+                        Configuración de Avisos de Fin de Sesión
+                      </h5>
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                        Personaliza las alertas sonoras, visuales y del sistema al terminar el temporizador
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => triggerTestSessionAlert()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition-all cursor-pointer"
+                  >
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>Probar aviso ahora</span>
+                  </button>
+                </div>
+
+                {/* Selector de tono de fin de sesión + Volumen */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Tono acústico al finalizar
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                        Volumen: {Math.round(sessionEndChimeVolume * 100)}%
+                      </span>
+                      <input
+                        type="range"
+                        min="0.1"
+                        max="1"
+                        step="0.05"
+                        value={sessionEndChimeVolume}
+                        onChange={(e) => {
+                          const nextVol = parseFloat(e.target.value);
+                          setSessionEndChimeVolume(nextVol);
+                          setSessionEndChimeEnabled(true);
+                          playChime(sessionEndChimeType, true, nextVol);
+                        }}
+                        className="w-20 h-1.5 accent-blue-600 cursor-pointer"
+                        title="Volumen del aviso sonoro"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {[
+                      {
+                        id: 'campana_zen' as const,
+                        label: 'Campana Zen',
+                        desc: 'Cuenco armónico 528Hz',
+                      },
+                      {
+                        id: 'acorde_cristal' as const,
+                        label: 'Acorde Cristal',
+                        desc: 'Arpegio ascendente suave',
+                      },
+                      {
+                        id: 'doble_pulso' as const,
+                        label: 'Doble Pulso',
+                        desc: 'Timbre clásico de estudio',
+                      },
+                    ].map((toneOpt) => {
+                      const active = sessionEndChimeType === toneOpt.id;
+                      return (
+                        <button
+                          key={toneOpt.id}
+                          type="button"
+                          onClick={() => {
+                            setSessionEndChimeType(toneOpt.id);
+                            setSessionEndChimeEnabled(true);
+                            playChime(toneOpt.id, true);
+                          }}
+                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                            active
+                              ? 'border-blue-500 bg-blue-50/90 dark:bg-blue-950/50 text-blue-950 dark:text-blue-100 shadow-2xs'
+                              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-blue-300 text-slate-700 dark:text-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-xs font-bold">{toneOpt.label}</span>
+                            <Volume2
+                              className={`w-3.5 h-3.5 ${
+                                active ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'
+                              }`}
+                            />
+                          </div>
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            {toneOpt.desc}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Interruptores de Sonido, Banner Visual y Notificación del Sistema */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !sessionEndChimeEnabled;
+                      setSessionEndChimeEnabled(next);
+                      if (next) playChime(sessionEndChimeType, true);
+                    }}
+                    className={`flex items-center justify-between p-2.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                      sessionEndChimeEnabled
+                        ? 'border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {sessionEndChimeEnabled ? (
+                        <Volume2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      ) : (
+                        <VolumeX className="w-4 h-4 text-slate-400 shrink-0" />
+                      )}
+                      <span>Alerta sonora</span>
+                    </span>
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-md bg-white/80 dark:bg-slate-800">
+                      {sessionEndChimeEnabled ? 'Activa' : 'Silencio'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSessionEndVisualBannerEnabled((prev) => !prev)}
+                    className={`flex items-center justify-between p-2.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                      sessionEndVisualBannerEnabled
+                        ? 'border-blue-300 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/30 text-blue-900 dark:text-blue-200'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {sessionEndVisualBannerEnabled ? (
+                        <BellRing className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                      ) : (
+                        <BellOff className="w-4 h-4 text-slate-400 shrink-0" />
+                      )}
+                      <span>Alerta visual</span>
+                    </span>
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-md bg-white/80 dark:bg-slate-800">
+                      {sessionEndVisualBannerEnabled ? 'Activa' : 'Oculta'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const next = !sessionEndBrowserNotifEnabled;
+                      setSessionEndBrowserNotifEnabled(next);
+                      if (next && notificationService.isSupported()) {
+                        const perm = notificationService.getPermission();
+                        if (perm !== 'granted') {
+                          const granted = await notificationService.requestPermission();
+                          setBrowserPermissionStatus(notificationService.getPermission());
+                          if (granted) {
+                            notificationService.sendTestNotificationByType('pomodoro', {
+                              skipServiceChime: true,
+                            });
+                          }
+                        } else {
+                          setBrowserPermissionStatus('granted');
+                          notificationService.sendTestNotificationByType('pomodoro', {
+                            skipServiceChime: true,
+                          });
+                        }
+                      }
+                    }}
+                    className={`flex items-center justify-between p-2.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                      sessionEndBrowserNotifEnabled
+                        ? 'border-indigo-300 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-950/30 text-indigo-900 dark:text-indigo-200'
+                        : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Bell
+                        className={`w-4 h-4 shrink-0 ${
+                          sessionEndBrowserNotifEnabled
+                            ? 'text-indigo-600 dark:text-indigo-400'
+                            : 'text-slate-400'
+                        }`}
+                      />
+                      <span>Aviso navegador</span>
+                    </span>
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-md bg-white/80 dark:bg-slate-800">
+                      {!sessionEndBrowserNotifEnabled
+                        ? 'Off'
+                        : browserPermissionStatus === 'granted'
+                        ? 'Push OK'
+                        : 'Auto'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
