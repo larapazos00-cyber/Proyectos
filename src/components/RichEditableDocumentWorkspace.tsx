@@ -23,17 +23,31 @@ import {
   Maximize2,
   Sparkles,
   CheckCircle2,
+  Loader2,
+  Sigma,
+  Code2,
+  Code,
+  Copy,
+  BookOpen,
+  Edit3,
+  Sun,
+  Moon,
+  Coffee,
 } from 'lucide-react';
 import {
   DocumentComment,
   DocumentImageAsset,
 } from '../types';
 import {
+  SUPPORTED_CODE_LANGUAGES,
+  buildCodeBlockHtml,
   buildImageFigureHtml,
+  buildMathHtml,
   convertMarkdownAndImagesToRichHtml,
   convertRichHtmlToPlainText,
   detectTextPageCount,
   readFileAsBase64,
+  renderLatexToKatexHtml,
 } from '../utils/documentParser';
 
 export interface RichEditableDocumentWorkspaceProps {
@@ -45,6 +59,13 @@ export interface RichEditableDocumentWorkspaceProps {
   comments: DocumentComment[];
   pageCount?: number;
   placeholder?: string;
+  externalFormatVersion?: number;
+  onImproveFormatAI?: () => void;
+  isFormattingAI?: boolean;
+  isReadingMode?: boolean;
+  onToggleReadingMode?: (nextReadingMode: boolean) => void;
+  subjectName?: string;
+  documentSwitcherSlot?: React.ReactNode;
   onChange: (payload: {
     markdownContent: string;
     richHtmlContent: string;
@@ -108,18 +129,52 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
   comments,
   pageCount,
   placeholder,
+  externalFormatVersion = 0,
+  onImproveFormatAI,
+  isFormattingAI = false,
+  isReadingMode,
+  onToggleReadingMode,
+  subjectName,
+  documentSwitcherSlot,
   onChange,
 }) => {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const mathTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const codeTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const savedCursorRangeRef = useRef<Range | null>(null);
+  const editingMathElementRef = useRef<HTMLElement | null>(null);
+  const editingCodeElementRef = useRef<HTMLElement | null>(null);
   const lastLoadedDocIdRef = useRef<string>('');
   const lastEmittedHtmlRef = useRef<string>('');
   const lastEmittedMarkdownRef = useRef<string>('');
+  const lastFormatVersionRef = useRef<number>(externalFormatVersion);
 
   const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
+  const [internalReadingMode, setInternalReadingMode] = useState<boolean>(false);
+  const activeReadingMode =
+    isReadingMode !== undefined ? isReadingMode : internalReadingMode;
+  const [readingFontSize, setReadingFontSize] = useState<'sm' | 'base' | 'lg' | 'xl'>('lg');
+  const [readingLineHeight, setReadingLineHeight] = useState<'1.75' | '1.95' | '2.15'>('1.95');
+  const [readingTheme, setReadingTheme] = useState<'light' | 'sepia' | 'dark'>('light');
   const [activeHighlighterColor, setActiveHighlighterColor] = useState<HighlightColorKey | null>(null);
   const [showCommentsSidebar, setShowCommentsSidebar] = useState<boolean>(true);
   const [showImagesDrawer, setShowImagesDrawer] = useState<boolean>(false);
+  const [formatAppliedNotice, setFormatAppliedNotice] = useState<string | null>(null);
+
+  // Estado para editor de fórmulas matemáticas (LaTeX / KaTeX)
+  const [isMathModalOpen, setIsMathModalOpen] = useState<boolean>(false);
+  const [mathLatexInput, setMathLatexInput] = useState<string>('\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}');
+  const [mathDisplayMode, setMathDisplayMode] = useState<'block' | 'inline'>('block');
+  const [isEditingExistingMath, setIsEditingExistingMath] = useState<boolean>(false);
+  const [mathPaletteTab, setMathPaletteTab] = useState<'basic' | 'calculus' | 'symbols'>('basic');
+
+  // Estado para editor de bloques de código de programación
+  const [isCodeModalOpen, setIsCodeModalOpen] = useState<boolean>(false);
+  const [codeLanguage, setCodeLanguage] = useState<string>('python');
+  const [codeTitle, setCodeTitle] = useState<string>('');
+  const [codeContentInput, setCodeContentInput] = useState<string>('');
+  const [isEditingExistingCode, setIsEditingExistingCode] = useState<boolean>(false);
 
   // Estado para nuevo comentario
   const [isAddingComment, setIsAddingComment] = useState<boolean>(false);
@@ -139,20 +194,33 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
         ? richHtmlContent
         : convertMarkdownAndImagesToRichHtml(markdownContent, extractedImages);
 
+    const isForcedFormatRefresh = externalFormatVersion !== lastFormatVersionRef.current;
+    if (isForcedFormatRefresh) {
+      lastFormatVersionRef.current = externalFormatVersion;
+      setFormatAppliedNotice(
+        '✨ Formato académico mejorado con IA aplicado al documento (100% de tus apuntes conservados con encabezados, conceptos resaltados y estructura visual).'
+      );
+      setTimeout(() => setFormatAppliedNotice(null), 5500);
+    }
+
     if (editorRef.current) {
       const isUserTyping =
-        document.activeElement && editorRef.current.contains(document.activeElement);
+        !isForcedFormatRefresh &&
+        document.activeElement &&
+        editorRef.current.contains(document.activeElement);
       const isDocChanged = lastLoadedDocIdRef.current !== documentId;
       const isCanvasEmpty =
         !editorRef.current.innerHTML ||
         editorRef.current.innerHTML === '<br>' ||
         editorRef.current.innerHTML === '<p><br></p>';
       const isExternalProgrammaticUpdate =
-        Boolean(initialHtml) &&
-        initialHtml !== lastEmittedHtmlRef.current &&
-        markdownContent !== lastEmittedMarkdownRef.current;
+        isForcedFormatRefresh ||
+        (Boolean(initialHtml) &&
+          initialHtml !== lastEmittedHtmlRef.current &&
+          markdownContent !== lastEmittedMarkdownRef.current);
 
       if (
+        isForcedFormatRefresh ||
         isDocChanged ||
         isCanvasEmpty ||
         isExternalProgrammaticUpdate ||
@@ -164,7 +232,7 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
         lastEmittedMarkdownRef.current = markdownContent;
       }
     }
-  }, [documentId, richHtmlContent, markdownContent, extractedImages]);
+  }, [documentId, richHtmlContent, markdownContent, extractedImages, externalFormatVersion, activeReadingMode]);
 
   // Si externamente se restaura el texto o cambia cuando el editor está vacío
   const forceReloadHtmlIntoCanvas = (nextHtml: string) => {
@@ -200,11 +268,39 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
     emitVisualChanges();
   };
 
-  // Insertar bloque HTML en la posición actual o al final
+  // Guardar posición actual del cursor dentro del editor visual antes de abrir un modal
+  const captureCurrentEditorSelection = () => {
+    if (!editorRef.current) {
+      savedCursorRangeRef.current = null;
+      return;
+    }
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && editorRef.current.contains(sel.anchorNode)) {
+      savedCursorRangeRef.current = sel.getRangeAt(0).cloneRange();
+    } else {
+      savedCursorRangeRef.current = null;
+    }
+  };
+
+  // Insertar bloque HTML en la posición actual (o restaurada) o al final
   const insertHtmlAtCursorOrEnd = (htmlSnippet: string) => {
     if (!editorRef.current) return;
     editorRef.current.focus();
     const sel = window.getSelection();
+    if (
+      savedCursorRangeRef.current &&
+      editorRef.current.contains(savedCursorRangeRef.current.startContainer) &&
+      sel
+    ) {
+      try {
+        sel.removeAllRanges();
+        sel.addRange(savedCursorRangeRef.current);
+      } catch {
+        // Ignorar si el rango previo ya no existe
+      }
+      savedCursorRangeRef.current = null;
+    }
+
     if (
       sel &&
       sel.rangeCount > 0 &&
@@ -215,6 +311,263 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
       editorRef.current.innerHTML += `\n${htmlSnippet}`;
     }
     emitVisualChanges();
+  };
+
+  // Reemplazar un nodo existente (fórmula o bloque de código) en el DOM visual
+  const replaceDomNodeWithHtml = (targetEl: HTMLElement, newHtml: string) => {
+    if (!editorRef.current || !editorRef.current.contains(targetEl)) {
+      insertHtmlAtCursorOrEnd(newHtml);
+      return;
+    }
+    const template = document.createElement('template');
+    template.innerHTML = newHtml.trim();
+    const nextNode = template.content.firstElementChild;
+    if (nextNode) {
+      targetEl.replaceWith(nextNode);
+    }
+    emitVisualChanges();
+  };
+
+  // Abrir compositor de fórmulas matemáticas
+  const handleOpenMathModal = (existingEl?: HTMLElement | null) => {
+    if (existingEl) {
+      editingMathElementRef.current = existingEl;
+      setMathLatexInput(existingEl.getAttribute('data-math-latex') || '');
+      setMathDisplayMode(
+        existingEl.getAttribute('data-math-display') === 'inline' ? 'inline' : 'block'
+      );
+      setIsEditingExistingMath(true);
+    } else {
+      captureCurrentEditorSelection();
+      editingMathElementRef.current = null;
+      const selectedText = savedCursorRangeRef.current?.toString().trim() || '';
+      setMathLatexInput(selectedText || '\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}');
+      setMathDisplayMode('block');
+      setIsEditingExistingMath(false);
+    }
+    setIsMathModalOpen(true);
+    setTimeout(() => mathTextareaRef.current?.focus(), 40);
+  };
+
+  // Insertar snippet en el textarea de fórmula LaTeX
+  const insertLatexSnippet = (snippet: string) => {
+    const el = mathTextareaRef.current;
+    if (!el) {
+      setMathLatexInput((prev) => `${prev}${prev ? ' ' : ''}${snippet}`);
+      return;
+    }
+    const start = el.selectionStart ?? mathLatexInput.length;
+    const end = el.selectionEnd ?? mathLatexInput.length;
+    const next = mathLatexInput.slice(0, start) + snippet + mathLatexInput.slice(end);
+    setMathLatexInput(next);
+    setTimeout(() => {
+      el.focus();
+      const caret = start + snippet.length;
+      el.setSelectionRange(caret, caret);
+    }, 0);
+  };
+
+  // Confirmar inserción o edición de fórmula matemática
+  const handleConfirmMathFormula = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = mathLatexInput.trim();
+    if (!trimmed) return;
+
+    if (editorMode === 'markdown') {
+      const mdSnippet =
+        mathDisplayMode === 'block' ? `\n$$\n${trimmed}\n$$\n` : `$${trimmed}$`;
+      const nextMd = `${markdownContent}${markdownContent.endsWith('\n') || !markdownContent ? '' : '\n'}${mdSnippet}`;
+      onChange({
+        markdownContent: nextMd,
+        richHtmlContent: convertMarkdownAndImagesToRichHtml(nextMd, extractedImages),
+        extractedImages,
+        comments,
+      });
+      setIsMathModalOpen(false);
+      return;
+    }
+
+    const mathHtml = buildMathHtml(trimmed, mathDisplayMode === 'block');
+    if (editingMathElementRef.current) {
+      replaceDomNodeWithHtml(editingMathElementRef.current, mathHtml);
+      editingMathElementRef.current = null;
+    } else {
+      const wrappedHtml =
+        mathDisplayMode === 'block' ? `${mathHtml}<p><br/></p>` : `${mathHtml}&nbsp;`;
+      insertHtmlAtCursorOrEnd(wrappedHtml);
+    }
+    setIsMathModalOpen(false);
+    setIsEditingExistingMath(false);
+  };
+
+  const handleDeleteEditingMath = () => {
+    if (editingMathElementRef.current && editorRef.current?.contains(editingMathElementRef.current)) {
+      editingMathElementRef.current.remove();
+      emitVisualChanges();
+    }
+    editingMathElementRef.current = null;
+    setIsEditingExistingMath(false);
+    setIsMathModalOpen(false);
+  };
+
+  // Abrir compositor de bloque de código de programación
+  const handleOpenCodeModal = (existingEl?: HTMLElement | null) => {
+    if (existingEl) {
+      editingCodeElementRef.current = existingEl;
+      const lang = existingEl.getAttribute('data-code-lang') || 'python';
+      const title = existingEl.getAttribute('data-code-title') || '';
+      const codeNode =
+        existingEl.querySelector('[data-code-content="true"]') ||
+        existingEl.querySelector('code');
+      setCodeLanguage(lang);
+      setCodeTitle(title);
+      setCodeContentInput((codeNode?.textContent || '').replace(/\u00a0/g, ' '));
+      setIsEditingExistingCode(true);
+    } else {
+      captureCurrentEditorSelection();
+      editingCodeElementRef.current = null;
+      const selectedText = savedCursorRangeRef.current?.toString().trim() || '';
+      setCodeLanguage('python');
+      setCodeTitle('');
+      setCodeContentInput(
+        selectedText ||
+          'def ejemplo(n: int) -> int:\n  # Escribe tu código aquí\n  return n * 2'
+      );
+      setIsEditingExistingCode(false);
+    }
+    setIsCodeModalOpen(true);
+    setTimeout(() => codeTextareaRef.current?.focus(), 40);
+  };
+
+  const handleConfirmCodeBlock = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanedCode = codeContentInput.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+    if (!cleanedCode.trim()) return;
+
+    if (editorMode === 'markdown') {
+      const fence = `\n\`\`\`${codeLanguage}\n${cleanedCode}\n\`\`\`\n`;
+      const nextMd = `${markdownContent}${markdownContent.endsWith('\n') || !markdownContent ? '' : '\n'}${fence}`;
+      onChange({
+        markdownContent: nextMd,
+        richHtmlContent: convertMarkdownAndImagesToRichHtml(nextMd, extractedImages),
+        extractedImages,
+        comments,
+      });
+      setIsCodeModalOpen(false);
+      return;
+    }
+
+    const codeHtml = buildCodeBlockHtml(cleanedCode, codeLanguage, codeTitle);
+    if (editingCodeElementRef.current) {
+      replaceDomNodeWithHtml(editingCodeElementRef.current, codeHtml);
+      editingCodeElementRef.current = null;
+    } else {
+      insertHtmlAtCursorOrEnd(`${codeHtml}<p><br/></p>`);
+    }
+    setIsCodeModalOpen(false);
+    setIsEditingExistingCode(false);
+  };
+
+  const handleDeleteEditingCode = () => {
+    if (editingCodeElementRef.current && editorRef.current?.contains(editingCodeElementRef.current)) {
+      editingCodeElementRef.current.remove();
+      emitVisualChanges();
+    }
+    editingCodeElementRef.current = null;
+    setIsEditingExistingCode(false);
+    setIsCodeModalOpen(false);
+  };
+
+  // Código en línea (`código`) desde la barra de texto
+  const handleInsertInlineCode = () => {
+    if (editorMode === 'markdown') {
+      const nextMd = `${markdownContent}${markdownContent ? ' ' : ''}\`código\``;
+      onChange({
+        markdownContent: nextMd,
+        richHtmlContent: convertMarkdownAndImagesToRichHtml(nextMd, extractedImages),
+        extractedImages,
+        comments,
+      });
+      return;
+    }
+    if (!editorRef.current) return;
+    editorRef.current.focus();
+    const sel = window.getSelection();
+    const selectedText =
+      sel && !sel.isCollapsed && editorRef.current.contains(sel.anchorNode)
+        ? sel.toString()
+        : 'código';
+    const escaped = selectedText
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    insertHtmlAtCursorOrEnd(
+      `<code class="px-1.5 py-0.5 bg-slate-100 border border-slate-200/80 rounded text-[12px] font-mono text-indigo-700">${escaped}</code>&nbsp;`
+    );
+  };
+
+  // Clic dentro del lienzo visual: editar fórmulas, editar bloques de código o copiar código
+  const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+
+    const copyBtn = target.closest('[data-code-action="copy"]') as HTMLButtonElement | null;
+    if (copyBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const block = copyBtn.closest('[data-code-block="true"]');
+      const codeNode =
+        block?.querySelector('[data-code-content="true"]') || block?.querySelector('code');
+      const codeText = (codeNode?.textContent || '').replace(/\u00a0/g, ' ');
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(codeText).catch(() => {});
+      }
+      const prevLabel = copyBtn.textContent;
+      copyBtn.textContent = '¡Copiado!';
+      setTimeout(() => {
+        copyBtn.textContent = prevLabel || 'Copiar';
+      }, 1600);
+      return;
+    }
+
+    const editCodeBtn = target.closest('[data-code-action="edit"]') as HTMLElement | null;
+    if (editCodeBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const block = editCodeBtn.closest('[data-code-block="true"]') as HTMLElement | null;
+      if (block) {
+        handleOpenCodeModal(block);
+      }
+      return;
+    }
+
+    const mathEl = target.closest('[data-math-latex]') as HTMLElement | null;
+    if (mathEl) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleOpenMathModal(mathEl);
+    }
+  };
+
+  // Soportar Tab y Enter dentro de bloques de código editables en línea
+  const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const sel = window.getSelection();
+    const anchorEl =
+      sel?.anchorNode instanceof HTMLElement
+        ? sel.anchorNode
+        : sel?.anchorNode?.parentElement;
+    const insideCodeContent = anchorEl?.closest('[data-code-content="true"]');
+    if (!insideCodeContent) return;
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      document.execCommand('insertText', false, '  ');
+      emitVisualChanges();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      document.execCommand('insertText', false, '\n');
+      emitVisualChanges();
+    }
   };
 
   // Subrayar el texto seleccionado con un color fluorescente
@@ -503,6 +856,74 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
     .split(/\s+/)
     .filter(Boolean).length;
   const estimatedPages = pageCount || detectTextPageCount(markdownContent);
+  const estimatedReadMinutes = Math.max(1, Math.round(wordCount / 200));
+
+  const handleSetReadingMode = (nextReadingMode: boolean) => {
+    if (nextReadingMode && editorMode === 'visual' && editorRef.current) {
+      emitVisualChanges();
+    }
+    if (onToggleReadingMode) {
+      onToggleReadingMode(nextReadingMode);
+    } else {
+      setInternalReadingMode(nextReadingMode);
+    }
+  };
+
+  const renderedReadingHtml =
+    richHtmlContent && richHtmlContent.trim()
+      ? richHtmlContent
+      : convertMarkdownAndImagesToRichHtml(markdownContent, extractedImages);
+
+  const hasReadableContent =
+    Boolean(markdownContent.trim()) ||
+    extractedImages.length > 0 ||
+    Boolean(
+      renderedReadingHtml &&
+        convertRichHtmlToPlainText(renderedReadingHtml).trim().length > 0
+    );
+
+  const readingThemeConfig = {
+    light: {
+      canvasBg: 'bg-[#f8fafc]',
+      barBg: 'bg-white/95 border-slate-200/80 text-slate-800',
+      paperBg: 'bg-white border-slate-200/80 shadow-xs',
+      textColor: 'text-slate-900',
+      mutedText: 'text-slate-500',
+      divider: 'border-slate-200/80',
+      controlBg: 'bg-slate-100/90 border-slate-200',
+      activeControl: 'bg-white text-slate-900 shadow-2xs',
+      proseExtra: '',
+    },
+    sepia: {
+      canvasBg: 'bg-[#f3ebd8]',
+      barBg: 'bg-[#fbf6ea]/95 border-[#e3d7bd] text-[#3a2d1d]',
+      paperBg: 'bg-[#fcf8ee] border-[#e5d9bf] shadow-xs',
+      textColor: 'text-[#2b2116]',
+      mutedText: 'text-[#74634c]',
+      divider: 'border-[#e4d8be]',
+      controlBg: 'bg-[#efe4cc] border-[#dfd1b2]',
+      activeControl: 'bg-[#fcf8ee] text-[#2b2116] shadow-2xs',
+      proseExtra: '',
+    },
+    dark: {
+      canvasBg: 'bg-[#0b1120]',
+      barBg: 'bg-[#0f172a]/95 border-slate-800 text-slate-100',
+      paperBg: 'bg-[#111827] border-slate-800 shadow-xs',
+      textColor: 'text-slate-100',
+      mutedText: 'text-slate-400',
+      divider: 'border-slate-800',
+      controlBg: 'bg-slate-800/90 border-slate-700',
+      activeControl: 'bg-slate-700 text-white shadow-2xs',
+      proseExtra: 'reading-mode-prose-dark',
+    },
+  }[readingTheme];
+
+  const readingFontSizeClass = {
+    sm: 'text-[15px]',
+    base: 'text-[17px]',
+    lg: 'text-[18.5px]',
+    xl: 'text-[20.5px]',
+  }[readingFontSize];
 
   const HIGHLIGHT_SHORT_LABELS: Record<HighlightColorKey, string> = {
     yellow: 'Idea clave',
@@ -511,6 +932,232 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
     pink: 'Examen',
     orange: 'Duda',
   };
+
+  if (activeReadingMode) {
+    return (
+      <div
+        className={`flex-1 flex flex-col min-h-0 h-full overflow-hidden transition-colors duration-200 ${readingThemeConfig.canvasBg} ${readingThemeConfig.textColor}`}
+      >
+        {/* Barra superior mínima y silenciosa de Modo Lectura (sin controles de edición) */}
+        <div
+          className={`px-4 sm:px-6 py-2.5 border-b backdrop-blur-sm flex flex-wrap items-center justify-between gap-3 shrink-0 ${readingThemeConfig.barBg}`}
+        >
+          <div className="flex items-center gap-3 min-w-0 flex-wrap">
+            {documentSwitcherSlot ? (
+              documentSwitcherSlot
+            ) : (
+              <span className="text-xs font-bold truncate max-w-[260px]">
+                {documentTitle}
+              </span>
+            )}
+            <div
+              className={`flex items-center gap-2 text-xs font-mono-numbers ${readingThemeConfig.mutedText}`}
+            >
+              <span>{wordCount} palabras</span>
+              <span aria-hidden="true">·</span>
+              <span>~{estimatedReadMinutes} min de lectura</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Selector de Tema de Lectura */}
+            <div
+              className={`inline-flex items-center gap-0.5 p-0.5 rounded-lg border ${readingThemeConfig.controlBg}`}
+              role="group"
+              aria-label="Tema visual de lectura"
+            >
+              <button
+                type="button"
+                onClick={() => setReadingTheme('light')}
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                  readingTheme === 'light'
+                    ? readingThemeConfig.activeControl
+                    : `${readingThemeConfig.mutedText} hover:opacity-100`
+                }`}
+                title="Fondo claro"
+              >
+                <Sun className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setReadingTheme('sepia')}
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                  readingTheme === 'sepia'
+                    ? readingThemeConfig.activeControl
+                    : `${readingThemeConfig.mutedText} hover:opacity-100`
+                }`}
+                title="Fondo sepia cálido"
+              >
+                <Coffee className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setReadingTheme('dark')}
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                  readingTheme === 'dark'
+                    ? readingThemeConfig.activeControl
+                    : `${readingThemeConfig.mutedText} hover:opacity-100`
+                }`}
+                title="Fondo oscuro"
+              >
+                <Moon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Tamaño de Fuente */}
+            <div
+              className={`inline-flex items-center gap-0.5 p-0.5 rounded-lg border ${readingThemeConfig.controlBg}`}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  const order: Array<'sm' | 'base' | 'lg' | 'xl'> = ['sm', 'base', 'lg', 'xl'];
+                  const idx = order.indexOf(readingFontSize);
+                  if (idx > 0) setReadingFontSize(order[idx - 1]);
+                }}
+                disabled={readingFontSize === 'sm'}
+                className="px-2 py-1 text-xs font-semibold rounded-md disabled:opacity-35 cursor-pointer"
+                title="Reducir tamaño de letra"
+              >
+                A-
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const order: Array<'sm' | 'base' | 'lg' | 'xl'> = ['sm', 'base', 'lg', 'xl'];
+                  const idx = order.indexOf(readingFontSize);
+                  if (idx < order.length - 1) setReadingFontSize(order[idx + 1]);
+                }}
+                disabled={readingFontSize === 'xl'}
+                className="px-2 py-1 text-xs font-semibold rounded-md disabled:opacity-35 cursor-pointer"
+                title="Aumentar tamaño de letra"
+              >
+                A+
+              </button>
+            </div>
+
+            {/* Espaciado entre líneas */}
+            <div
+              className={`inline-flex items-center gap-0.5 p-0.5 rounded-lg border text-[11px] font-mono-numbers ${readingThemeConfig.controlBg}`}
+              title="Ajustar espaciado entre líneas"
+            >
+              {(
+                [
+                  { id: '1.75', label: '1.75×' },
+                  { id: '1.95', label: '1.95×' },
+                  { id: '2.15', label: '2.15×' },
+                ] as const
+              ).map((sp) => (
+                <button
+                  key={sp.id}
+                  type="button"
+                  onClick={() => setReadingLineHeight(sp.id)}
+                  className={`px-2 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    readingLineHeight === sp.id
+                      ? readingThemeConfig.activeControl
+                      : readingThemeConfig.mutedText
+                  }`}
+                >
+                  {sp.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Volver al editor */}
+            <button
+              type="button"
+              onClick={() => handleSetReadingMode(false)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+              title="Salir del Modo Lectura y volver a editar tus apuntes (Esc)"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Volver a editar</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Lienzo Centrado de Lectura Larga con Espaciado Amplio */}
+        <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-8 sm:py-12">
+          <div
+            className={`max-w-[74ch] w-full mx-auto rounded-2xl border px-6 sm:px-14 py-10 sm:py-14 transition-colors duration-200 ${readingThemeConfig.paperBg}`}
+          >
+            <div className="max-w-[64ch] mx-auto">
+              {/* Cabecera editorial limpia */}
+              <header className={`pb-6 mb-8 border-b space-y-2 ${readingThemeConfig.divider}`}>
+                <div
+                  className={`flex items-center gap-2 text-xs flex-wrap ${readingThemeConfig.mutedText}`}
+                >
+                  {subjectName && (
+                    <>
+                      <span className="font-semibold">{subjectName}</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  )}
+                  <span>Apuntes Libres</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono-numbers">
+                    {estimatedPages} {estimatedPages === 1 ? 'página' : 'páginas'}
+                  </span>
+                </div>
+                <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight leading-tight [text-wrap:balance]">
+                  {documentTitle}
+                </h1>
+              </header>
+
+              {hasReadableContent ? (
+                <article
+                  className={`reading-mode-prose select-text tracking-[0.005em] ${readingFontSizeClass} ${readingThemeConfig.proseExtra}`}
+                  style={{ lineHeight: readingLineHeight }}
+                  dangerouslySetInnerHTML={{ __html: renderedReadingHtml }}
+                />
+              ) : (
+                <div className="py-12 text-center space-y-4">
+                  <BookOpen
+                    className={`w-10 h-10 mx-auto opacity-35 ${readingThemeConfig.mutedText}`}
+                  />
+                  <div className="space-y-1">
+                    <p className="text-base font-bold">
+                      Estos apuntes libres aún están vacíos
+                    </p>
+                    <p className={`text-sm max-w-md mx-auto ${readingThemeConfig.mutedText}`}>
+                      Vuelve al editor para redactar tus notas o importar un documento y disfrutar de la lectura centrada.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleSetReadingMode(false)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl cursor-pointer transition-colors"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Redactar apuntes</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Pie discreto al finalizar la lectura */}
+              {hasReadableContent && (
+                <footer
+                  className={`mt-12 pt-6 border-t flex items-center justify-between gap-4 text-xs ${readingThemeConfig.divider} ${readingThemeConfig.mutedText}`}
+                >
+                  <span className="font-mono-numbers">
+                    Fin de lectura · {wordCount} palabras
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSetReadingMode(false)}
+                    className="inline-flex items-center gap-1.5 font-semibold hover:underline cursor-pointer text-blue-600 dark:text-blue-400"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Editar estos apuntes</span>
+                  </button>
+                </footer>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white border border-slate-200 rounded-2xl shadow-xs overflow-hidden flex flex-col">
@@ -624,10 +1271,60 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
             >
               <Quote className="w-3.5 h-3.5" />
             </button>
+            <button
+              type="button"
+              onClick={handleInsertInlineCode}
+              className="p-1.5 text-slate-700 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              title="Código en línea (`código`)"
+            >
+              <Code className="w-3.5 h-3.5" />
+            </button>
           </div>
 
-          {/* Grupo 2: Comentarios e Imágenes */}
-          <div className="inline-flex items-center gap-1.5">
+          {/* Grupo 2: Fórmulas Matemáticas, Código, IA Formato, Comentarios e Imágenes */}
+          <div className="inline-flex items-center gap-1.5 flex-wrap">
+            <button
+              type="button"
+              onClick={() => handleOpenMathModal(null)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-violet-50 text-violet-700 border border-slate-200/90 hover:border-violet-300 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
+              title="Escribir o insertar una fórmula matemática (LaTeX / KaTeX)"
+            >
+              <Sigma className="w-3.5 h-3.5 text-violet-600" />
+              <span>Fórmula</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleOpenCodeModal(null)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-slate-900 hover:text-emerald-300 text-slate-800 border border-slate-200/90 hover:border-slate-800 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
+              title="Insertar un bloque de código de programación (Python, JavaScript, Java, C++, SQL...)"
+            >
+              <Code2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Código</span>
+            </button>
+
+            {onImproveFormatAI && (
+              <button
+                type="button"
+                disabled={isFormattingAI}
+                onClick={onImproveFormatAI}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-2xs disabled:opacity-50 whitespace-nowrap"
+                title="Estructurar y enriquecer visualmente este documento con IA (encabezados, conceptos en negrita, listas y bloques destacados conservando el 100% de tus apuntes)"
+              >
+                {isFormattingAI ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Mejorando formato IA...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Mejorar formato IA</span>
+                  </>
+                )}
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleStartAddComment}
@@ -672,8 +1369,18 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
           </div>
         </div>
 
-        {/* Grupo 3: Conmutador Panel de Comentarios y Modo Visual/Markdown */}
+        {/* Grupo 3: Modo Lectura, Panel de Comentarios y Modo Visual/Markdown */}
         <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => handleSetReadingMode(true)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs whitespace-nowrap"
+            title="Activar Modo Lectura centrado y sin distracciones (oculta la interfaz de edición y aumenta el interlineado)"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>Modo Lectura</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setShowCommentsSidebar(!showCommentsSidebar)}
@@ -776,6 +1483,22 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
           </span>
         )}
       </div>
+
+      {formatAppliedNotice && (
+        <div className="px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-emerald-900 text-xs flex items-center justify-between gap-2 animate-in fade-in duration-150">
+          <div className="flex items-center gap-2 font-semibold">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{formatAppliedNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFormatAppliedNotice(null)}
+            className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Cajón desplegable de Galería de Imágenes Extraídas / Añadidas */}
       {showImagesDrawer && extractedImages.length > 0 && (
@@ -901,11 +1624,13 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
                 contentEditable
                 suppressContentEditableWarning
                 onInput={() => emitVisualChanges()}
+                onClick={handleEditorClick}
+                onKeyDown={handleEditorKeyDown}
                 onMouseUp={handleEditorMouseUp}
                 onPaste={handlePasteInEditor}
                 data-placeholder={
                   placeholder ||
-                  `Escribe o edita aquí todo el contenido de "${documentTitle}". Puedes modificar o borrar cualquier texto, subrayar en colores, añadir comentarios al margen o incrustar imágenes...`
+                  `Escribe o edita aquí todo el contenido de "${documentTitle}". Puedes modificar o borrar cualquier texto, subrayar en colores, insertar fórmulas matemáticas, bloques de código o imágenes...`
                 }
                 className="flex-1 w-full p-6 sm:p-8 text-sm text-slate-800 leading-relaxed focus:outline-none overflow-y-auto max-h-[620px] prose prose-slate max-w-none selection:bg-blue-200/70"
               />
@@ -951,7 +1676,7 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
                 )}
               </div>
               <span className="text-slate-400">
-                100% editable · Admite pegar capturas e imágenes (Ctrl+V)
+                Fórmulas ($...$ / $$...$$) · Código (```) · Pegar imágenes (Ctrl+V)
               </span>
             </div>
           </div>
@@ -1188,6 +1913,395 @@ export const RichEditableDocumentWorkspace: React.FC<RichEditableDocumentWorkspa
           </div>
         )}
       </div>
+
+      {/* Modal Compositor de Fórmulas Matemáticas (LaTeX + Vista Previa KaTeX) */}
+      {isMathModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setIsMathModalOpen(false)}
+        >
+          <form
+            onSubmit={handleConfirmMathFormula}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="px-5 py-3.5 bg-gradient-to-r from-violet-600 to-indigo-600 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sigma className="w-4 h-4 text-violet-100" />
+                <h4 className="text-sm font-bold">
+                  {isEditingExistingMath
+                    ? 'Editar fórmula matemática'
+                    : 'Insertar fórmula matemática (LaTeX)'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMathModalOpen(false)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/15 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Modo de visualización y selector de paleta */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="inline-flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setMathDisplayMode('block')}
+                    className={`px-3 py-1 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
+                      mathDisplayMode === 'block'
+                        ? 'bg-white text-violet-700 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Bloque centrado ($$...$$)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMathDisplayMode('inline')}
+                    className={`px-3 py-1 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
+                      mathDisplayMode === 'inline'
+                        ? 'bg-white text-violet-700 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    En línea ($...$)
+                  </button>
+                </div>
+
+                <div className="inline-flex items-center gap-1 bg-slate-50 p-1 rounded-xl border border-slate-200 text-[11px] font-semibold">
+                  {(
+                    [
+                      { id: 'basic', label: 'Operaciones' },
+                      { id: 'calculus', label: 'Cálculo y Matrices' },
+                      { id: 'symbols', label: 'Símbolos' },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setMathPaletteTab(tab.id)}
+                      className={`px-2.5 py-1 rounded-lg cursor-pointer transition-colors ${
+                        mathPaletteTab === tab.id
+                          ? 'bg-violet-600 text-white'
+                          : 'text-slate-600 hover:bg-slate-200/70'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Botones rápidos de inserción matemática */}
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap gap-1.5">
+                {mathPaletteTab === 'basic' &&
+                  [
+                    { label: 'Fracción a/b', tex: '\\frac{a}{b}' },
+                    { label: 'Potencia xⁿ', tex: 'x^{n}' },
+                    { label: 'Subíndice xᵢ', tex: 'x_{i}' },
+                    { label: 'Raíz √x', tex: '\\sqrt{x}' },
+                    { label: 'Raíz ⁿ√x', tex: '\\sqrt[n]{x}' },
+                    { label: 'Paréntesis ( )', tex: '\\left(  \\right)' },
+                    { label: 'Valor abs. |x|', tex: '|x|' },
+                    { label: 'Logaritmo', tex: '\\log_{b}(x)' },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => insertLatexSnippet(item.tex)}
+                      className="px-2.5 py-1 bg-white hover:bg-violet-50 border border-slate-200 hover:border-violet-300 rounded-lg text-[11px] font-semibold text-slate-700 cursor-pointer transition-colors"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+
+                {mathPaletteTab === 'calculus' &&
+                  [
+                    { label: 'Integral ∫', tex: '\\int_{a}^{b} f(x)\\,dx' },
+                    { label: 'Sumatorio ∑', tex: '\\sum_{i=1}^{n} a_i' },
+                    { label: 'Productorio ∏', tex: '\\prod_{i=1}^{n} x_i' },
+                    { label: 'Límite lím', tex: '\\lim_{x \\to \\infty} f(x)' },
+                    { label: 'Derivada df/dx', tex: '\\frac{df}{dx}' },
+                    { label: 'Parcial ∂f/∂x', tex: '\\frac{\\partial f}{\\partial x}' },
+                    { label: 'Vector', tex: '\\vec{v}' },
+                    {
+                      label: 'Matriz 2×2',
+                      tex: '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}',
+                    },
+                    {
+                      label: 'Sistema de ec.',
+                      tex: '\\begin{cases} x + y = 1 \\\\ x - y = 0 \\end{cases}',
+                    },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => insertLatexSnippet(item.tex)}
+                      className="px-2.5 py-1 bg-white hover:bg-violet-50 border border-slate-200 hover:border-violet-300 rounded-lg text-[11px] font-semibold text-slate-700 cursor-pointer transition-colors"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+
+                {mathPaletteTab === 'symbols' &&
+                  [
+                    { label: 'α', tex: '\\alpha' },
+                    { label: 'β', tex: '\\beta' },
+                    { label: 'γ', tex: '\\gamma' },
+                    { label: 'θ', tex: '\\theta' },
+                    { label: 'λ', tex: '\\lambda' },
+                    { label: 'μ', tex: '\\mu' },
+                    { label: 'π', tex: '\\pi' },
+                    { label: 'σ', tex: '\\sigma' },
+                    { label: 'Δ', tex: '\\Delta' },
+                    { label: 'Ω', tex: '\\Omega' },
+                    { label: '∞', tex: '\\infty' },
+                    { label: '±', tex: '\\pm' },
+                    { label: '·', tex: '\\cdot' },
+                    { label: '×', tex: '\\times' },
+                    { label: '≠', tex: '\\neq' },
+                    { label: '≤', tex: '\\leq' },
+                    { label: '≥', tex: '\\geq' },
+                    { label: '≈', tex: '\\approx' },
+                    { label: '→', tex: '\\to' },
+                    { label: '⇒', tex: '\\Rightarrow' },
+                    { label: '⇔', tex: '\\iff' },
+                    { label: '∈', tex: '\\in' },
+                    { label: '∀', tex: '\\forall' },
+                    { label: '∃', tex: '\\exists' },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      onClick={() => insertLatexSnippet(item.tex)}
+                      className="px-2.5 py-1 bg-white hover:bg-violet-50 border border-slate-200 hover:border-violet-300 rounded-lg text-xs font-bold text-slate-800 cursor-pointer transition-colors"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+              </div>
+
+              {/* Entrada de LaTeX */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">
+                  Expresión LaTeX
+                </label>
+                <textarea
+                  ref={mathTextareaRef}
+                  required
+                  rows={3}
+                  value={mathLatexInput}
+                  onChange={(e) => setMathLatexInput(e.target.value)}
+                  placeholder="Ej: E = mc^2  o  \int_0^1 x^2\,dx = \frac{1}{3}"
+                  className="w-full p-3 rounded-xl border border-slate-300 bg-slate-50 font-mono text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
+                />
+              </div>
+
+              {/* Vista previa en tiempo real con KaTeX */}
+              <div className="space-y-1.5">
+                <span className="text-xs font-bold text-slate-700">
+                  Vista previa en vivo
+                </span>
+                <div
+                  className="min-h-[72px] p-4 rounded-xl border border-violet-200 bg-violet-50/40 flex items-center justify-center overflow-x-auto text-slate-900"
+                  dangerouslySetInnerHTML={{
+                    __html: renderLatexToKatexHtml(
+                      mathLatexInput.trim() || 'f(x)',
+                      mathDisplayMode === 'block'
+                    ),
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                {isEditingExistingMath && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteEditingMath}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-xl border border-rose-200 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar fórmula</span>
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsMathModalOpen(false)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>
+                    {isEditingExistingMath ? 'Actualizar fórmula' : 'Insertar fórmula'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Modal Compositor de Bloques de Código de Programación */}
+      {isCodeModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setIsCodeModalOpen(false)}
+        >
+          <form
+            onSubmit={handleConfirmCodeBlock}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Code2 className="w-4 h-4 text-emerald-400" />
+                <h4 className="text-sm font-bold">
+                  {isEditingExistingCode
+                    ? 'Editar bloque de código'
+                    : 'Insertar bloque de código de programación'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCodeModalOpen(false)}
+                className="p-1 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700">
+                    Lenguaje de programación
+                  </label>
+                  <select
+                    value={codeLanguage}
+                    onChange={(e) => setCodeLanguage(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  >
+                    {SUPPORTED_CODE_LANGUAGES.map((lang) => (
+                      <option key={lang.id} value={lang.id}>
+                        {lang.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700">
+                    Archivo o título (opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={codeTitle}
+                    onChange={(e) => setCodeTitle(e.target.value)}
+                    placeholder="Ej: quicksort.py, consulta_clientes.sql..."
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700">
+                    Código fuente
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">
+                      Pulsa Tab para sangría (2 espacios)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (navigator.clipboard?.writeText) {
+                          navigator.clipboard.writeText(codeContentInput).catch(() => {});
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 rounded-md cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>Copiar</span>
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  ref={codeTextareaRef}
+                  required
+                  rows={11}
+                  spellCheck={false}
+                  value={codeContentInput}
+                  onChange={(e) => setCodeContentInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Tab') {
+                      e.preventDefault();
+                      const el = e.currentTarget;
+                      const start = el.selectionStart;
+                      const end = el.selectionEnd;
+                      const updated =
+                        codeContentInput.slice(0, start) +
+                        '  ' +
+                        codeContentInput.slice(end);
+                      setCodeContentInput(updated);
+                      setTimeout(() => {
+                        el.setSelectionRange(start + 2, start + 2);
+                      }, 0);
+                    }
+                  }}
+                  placeholder="// Escribe o pega aquí tu código..."
+                  className="w-full p-3.5 rounded-xl border border-slate-800 bg-slate-950 font-mono text-xs text-emerald-300 leading-relaxed focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-y"
+                />
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                {isEditingExistingCode && (
+                  <button
+                    type="button"
+                    onClick={handleDeleteEditingCode}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-xl border border-rose-200 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Eliminar bloque</span>
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCodeModalOpen(false)}
+                  className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-emerald-300 text-xs font-bold rounded-xl shadow-xs cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>
+                    {isEditingExistingCode ? 'Actualizar código' : 'Insertar código'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

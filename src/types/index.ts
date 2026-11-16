@@ -2,8 +2,8 @@
  * Modelos de datos para StudyFlow
  */
 
-export type ExamType = 'oral' | 'test' | 'desarrollo' | 'preguntas_cortas' | 'calculo' | 'practico' | 'mixto';
-export type DifficultyLevel = 'Baja' | 'Media' | 'Alta';
+export type ExamType = 'oral' | 'test' | 'verdadero_falso' | 'desarrollo' | 'preguntas_cortas' | 'calculo' | 'practico' | 'mixto';
+export type DifficultyLevel = 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado';
 export type TaskPriority = 'urgente' | 'alta' | 'media' | 'baja';
 export type TaskType = 'entrega' | 'lectura' | 'practica' | 'proyecto' | 'repaso';
 export type TopicStatus = 'pendiente' | 'en_progreso' | 'estudiado' | 'repasado';
@@ -48,6 +48,8 @@ export interface EditableKeyPoint {
   title: string;
   detail: string;
   category?: string;
+  semanticLevel?: string;
+  parentConcept?: string;
   importance?: 'alta' | 'media' | 'baja';
   sourceDocName?: string;
 }
@@ -110,13 +112,16 @@ export interface Topic {
   scheduledTime?: string; // Hora de inicio (HH:mm) asignada o arrastrada manualmente para estudiar el tema
   scheduledEndTime?: string; // Hora de fin (HH:mm) asignada para estudiar el tema
   studyTimeByDate?: Record<string, string>; // Mapa fecha YYYY-MM-DD -> hora HH:mm para cambiar la hora de inicio de sesiones de estudio
-  extraStudySessionsByDate?: Record<string, { startTime: string; pagesCount?: number }>; // Sesiones extra añadidas por el usuario para rellenar huecos libres en un día concreto
+  extraStudySessionsByDate?: Record<string, { startTime: string; pagesCount?: number; replacePreviousPlan?: boolean }>; // Sesiones extra añadidas por el usuario para rellenar huecos libres en un día concreto
   manualScheduledDate?: boolean; // Si fue ubicado manualmente arrastrando en el calendario
   vueltasCount?: number; // Veces que se ha estudiado o repasado este tema (vueltas al temario)
   notes?: string; // Apuntes detallados redactados o importados para este tema
   cues?: string[]; // Preguntas detonadoras / Active Recall asociadas al tema
   summary?: string; // Resumen ejecutivo del tema
   keyPoints?: EditableKeyPoint[]; // Puntos clave editables generados con IA desde los documentos del tema
+  customQuestions?: QuizQuestion[]; // Preguntas propias creadas por el usuario (test o verdadero_falso) para este tema
+  mindMap?: string; // Estructura de mapa mental en formato Mermaid.js generada por IA a partir de los apuntes del tema
+  mindMapSummary?: string; // Resumen explicativo del mapa mental Mermaid generado por IA
   lastNotesUpdatedAt?: string; // Fecha de última actualización de los apuntes
   enabledResources?: {
     flashcards?: boolean;
@@ -125,6 +130,66 @@ export interface Topic {
     diagram?: boolean;
     feynman?: boolean;
   }; // Decidir qué apartados y recursos de la app activar para este tema
+  // Prioridad de agendado al calendario (Automática según % nota final de exámenes/proyectos/tareas o Manual)
+  schedulingPriority?: SchedulingPriorityLevel;
+  manualPriorityOrder?: number; // Posición manual en la cola de prioridad del temario (1 = más prioritario)
+  customGradeWeightImpact?: number; // % de la nota final asignado manualmente a este tema (0 - 100)
+  // Historial de sesiones hechas parcialmente y reajustes intradía
+  partialCompletionHistory?: PartialSessionCompletionRecord[];
+  intradayRelocatedFromTime?: string; // Hora original (ej: "08:00") desde la que se reajustó en el día
+}
+
+export interface PartialSessionCompletionRecord {
+  id: string;
+  date: string; // YYYY-MM-DD
+  time: string; // HH:mm en que se registró el avance parcial
+  originalSlotTime?: string; // ej: "08:00 - 10:00"
+  hoursCompleted: number;
+  hoursRemaining: number;
+  pagesCompleted: number;
+  pagesRemaining: number;
+  relocatedToDate: string; // YYYY-MM-DD del hueco libre encontrado
+  relocatedToStartTime: string; // HH:mm de inicio en el nuevo hueco
+  relocatedToEndTime: string; // HH:mm de fin en el nuevo hueco
+}
+
+export type SchedulingPriorityLevel = 'auto' | 'critica' | 'alta' | 'media' | 'baja';
+
+export interface TopicSchedulingPriorityInfo {
+  topicId: string;
+  subjectId: string;
+  mode: 'manual' | 'auto';
+  effectiveLevel: 'critica' | 'alta' | 'media' | 'baja';
+  configuredPriority: SchedulingPriorityLevel;
+  manualPriorityOrder?: number;
+  effectiveScore: number; // Puntuación numérica para ordenar (mayor = se agenda antes)
+  totalGradeWeightPct: number; // % total de la nota final en juego asociado a este tema
+  examWeightPct: number; // % de nota final por exámenes que evalúan este tema
+  projectWeightPct: number; // % de nota final por proyectos vinculados
+  taskWeightPct: number; // % de nota final por tareas evaluables vinculadas
+  nearestDeadlineDate?: string;
+  daysUntilDeadline?: number;
+  summaryLabel: string;
+  reasons: string[];
+  smartGoalAligned?: boolean;
+  alignedSmartGoalTitle?: string;
+}
+
+export interface SubjectSchedulingPriorityInfo {
+  subjectId: string;
+  subjectName: string;
+  mode: 'manual' | 'auto';
+  effectiveLevel: 'critica' | 'alta' | 'media' | 'baja';
+  configuredPriority: SchedulingPriorityLevel;
+  manualPriorityRank?: number;
+  effectiveScore: number;
+  totalActiveGradeWeightPct: number;
+  examWeightPct: number;
+  projectWeightPct: number;
+  taskWeightPct: number;
+  nearestDeadlineDate?: string;
+  daysUntilDeadline?: number;
+  summaryLabel: string;
 }
 
 export interface Task {
@@ -150,6 +215,9 @@ export interface Task {
   maxScore?: number; // Puntuación máxima de referencia (ej: 10)
   weightPercentage?: number; // Ponderación en la nota final o continua (ej: 15%)
   isGraded?: boolean; // Indica si la tarea es evaluable o puntúa
+  manualPriorityOrder?: number; // Posición manual en la cola de prioridad académica de la asignatura (1 = más prioritario)
+  smartGoalId?: string; // ID del Objetivo SMART asociado (si se creó desde un objetivo SMART)
+  smartGoalTitle?: string; // Título del Objetivo SMART asociado
 }
 
 export interface Exam {
@@ -191,6 +259,9 @@ export interface Flashcard {
   answer: string;
   concept?: string; // Concepto clave estructurado extraído de apuntes/documentos
   definition?: string; // Definición asociada al concepto
+  practicalExample?: string; // Ejemplo práctico ilustrativo generado por IA
+  realWorldScenario?: string; // Situación de uso real en contexto profesional o cotidiano
+  sourceCornellNoteId?: string; // ID de la nota Cornell de origen
   sourceDocName?: string; // Nombre del documento importado de origen
   hint?: string;
   conceptTag: string;
@@ -199,12 +270,16 @@ export interface Flashcard {
   easeFactor: number;
   nextReview: string;
   lastScore?: ReviewQuality;
+  isCustom?: boolean; // Creada manualmente por el usuario
 }
 
 export interface QuizQuestion {
   id: string;
+  topicId?: string;
+  questionType?: 'test' | 'verdadero_falso';
+  isCustom?: boolean;
   prompt: string;
-  options?: string[]; // Para examen tipo test
+  options?: string[]; // Para examen tipo test (4 opciones) o verdadero_falso (['Verdadero', 'Falso'])
   correctOptionIndex?: number;
   explanation: string;
   optionExplanations?: string[]; // Explicaciones pedagógicas detalladas de cada opción para tests
@@ -328,6 +403,33 @@ export interface SubjectGradingConfig {
   components: GradingComponent[];
 }
 
+export interface SmartGoalMilestone {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+export interface SubjectSmartGoal {
+  id: string;
+  subjectId: string;
+  subjectName: string;
+  title: string;
+  priority: 'alta' | 'media' | 'baja';
+  timeframe: 'semanal' | 'mensual' | 'examenes' | 'personalizado';
+  specific: string; // S - Específico
+  measurable: string; // M - Medible
+  achievable: string; // A - Alcanzable
+  relevant: string; // R - Relevante
+  timeBound: string; // T - Temporal (plazo descriptivo)
+  targetDate: string; // YYYY-MM-DD fecha límite
+  metricLabel?: string; // ej: "Temas", "Horas", "Ejercicios"
+  targetValue?: number; // Valor numérico objetivo (opcional)
+  currentValue?: number; // Valor numérico actual (opcional)
+  milestones: SmartGoalMilestone[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Subject {
   id: string;
   name: string;
@@ -350,7 +452,10 @@ export interface Subject {
   tasks: Task[];
   exams: Exam[];
   projects?: Project[]; // Proyectos y fases vinculadas
+  smartGoals?: SubjectSmartGoal[]; // Objetivos SMART (Específicos, Medibles, Alcanzables, Relevantes, Temporales)
   gradingConfig?: SubjectGradingConfig; // Configuración de ponderación y cálculo de nota final
+  schedulingPriority?: SchedulingPriorityLevel; // Prioridad de la asignatura al agendar temas al calendario ('auto' por % nota o manual)
+  manualPriorityRank?: number; // Orden manual entre asignaturas (1 = primera asignatura en agendarse)
   cornellNotes: CornellNote[];
   flashcards: Flashcard[];
   quizzes: Quiz[];
@@ -396,6 +501,7 @@ export interface WeeklyObligation {
   notes?: string;
   isAutomatedWeekly?: boolean; // Automatizar todas las semanas
   recurringDays?: number[]; // Días en los que se repite la obligación fija semanal
+  excludedDates?: string[]; // Fechas concretas (YYYY-MM-DD) omitidas por imprevistos sin eliminar la automatización
 }
 
 export type BlockedCategory =
@@ -419,6 +525,7 @@ export interface BlockedTimeEvent {
   category: BlockedCategory | string;
   notes?: string;
   recurringDays?: number[]; // [1, 2, 3, 4, 5] para bloqueos que se repiten ciertos días de la semana
+  excludedDates?: string[]; // Fechas concretas (YYYY-MM-DD) omitidas por imprevistos sin eliminar la automatización
   linkedItemType?: 'topic' | 'task' | 'review';
   linkedTopicId?: string;
   linkedTaskId?: string;
@@ -494,6 +601,8 @@ export interface ContextualNotificationRule {
   enabled: boolean;
 }
 
+export type InterfaceDesignMode = 'complete' | 'intermediate' | 'minimal';
+
 export interface StudyPreferences {
   availableDays: number[]; // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
   hoursPerDay: Record<number, number>; // Horas disponibles calculadas o manuales por día de la semana
@@ -511,6 +620,7 @@ export interface StudyPreferences {
   weeklyFixedObligations?: WeeklyObligation[]; // Horario semanal de compromisos fijos (clase, trabajo, gimnasio...)
   enabledTabs?: string[]; // Pestañas activas/visibles configuradas por el usuario
   navigationPosition?: 'top' | 'sidebar'; // Posición del menú: superior o lateral a decisión del usuario
+  interfaceDesignMode?: InterfaceDesignMode; // Modelo de diseño de toda la interfaz: 'complete' (Completo/Actual), 'intermediate' (Intermedio), 'minimal' (Minimalista/Esencial)
   pomodoroConfig: {
     focusMinutes: number;
     shortBreakMinutes: number;
@@ -542,9 +652,13 @@ export interface StudyPreferences {
   timeBlockMode?: boolean; // Activar vista en bloque horario
   studyDayStartHour?: number; // hora de inicio del día (ej: 8 para 08:00)
   studyDayEndHour?: number; // hora de fin del día (ej: 22 para 22:00)
+  // Reajuste dinámico intradía si pasan las horas del día y no se ha completado una sesión
+  autoIntradayReschedule?: boolean; // Reajustar automáticamente el plan del día, semana y mes según la hora actual
+  intradaySimulatedTime?: string; // Hora de referencia opcional (HH:mm, ej: "12:00") para simular o fijar el reajuste intradía
   // Control de Hábitos y Mood Tracker
   habits?: HabitItem[];
   moodEntries?: MoodEntry[];
+  hasSeenOnboarding?: boolean;
 }
 
 export type HabitCategory =
@@ -574,13 +688,26 @@ export interface HabitItem {
   createdAt: string;
 }
 
-export type MoodType = 'excelente' | 'motivado' | 'equilibrado' | 'cansado' | 'estresado';
+export type MoodType =
+  | 'excelente'
+  | 'en_flujo'
+  | 'motivado'
+  | 'inspirado'
+  | 'tranquilo'
+  | 'equilibrado'
+  | 'distraido'
+  | 'cansado'
+  | 'ansioso'
+  | 'frustrado'
+  | 'desanimado'
+  | 'estresado';
 
 export interface MoodEntry {
   id: string;
   date: string; // YYYY-MM-DD
   mood: MoodType;
   energyLevel: number; // 1..5
+  emotionTags?: string[]; // Matices emocionales secundarios opcionales
   note?: string;
   updatedAt: string;
 }
@@ -655,6 +782,16 @@ export interface ScheduledStudySession {
   pagesAllocation?: string; // e.g. "Páginas 1-18"
   type: 'estudio_nuevo' | 'repaso_espaciado' | 'simulacro_examen';
   completed: boolean;
+  // Metadatos de reajuste intradía y sesión hecha parcialmente
+  isIntradayRescheduled?: boolean; // Si fue reajustada porque su hora original ya pasó hoy
+  originalStartTime?: string; // Hora de inicio original antes del reajuste intradía (ej: "08:00")
+  originalEndTime?: string; // Hora de fin original antes del reajuste intradía (ej: "10:00")
+  isPartialRemainder?: boolean; // Si esta sesión es la parte restante de una sesión marcada como hecha parcialmente
+  partialHoursCompleted?: number; // Horas ya realizadas previamente en el avance parcial
+  partialPagesCompleted?: number; // Páginas ya leídas previamente en el avance parcial
+  // Alineación con Objetivos SMART activos
+  smartGoalAligned?: boolean;
+  alignedSmartGoalTitle?: string;
 }
 
 

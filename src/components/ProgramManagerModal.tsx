@@ -167,12 +167,28 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
     }
   });
 
+  useEffect(() => {
+    const syncSmartGoals = () => {
+      try {
+        const savedGoals = localStorage.getItem('studyflow_smart_goals_v1');
+        if (savedGoals) setSmartGoalsData(JSON.parse(savedGoals));
+        const savedMilestones = localStorage.getItem('studyflow_smart_milestones_v1');
+        if (savedMilestones) setCompletedMilestones(JSON.parse(savedMilestones));
+      } catch {
+        // ignore parse errors
+      }
+    };
+    window.addEventListener('studyflow-smart-goals-updated', syncSmartGoals);
+    return () => window.removeEventListener('studyflow-smart-goals-updated', syncSmartGoals);
+  }, []);
+
   const handleToggleMilestone = (goalId: string, milestoneIdx: number) => {
     const key = `${goalId}__${milestoneIdx}`;
     setCompletedMilestones((prev) => {
       const next = { ...prev, [key]: !prev[key] };
       try {
         localStorage.setItem('studyflow_smart_milestones_v1', JSON.stringify(next));
+        window.dispatchEvent(new CustomEvent('studyflow-smart-goals-updated'));
       } catch {
         // ignore quota errors
       }
@@ -394,6 +410,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
       setSmartGoalsData(enriched);
       try {
         localStorage.setItem('studyflow_smart_goals_v1', JSON.stringify(enriched));
+        window.dispatchEvent(new CustomEvent('studyflow-smart-goals-updated'));
       } catch {
         // ignore storage errors
       }

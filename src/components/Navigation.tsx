@@ -32,7 +32,9 @@ import studyflowLogo from '../assets/images/studyflow_logo_1793994920234.jpg';
 import { StreakModal } from './StreakModal';
 import { AppHelpGuideModal } from './AppHelpGuideModal';
 import { MoodTracker } from './MoodTracker';
-import { StudyPreferences } from '../types';
+import { StudyAchievementsPanel } from './StudyAchievementsPanel';
+import { StudyPreferences, Subject, PomodoroLog, InterfaceDesignMode } from '../types';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export type NavTabId =
   | 'curso'
@@ -63,6 +65,8 @@ interface NavigationProps {
   onStartOnboardingTour?: () => void;
   preferences?: StudyPreferences;
   onUpdatePreferences?: (updated: StudyPreferences) => void;
+  subjects?: Subject[];
+  pomodoroLogs?: PomodoroLog[];
 }
 
 export const Navigation: React.FC<NavigationProps> = ({
@@ -85,6 +89,8 @@ export const Navigation: React.FC<NavigationProps> = ({
   onStartOnboardingTour,
   preferences,
   onUpdatePreferences,
+  subjects = [],
+  pomodoroLogs = [],
 }) => {
   const [notifGranted, setNotifGranted] = useState(
     () => notificationService.getPermission() === 'granted'
@@ -94,21 +100,67 @@ export const Navigation: React.FC<NavigationProps> = ({
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
 
+  React.useEffect(() => {
+    const handleOpenHelp = () => setShowHelpModal(true);
+    window.addEventListener('studyflow:open-help-guide', handleOpenHelp);
+    return () => window.removeEventListener('studyflow:open-help-guide', handleOpenHelp);
+  }, []);
+
+  const designMode: InterfaceDesignMode = preferences?.interfaceDesignMode || 'complete';
+
+  const handleSelectDesignMode = (nextMode: InterfaceDesignMode) => {
+    if (!preferences || !onUpdatePreferences) {
+      onOpenPreferences();
+      return;
+    }
+    const recommendedTabsByMode: Record<InterfaceDesignMode, string[]> = {
+      complete: ['curso', 'asignaturas', 'calendario', 'cuestionarios', 'pomodoro', 'estadisticas'],
+      intermediate: ['curso', 'asignaturas', 'calendario', 'cuestionarios', 'pomodoro'],
+      minimal: ['curso', 'asignaturas', 'calendario', 'pomodoro'],
+    };
+    onUpdatePreferences({
+      ...preferences,
+      interfaceDesignMode: nextMode,
+      enabledTabs: recommendedTabsByMode[nextMode],
+    });
+  };
+
   const ALL_NAV_TABS: {
     id: NavTabId;
     label: string;
     mobileLabel: string;
     icon: React.ElementType;
   }[] = [
-    { id: 'curso', label: 'General', mobileLabel: 'General', icon: LayoutDashboard },
-    { id: 'asignaturas', label: 'Materias', mobileLabel: 'Materias', icon: BookOpen },
-    { id: 'calendario', label: 'Plan y Repasos', mobileLabel: 'Plan y Repasos', icon: Calendar },
-    { id: 'cuestionarios', label: 'Cuestionarios', mobileLabel: 'Cuestionarios', icon: Sparkles },
+    {
+      id: 'curso',
+      label: designMode === 'minimal' ? 'Inicio' : 'General',
+      mobileLabel: designMode === 'minimal' ? 'Inicio' : 'General',
+      icon: LayoutDashboard,
+    },
+    {
+      id: 'asignaturas',
+      label: 'Materias',
+      mobileLabel: 'Materias',
+      icon: BookOpen,
+    },
+    {
+      id: 'calendario',
+      label: designMode === 'minimal' ? 'Calendario' : 'Plan y Repasos',
+      mobileLabel: designMode === 'minimal' ? 'Calendario' : 'Plan',
+      icon: Calendar,
+    },
+    {
+      id: 'cuestionarios',
+      label: designMode === 'minimal' ? 'Flashcards' : 'Cuestionarios',
+      mobileLabel: designMode === 'minimal' ? 'Flashcards' : 'Tests',
+      icon: Sparkles,
+    },
     { id: 'pomodoro', label: 'Pomodoro', mobileLabel: 'Pomodoro', icon: Timer },
     { id: 'estadisticas', label: 'Estadísticas', mobileLabel: 'Estadísticas', icon: BarChart3 },
   ];
 
   const visibleTabs = ALL_NAV_TABS.filter((t) => {
+    if (designMode === 'minimal' && t.id === 'estadisticas') return false;
     if (!enabledTabs || enabledTabs.length === 0) return true;
     if (t.id === 'calendario' && (enabledTabs.includes('calendario') || enabledTabs.includes('repaso'))) {
       return true;
@@ -116,10 +168,10 @@ export const Navigation: React.FC<NavigationProps> = ({
     return enabledTabs.includes(t.id);
   });
 
-  // Reusable Sidebar Content (Used for Desktop Left Sidebar and Mobile Slide-out Drawer)
+  // Reusable Sidebar Content (Fits cleanly without needing to scroll/slide)
   const renderSidebarInner = (onClose?: () => void) => (
-    <div className="flex flex-col justify-between h-full w-full space-y-4 select-none">
-      <div className="flex-1 min-h-0 space-y-4 overflow-y-auto no-scrollbar">
+    <div className="flex flex-col justify-between h-full w-full space-y-2.5 select-none">
+      <div className="space-y-2.5">
         {/* Brand + Switch to Top Bar / Close Drawer */}
         <div className="flex items-center justify-between px-1">
           <button
@@ -128,14 +180,14 @@ export const Navigation: React.FC<NavigationProps> = ({
               onSelectTab('curso');
               onClose?.();
             }}
-            className="flex items-center gap-2.5 text-left group cursor-pointer focus:outline-none"
+            className="flex items-center gap-2 text-left group cursor-pointer focus:outline-none"
           >
             <img
               src={studyflowLogo}
               alt="StudyFlow Logo"
-              className="w-8 h-8 rounded-xl object-contain shadow-2xs group-hover:scale-105 transition-transform"
+              className="w-7 h-7 rounded-xl object-contain shadow-2xs group-hover:scale-105 transition-transform"
             />
-            <span className="text-xl font-bold tracking-tight text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+            <span className="text-lg font-bold tracking-tight text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
               StudyFlow
             </span>
           </button>
@@ -170,7 +222,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         </div>
 
         {/* Active Program & Course Card */}
-        <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80 space-y-2">
+        <div className="p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80 space-y-1.5">
           <button
             type="button"
             onClick={() => {
@@ -183,7 +235,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 block">
               Estudio Activo
             </span>
-            <span className="text-xs font-bold text-slate-900 dark:text-white truncate block mt-0.5 group-hover:text-blue-600">
+            <span className="text-xs font-bold text-slate-900 dark:text-white truncate block group-hover:text-blue-600">
               {programName}
             </span>
             <span className="text-[11px] text-slate-500 dark:text-slate-400 block truncate">
@@ -205,7 +257,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         </div>
 
         {/* Vertical Navigation Links */}
-        <nav className="space-y-1">
+        <nav className="space-y-0.5">
           <div className="px-2 pb-1 flex items-center justify-between">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
               Menú Principal
@@ -236,7 +288,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                   onSelectTab(tab.id);
                   onClose?.();
                 }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
                   isActive
                     ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 shadow-2xs'
                     : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-white'
@@ -255,13 +307,70 @@ export const Navigation: React.FC<NavigationProps> = ({
       </div>
 
       {/* Bottom Controls: Mood Tracker, Streak, Quick Tools & User Account */}
-      <div className="space-y-3 pt-3 border-t border-slate-200 dark:border-slate-800">
-        {/* Collapsible Mood Tracker in Sidebar */}
-        <MoodTracker
-          variant="nav-sidebar"
-          preferences={preferences}
-          onUpdatePreferences={onUpdatePreferences}
-        />
+      <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+        {/* Quick Interface Design Mode Switcher in Sidebar */}
+        <div className="bg-slate-50 dark:bg-slate-800/80 p-2 rounded-xl border border-slate-200/80 dark:border-slate-700 space-y-1.5">
+          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 px-1">
+            <span>Diseño de Interfaz</span>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenPreferences();
+                onClose?.();
+              }}
+              className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+            >
+              Ajustes
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            {([
+              { id: 'complete', label: 'Completo' },
+              { id: 'intermediate', label: 'Intermedio' },
+              { id: 'minimal', label: 'Minimal' },
+            ] as const).map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => handleSelectDesignMode(m.id)}
+                className={`py-1 px-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                  designMode === m.id
+                    ? 'bg-blue-600 text-white shadow-2xs'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-700'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Collapsible Mood Tracker in Sidebar (hidden in minimal mode) */}
+        {designMode !== 'minimal' && (
+          <MoodTracker
+            variant="nav-sidebar"
+            preferences={preferences}
+            onUpdatePreferences={onUpdatePreferences}
+          />
+        )}
+
+        {/* Collapsible Achievements / Badges in Sidebar (shown in complete mode) */}
+        {preferences && designMode === 'complete' && (
+          <StudyAchievementsPanel
+            variant="nav-sidebar"
+            subjects={subjects}
+            pomodoroLogs={pomodoroLogs}
+            preferences={preferences}
+            onOpenActiveRecall={() => {
+              onSelectTab('cuestionarios');
+              onClose?.();
+            }}
+            onOpenPomodoro={() => {
+              onSelectTab('pomodoro');
+              onClose?.();
+            }}
+          />
+        )}
 
         {/* Streak & Cloud Sync */}
         <div className="flex items-center justify-between px-1">
@@ -342,13 +451,16 @@ export const Navigation: React.FC<NavigationProps> = ({
               setShowHelpModal(true);
               onClose?.();
             }}
-            className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-200/60 dark:hover:bg-slate-700 rounded-lg transition-colors cursor-pointer"
-            title="Guía y Ayuda de StudyFlow"
+            className="px-2.5 py-1.5 text-blue-700 dark:text-blue-300 bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100 dark:hover:bg-blue-900/60 border border-blue-200/80 dark:border-blue-800 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1 text-xs font-bold"
+            title="Abrir Tutorial, Guía de Ayuda y Tutorial Interactivo"
             aria-label="Ayuda"
           >
-            <HelpCircle className="w-4 h-4" />
+            <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>Ayuda</span>
           </button>
         </div>
+
+        <PWAInstallButton variant="sidebar" />
 
         {/* User Account / Auth Button */}
         {user ? (
@@ -451,11 +563,25 @@ export const Navigation: React.FC<NavigationProps> = ({
 
             <div className="flex items-center gap-1.5 shrink-0">
               {/* Collapsible Mood Tracker Dropdown in Mobile Sidebar Header */}
-              <MoodTracker
-                variant="nav-top"
-                preferences={preferences}
-                onUpdatePreferences={onUpdatePreferences}
-              />
+              {designMode !== 'minimal' && (
+                <MoodTracker
+                  variant="nav-top"
+                  preferences={preferences}
+                  onUpdatePreferences={onUpdatePreferences}
+                />
+              )}
+
+              {/* Collapsible Achievements Dropdown in Mobile Sidebar Header */}
+              {preferences && designMode === 'complete' && (
+                <StudyAchievementsPanel
+                  variant="nav-top"
+                  subjects={subjects}
+                  pomodoroLogs={pomodoroLogs}
+                  preferences={preferences}
+                  onOpenActiveRecall={() => onSelectTab('cuestionarios')}
+                  onOpenPomodoro={() => onSelectTab('pomodoro')}
+                />
+              )}
 
               {/* Streak Counter Button */}
               <button
@@ -497,8 +623,8 @@ export const Navigation: React.FC<NavigationProps> = ({
             </div>
           </div>
 
-          {/* Mobile Direct Tabs Bar (Exact same labels, icons and style as desktop) */}
-          <div className="flex overflow-x-auto pt-2 gap-1.5 text-xs font-medium no-scrollbar">
+          {/* Mobile Direct Tabs Bar (Wraps cleanly without horizontal sliding) */}
+          <div className="flex flex-wrap pt-2 gap-1 text-xs font-medium">
             {visibleTabs.map((tab) => {
               const Icon = tab.icon;
               const isActive =
@@ -508,7 +634,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => onSelectTab(tab.id)}
-                  className={`whitespace-nowrap py-1 px-2.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer shrink-0 ${
+                  className={`py-1 px-2.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer ${
                     isActive
                       ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 shadow-2xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -610,12 +736,28 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <span>Estudios</span>
               </button>
 
+              <PWAInstallButton variant="compact" />
+
               {/* Collapsible Mood Tracker Dropdown in Top Navigation Bar */}
-              <MoodTracker
-                variant="nav-top"
-                preferences={preferences}
-                onUpdatePreferences={onUpdatePreferences}
-              />
+              {designMode !== 'minimal' && (
+                <MoodTracker
+                  variant="nav-top"
+                  preferences={preferences}
+                  onUpdatePreferences={onUpdatePreferences}
+                />
+              )}
+
+              {/* Collapsible Achievements / Badges Dropdown in Top Navigation Bar */}
+              {preferences && designMode === 'complete' && (
+                <StudyAchievementsPanel
+                  variant="nav-top"
+                  subjects={subjects}
+                  pomodoroLogs={pomodoroLogs}
+                  preferences={preferences}
+                  onOpenActiveRecall={() => onSelectTab('cuestionarios')}
+                  onOpenPomodoro={() => onSelectTab('pomodoro')}
+                />
+              )}
 
               {/* Streak Counter */}
               <button
@@ -687,12 +829,12 @@ export const Navigation: React.FC<NavigationProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowHelpModal(true)}
-                  className="p-1.5 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-blue-50/70 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1"
-                  title="Guía y Ayuda de StudyFlow"
+                  className="px-2.5 py-1.5 text-blue-700 dark:text-blue-300 bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100 dark:hover:bg-blue-900/60 border border-blue-200/80 dark:border-blue-800 rounded-xl transition-colors cursor-pointer inline-flex items-center gap-1 text-xs font-bold shrink-0"
+                  title="Abrir Tutorial y Tutorial Interactivo de StudyFlow"
                   aria-label="Guía y Ayuda"
                 >
-                  <HelpCircle className="w-4 h-4" />
-                  <span className="hidden xl:inline text-xs font-semibold">Ayuda</span>
+                  <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden sm:inline">Ayuda</span>
                 </button>
               </div>
 
@@ -755,9 +897,9 @@ export const Navigation: React.FC<NavigationProps> = ({
             </div>
           </div>
 
-          {/* Row 2: Horizontal Navigation Tabs Bar (Visible across all screen sizes in Top Mode) */}
-          <div className="flex items-center justify-between gap-2 overflow-x-auto py-1.5 border-t border-slate-100 dark:border-slate-800/80 text-xs font-medium no-scrollbar">
-            <nav className="flex items-center gap-1.5 sm:gap-2">
+          {/* Row 2: Horizontal Navigation Tabs Bar (All tabs visible without horizontal sliding) */}
+          <div className="flex flex-wrap items-center justify-between gap-1.5 py-1.5 border-t border-slate-100 dark:border-slate-800/80 text-xs font-medium">
+            <nav className="flex flex-wrap items-center gap-1 sm:gap-1.5">
               {visibleTabs.map((tab) => {
                 const Icon = tab.icon;
                 const isActive =
@@ -767,13 +909,13 @@ export const Navigation: React.FC<NavigationProps> = ({
                     key={tab.id}
                     type="button"
                     onClick={() => onSelectTab(tab.id)}
-                    className={`whitespace-nowrap py-1.5 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer shrink-0 ${
+                    className={`py-1.5 px-2.5 rounded-xl flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer ${
                       isActive
                         ? 'bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80 shadow-2xs font-bold'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/60 dark:hover:bg-slate-800/60'
                     }`}
                   >
-                    <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`} />
+                    <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'}`} />
                     <span>{tab.label}</span>
                   </button>
                 );
@@ -781,23 +923,36 @@ export const Navigation: React.FC<NavigationProps> = ({
               <button
                 type="button"
                 onClick={onOpenPreferences}
-                className="whitespace-nowrap py-1.5 px-2.5 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100/60 dark:hover:bg-slate-800/60 flex items-center gap-1 text-xs font-medium cursor-pointer shrink-0"
-                title="Personalizar, activar o quitar pestañas"
+                className="py-1.5 px-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100/60 dark:hover:bg-slate-800/60 flex items-center gap-1 text-xs font-medium cursor-pointer"
+                title="Personalizar diseño de interfaz y pestañas en Ajustes"
               >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                <span>Pestañas</span>
+                <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+                <span>{designMode === 'minimal' ? 'Diseño' : 'Pestañas'}</span>
               </button>
             </nav>
 
-            <button
-              type="button"
-              onClick={onOpenProgramManager}
-              className="hidden sm:inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 px-2.5 py-1 rounded-lg hover:bg-blue-50/70 dark:hover:bg-blue-950/40 transition-colors whitespace-nowrap cursor-pointer shrink-0"
-              title="Gestionar estudios, cursos y asignaturas"
-            >
-              <Plus className="w-3 h-3" />
-              <span>Gestionar Estudios</span>
-            </button>
+            {/* Quick Interface Design Mode Switcher on Right of Tab Bar */}
+            <div className="flex items-center gap-0.5 bg-slate-100/90 dark:bg-slate-800/90 p-0.5 rounded-xl border border-slate-200/80 dark:border-slate-700">
+              {([
+                { id: 'complete', label: 'Completo' },
+                { id: 'intermediate', label: 'Intermedio' },
+                { id: 'minimal', label: 'Minimalista' },
+              ] as const).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => handleSelectDesignMode(m.id)}
+                  className={`px-2 py-1 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                    designMode === m.id
+                      ? 'bg-white dark:bg-slate-900 text-blue-700 dark:text-blue-300 shadow-2xs font-bold'
+                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                  title={`Cambiar interfaz al modelo ${m.label} (conserva todos tus documentos y materias)`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </header>

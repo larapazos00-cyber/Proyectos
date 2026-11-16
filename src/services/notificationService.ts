@@ -83,13 +83,16 @@ export const notificationService = {
     if (!this._swInitPromise) {
       this._swInitPromise = (async () => {
         try {
-          // Register /sw.js
+          const existing = await navigator.serviceWorker.getRegistration('/');
+          if (existing) {
+            this._swRegistration = existing;
+            return existing;
+          }
           const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
           this._swRegistration = reg;
-          console.log('Service Worker registrado exitosamente para notificaciones push');
           return reg;
         } catch (err) {
-          console.warn('No se pudo registrar Service Worker:', err);
+          console.warn('No se pudo obtener el Service Worker:', err);
           return null;
         }
       })();

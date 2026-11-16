@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="sfBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e40af" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#0d9488" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sfBg)" />
+  <g fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M136 164c48-20 96-12 120 12 24-24 72-32 120-12v188c-48-20-96-12-120 12-24-24-72-32-120-12V164z" fill="rgba(255,255,255,0.12)" />
+    <path d="M256 176v188" />
+    <path d="M180 232h40" />
+    <path d="M180 280h48" />
+    <path d="M292 232h48" />
+    <path d="M292 280h40" />
+  </g>
+  <circle cx="384" cy="144" r="44" fill="#10b981" stroke="#ffffff" stroke-width="14" />
+  <path d="M366 144l12 12 26-26" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

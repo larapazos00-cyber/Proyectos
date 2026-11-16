@@ -1,24 +1,43 @@
 /**
- * Service Worker para StudyFlow - Servicio de Notificaciones Push y Alertas en Segundo Plano
- * Permite recibir alertas de repasos espaciados vencidos o próximos a vencer,
- * incluso si la aplicación no está en primer plano o la pestaña está minimizada.
+ * Handlers de Notificaciones Push y Mensajes en Segundo Plano para StudyFlow
+ * Importado por el Service Worker generado por Workbox (vite-plugin-pwa).
  */
 
-self.addEventListener('install', (event) => {
-  self.skipWaiting();
-});
+const STALE_CACHE_NAMES = [
+  'studyflow-app-shell-swr',
+  'studyflow-static-resources-swr',
+];
+
+if (typeof caches !== 'undefined') {
+  caches.keys().then((keys) => {
+    keys.forEach((key) => {
+      if (STALE_CACHE_NAMES.includes(key)) {
+        caches.delete(key).catch(() => {});
+      }
+    });
+  }).catch(() => {});
+}
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  if (typeof caches !== 'undefined') {
+    event.waitUntil(
+      caches.keys().then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => STALE_CACHE_NAMES.includes(key))
+            .map((key) => caches.delete(key))
+        )
+      )
+    );
+  }
 });
 
-// Manejo de eventos Push del navegador
 self.addEventListener('push', (event) => {
   let data = {
     title: '🧠 Repaso Espaciado Pendiente · StudyFlow',
     body: 'Tienes un repaso programado que está próximo a vencer o vencido. ¡Consolida tu memoria con Active Recall!',
-    icon: '/favicon.ico',
-    badge: '/favicon.ico',
+    icon: '/pwa-192x192.png',
+    badge: '/pwa-192x192.png',
     tag: 'studyflow-spaced-review',
     data: { url: '/' },
   };
@@ -39,8 +58,8 @@ self.addEventListener('push', (event) => {
 
   const options = {
     body: data.body,
-    icon: data.icon || '/favicon.ico',
-    badge: data.badge || '/favicon.ico',
+    icon: data.icon || '/pwa-192x192.png',
+    badge: data.badge || '/pwa-192x192.png',
     tag: data.tag || `studyflow-push-${Date.now()}`,
     vibrate: [200, 100, 200],
     data: data.data || { url: '/' },
@@ -53,7 +72,6 @@ self.addEventListener('push', (event) => {
   event.waitUntil(self.registration.showNotification(data.title, options));
 });
 
-// Al hacer clic en la notificación: enfocar ventana abierta o abrir la aplicación
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
@@ -79,15 +97,14 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// Comunicación mediante mensajes desde la app para disparar alertas en segundo plano
 self.addEventListener('message', (event) => {
   const { type, payload } = event.data || {};
 
   if (type === 'SHOW_NOTIFICATION' && payload) {
     const { title, options } = payload;
     self.registration.showNotification(title || 'StudyFlow Notificación', {
-      icon: '/favicon.ico',
-      badge: '/favicon.ico',
+      icon: '/pwa-192x192.png',
+      badge: '/pwa-192x192.png',
       ...options,
     });
   }

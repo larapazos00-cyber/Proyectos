@@ -206,6 +206,14 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
               title: String(kp.title || `Punto clave ${idx + 1}`),
               detail: String(kp.detail || ''),
               category: kp.category ? String(kp.category) : 'Concepto',
+              semanticLevel: kp.semanticLevel
+                ? String(kp.semanticLevel)
+                : idx < 2
+                ? 'Nivel 1 · Macro-concepto'
+                : idx < 5
+                ? 'Nivel 2 · Mecanismo/Proceso'
+                : 'Nivel 3 · Micro-concepto/Detalle',
+              parentConcept: kp.parentConcept ? String(kp.parentConcept) : undefined,
               importance:
                 kp.importance === 'alta' || kp.importance === 'baja'
                   ? kp.importance
@@ -215,7 +223,7 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
           : keyPoints;
       const nextCues =
         Array.isArray(data.cues) && data.cues.length > 0
-          ? Array.from(new Set([...cues, ...data.cues.map(String)])).slice(0, 12)
+          ? Array.from(new Set([...data.cues.map(String), ...cues])).slice(0, 14)
           : cues;
 
       if (nextSummary) setSummary(nextSummary);
@@ -234,7 +242,7 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
       };
       onSave(updatedNote);
 
-      setSaveStatus(`¡${nextKeyPoints.length} Puntos clave IA listos!`);
+      setSaveStatus(`¡${nextKeyPoints.length} Conceptos con Jerarquía Semántica listos!`);
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (err: any) {
       const msg = err?.message || 'Error al generar puntos clave con IA';
@@ -262,6 +270,7 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
           topicTitle: currentTopic?.title || title || 'Apuntes del Tema',
           rawNotes: sourceText,
           subjectName: subject?.name || 'Asignatura',
+          forceRefresh: true,
         }),
       });
 
@@ -277,10 +286,33 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
           ? data.cues.map(String)
           : cues;
       const nextSummary = data.summary || summary;
+      const nextKeyPoints: EditableKeyPoint[] =
+        Array.isArray(data.keyTerms) && data.keyTerms.length > 0
+          ? data.keyTerms.map((kt: any, idx: number) => ({
+              id: `kp-cornell-${Date.now()}-${idx}`,
+              title: String(kt.term || `Concepto ${idx + 1}`),
+              detail: String(kt.definition || ''),
+              category: kt.category ? String(kt.category) : 'Concepto Clave',
+              semanticLevel: kt.semanticLevel
+                ? String(kt.semanticLevel)
+                : idx < 2
+                ? 'Nivel 1 · Macro-concepto'
+                : idx < 5
+                ? 'Nivel 2 · Mecanismo/Proceso'
+                : 'Nivel 3 · Micro-concepto/Detalle',
+              parentConcept: kt.parentConcept ? String(kt.parentConcept) : undefined,
+              importance:
+                kt.importance === 'alta' || kt.importance === 'baja'
+                  ? kt.importance
+                  : 'media',
+              sourceDocName: title || currentTopic?.title,
+            }))
+          : keyPoints;
 
       setNotesText(nextNotes);
       if (nextCues.length > 0) setCues(nextCues);
       if (nextSummary) setSummary(nextSummary);
+      if (nextKeyPoints.length > 0) setKeyPoints(nextKeyPoints);
 
       const updatedNote: CornellNote = {
         ...note,
@@ -289,12 +321,12 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
         cues: nextCues,
         notes: nextNotes,
         summary: nextSummary,
-        keyPoints,
+        keyPoints: nextKeyPoints,
         updatedAt: new Date().toISOString(),
       };
       onSave(updatedNote);
 
-      setSaveStatus('¡Formato mejorado con IA!');
+      setSaveStatus('¡Formato y Jerarquía Semántica listos!');
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (err: any) {
       const msg = err?.message || 'Error al mejorar el formato con IA';
@@ -590,39 +622,79 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
       )}
 
       {/* Cornell Note Layout Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-12 min-h-[460px]">
+      <div className="grid grid-cols-1 md:grid-cols-12 min-h-[480px]">
         {/* Left Column: Cues & Key Questions (30%) */}
         <div className="md:col-span-4 p-5 border-r border-slate-200 bg-slate-50/40 flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-              Preguntas Clave y Cues
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+              1. Indicios y Preguntas (Cues)
             </h4>
-            <span className="text-[10px] text-slate-400">Active Recall</span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={isGeneratingKeyPointsAI}
+                onClick={handleGenerateKeyPointsWithAI}
+                className="px-2 py-0.5 rounded-md bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                title="Detectar preguntas e indicios directamente del texto de tus apuntes"
+              >
+                Detectar IA
+              </button>
+              <span className="text-[10px] font-mono-numbers font-bold bg-slate-200/70 text-slate-700 px-1.5 py-0.5 rounded">
+                {cues.length}
+              </span>
+            </div>
           </div>
-          <p className="text-xs text-slate-500 mb-4">
-            Escribe preguntas detonadoras o conceptos para tapar las notas y ponerte a prueba.
+          <p className="text-xs text-slate-500 mb-3">
+            Indicios y preguntas extraídos por <strong>Jerarquía Semántica</strong> (Macro · Meso · Micro) para Active Recall.
           </p>
 
-          <div className="flex-1 space-y-2 overflow-y-auto mb-4">
-            {cues.map((cue, idx) => (
-              <div
-                key={idx}
-                className="group flex items-start justify-between gap-2 p-2.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 shadow-2xs hover:border-blue-300 transition-colors"
-              >
-                <span className="flex-1 font-medium">{cue}</span>
-                <button
-                  onClick={() => handleRemoveCue(idx)}
-                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-500 transition-opacity"
-                  title="Eliminar cue"
+          <div className="flex-1 space-y-2 overflow-y-auto mb-4 max-h-[440px] pr-1">
+            {cues.map((cue, idx) => {
+              const isMacro = /^\[Macro\]/i.test(cue);
+              const isMeso = /^\[Meso\]/i.test(cue);
+              const isMicro = /^\[Micro\]/i.test(cue);
+              return (
+                <div
+                  key={idx}
+                  className="group flex items-start justify-between gap-2 p-2.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 shadow-2xs hover:border-blue-300 transition-colors"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-mono-numbers text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5 ${
+                      isMacro
+                        ? 'bg-purple-100 text-purple-800'
+                        : isMeso
+                        ? 'bg-blue-100 text-blue-800'
+                        : isMicro
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-indigo-50 text-indigo-700'
+                    }`}
+                  >
+                    {isMacro ? 'N1' : isMeso ? 'N2' : isMicro ? 'N3' : idx + 1}
+                  </span>
+                  <textarea
+                    rows={2}
+                    value={cue}
+                    onChange={(e) => {
+                      const next = [...cues];
+                      next[idx] = e.target.value;
+                      setCues(next);
+                    }}
+                    className="flex-1 font-medium bg-transparent focus:outline-none focus:border-b focus:border-blue-400 resize-none leading-snug"
+                  />
+                  <button
+                    onClick={() => handleRemoveCue(idx)}
+                    className="opacity-70 group-hover:opacity-100 text-slate-400 hover:text-rose-500 transition-opacity cursor-pointer"
+                    title="Eliminar cue"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              );
+            })}
 
             {cues.length === 0 && (
               <div className="text-center py-6 text-slate-400 text-xs italic">
-                Sin preguntas clave aún. Añade una abajo o digitaliza apuntes con IA.
+                Sin preguntas clave aún. Pulsa "Detectar IA" o añade una abajo.
               </div>
             )}
           </div>
@@ -634,12 +706,12 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
               value={newCueInput}
               onChange={(e) => setNewCueInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleAddCue()}
-              placeholder="¿Qué formula define...? o palabra clave"
+              placeholder="¿Qué fórmula define...? o indicio clave"
               className="flex-1 text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
             <button
               onClick={handleAddCue}
-              className="p-1.5 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors"
+              className="p-1.5 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
               title="Añadir pregunta"
             >
               <Plus className="w-4 h-4" />
@@ -647,20 +719,29 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Detailed Notes Body (70%) */}
+        {/* Right Column: Detailed Notes Body (70%) - Unlimited Space (No maxLength or row cap) */}
         <div className="md:col-span-8 p-5 flex flex-col">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-              Cuerpo de Apuntes (Notes)
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+              2. Cuerpo de Apuntes (Notes)
             </h4>
-            <span className="text-xs text-slate-400">Esquemas, definiciones, fórmulas</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-bold">
+                ∞ Espacio ilimitado · Sin límite de caracteres
+              </span>
+              <span className="text-[11px] text-slate-400 font-mono-numbers">
+                {notesText.length.toLocaleString()} caracteres ·{' '}
+                {notesText.split(/\s+/).filter(Boolean).length.toLocaleString()} palabras
+              </span>
+            </div>
           </div>
 
           <textarea
             value={notesText}
             onChange={(e) => setNotesText(e.target.value)}
-            placeholder="Escribe tus notas estructuradas aquí..."
-            className="flex-1 w-full p-3 text-sm text-slate-800 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-sans leading-relaxed resize-none min-h-[340px]"
+            rows={Math.max(20, notesText.split(/\r?\n/).length + 4)}
+            placeholder="Escribe o pega tus apuntes aquí sin límite de caracteres. El área de notas se expande automáticamente..."
+            className="flex-1 w-full p-3.5 text-sm text-slate-800 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-sans leading-relaxed resize-y min-h-[420px]"
           />
         </div>
       </div>
@@ -751,6 +832,24 @@ export const CornellEditor: React.FC<CornellEditorProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
+                    {kp.semanticLevel && (
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                          kp.semanticLevel.includes('Nivel 1')
+                            ? 'bg-purple-50 text-purple-800 border-purple-200'
+                            : kp.semanticLevel.includes('Nivel 2')
+                            ? 'bg-blue-50 text-blue-800 border-blue-200'
+                            : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        }`}
+                        title={
+                          kp.parentConcept
+                            ? `Subordinado a: ${kp.parentConcept}`
+                            : kp.semanticLevel
+                        }
+                      >
+                        {kp.semanticLevel.split('·')[0].trim()}
+                      </span>
+                    )}
                     <select
                       value={kp.importance}
                       onChange={(e) =>

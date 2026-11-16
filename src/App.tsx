@@ -21,6 +21,7 @@ import { PomodoroTimer } from './components/PomodoroTimer';
 import { SmartCalendarModal } from './components/SmartCalendarModal';
 import { SpacedRepetitionCalendarView } from './components/SpacedRepetitionCalendarView';
 import { HabitsTracker } from './components/HabitsTracker';
+import { StudyAchievementsPanel } from './components/StudyAchievementsPanel';
 import { PracticeQuizModule } from './components/PracticeQuizModule';
 import { WeeklyStatsModal } from './components/WeeklyStatsModal';
 import { ProgramManagerModal } from './components/ProgramManagerModal';
@@ -28,15 +29,20 @@ import { StudyPreferencesModal } from './components/StudyPreferencesModal';
 import { ErrorAnalysisModal } from './components/ErrorAnalysisModal';
 import { ExamsManagerModal } from './components/ExamsManagerModal';
 import { AuthModal } from './components/AuthModal';
-import { InteractiveOnboardingTour } from './components/InteractiveOnboardingTour';
+import {
+  InteractiveOnboardingTour,
+  resetOnboardingProgressToStart,
+} from './components/InteractiveOnboardingTour';
 import { notificationService } from './services/notificationService';
-import { ArrowLeft, BookOpen, Plus, LayoutGrid, Kanban, AlertTriangle, AlertCircle, List, ChevronRight, FileText, PanelRight, Sparkles, Clock, RotateCcw, HelpCircle, ArrowRight, Brain, Zap } from 'lucide-react';
+import { ArrowLeft, BookOpen, Plus, LayoutGrid, Kanban, AlertTriangle, AlertCircle, List, ChevronRight, FileText, PanelRight, Sparkles, Clock, RotateCcw, HelpCircle, ArrowRight, Brain, Zap, Target } from 'lucide-react';
 import { TopicKanbanBoard } from './components/TopicKanbanBoard';
 import { SubjectDocumentsSidePanel } from './components/SubjectDocumentsSidePanel';
 import { SubjectSpacedRepetitionInfoPopover } from './components/SubjectSpacedRepetitionInfoPopover';
 import { SubjectQuickReviewOverlay } from './components/SubjectQuickReviewOverlay';
 import { FeynmanChallenge } from './components/FeynmanChallenge';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { checkSubjectProgressAlert, getYearSubjectsWithAlert, getSubjectSpacedRepetitionAlert } from './utils/courseAlerts';
+import { getSubjectSmartGoals, calculateSmartGoalProgress } from './utils/smartGoalsUtils';
 import { User } from 'firebase/auth';
 import {
   auth,
@@ -101,6 +107,7 @@ export default function App() {
   });
 
   const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
+  const [subjectDetailInitialTab, setSubjectDetailInitialTab] = useState<string | undefined>(undefined);
 
   // View mode in subjects section (Grid de materias vs Tablero Kanban vs Herramienta Técnica Feynman)
   const [subjectSectionViewMode, setSubjectSectionViewMode] = useState<'grid' | 'kanban' | 'feynman'>('grid');
@@ -114,27 +121,67 @@ export default function App() {
   // Active navigation tab
   const [activeTab, setActiveTab] = useState<NavTabId>('curso');
 
+  // Reajuste seguro de vistas al cambiar entre Completo / Intermedio / Minimalista (sin alterar ningún dato)
+  useEffect(() => {
+    const mode = preferences.interfaceDesignMode || 'complete';
+    if (mode === 'minimal') {
+      if (subjectSectionViewMode === 'kanban' || subjectSectionViewMode === 'feynman') {
+        setSubjectSectionViewMode('grid');
+      }
+      if (activeTab === 'estadisticas') {
+        setActiveTab('curso');
+      }
+    } else if (mode === 'intermediate') {
+      if (subjectSectionViewMode === 'feynman') {
+        setSubjectSectionViewMode('grid');
+      }
+      if (activeTab === 'estadisticas') {
+        setActiveTab('curso');
+      }
+    }
+    const enabled = preferences.enabledTabs || [];
+    if (
+      enabled.length > 0 &&
+      activeTab !== 'curso' &&
+      !enabled.includes(activeTab) &&
+      !(activeTab === 'calendario' && enabled.includes('repaso')) &&
+      !(activeTab === 'repaso' && enabled.includes('calendario'))
+    ) {
+      setActiveTab('curso');
+    }
+  }, [preferences.interfaceDesignMode, preferences.enabledTabs, activeTab, subjectSectionViewMode]);
+
   // Modals
   const [isProgramModalOpen, setIsProgramModalOpen] = useState(false);
   const [isPreferencesModalOpen, setIsPreferencesModalOpen] = useState(false);
   const [isErrorModalOpen, setIsErrorModalOpen] = useState(false);
   const [isExamsManagerOpen, setIsExamsManagerOpen] = useState(false);
   const [examsManagerSubjectId, setExamsManagerSubjectId] = useState<string | undefined>(undefined);
-  const [isOnboardingTourOpen, setIsOnboardingTourOpen] = useState<boolean>(() => {
-    try {
-      return !localStorage.getItem('studyflow_onboarding_completed_v1');
-    } catch {
-      return false;
-    }
-  });
+  const [isOnboardingTourOpen, setIsOnboardingTourOpen] = useState<boolean>(false);
 
-  const handleCloseOnboardingTour = () => {
-    setIsOnboardingTourOpen(false);
+  const markOnboardingSeenPermanently = (uid?: string) => {
     try {
       localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+      if (uid) {
+        localStorage.setItem(`studyflow_onboarding_first_register_done_${uid}`, 'true');
+      }
+      if (currentUser?.uid) {
+        localStorage.setItem(`studyflow_onboarding_first_register_done_${currentUser.uid}`, 'true');
+      }
     } catch {
       // ignore storage quota errors
     }
+    setPreferences((prev) => {
+      if (prev.hasSeenOnboarding) return prev;
+      const updated = { ...prev, hasSeenOnboarding: true };
+      storageService.savePreferences(updated);
+      return updated;
+    });
+  };
+
+  const handleCloseOnboardingTour = () => {
+    setIsOnboardingTourOpen(false);
+    markOnboardingSeenPermanently();
   };
 
   // Pomodoro direct focus target & Modo Enfoque (distraction-free mode)
@@ -285,6 +332,11 @@ export default function App() {
                         : incTop.richGeneralNotes,
                     attachedFiles: combinedFiles,
                     pageCount: Math.max(incTop.pageCount || 0, locTop.pageCount || 0),
+                    mindMap:
+                      (locTop.mindMap?.length || 0) >= (incTop.mindMap?.length || 0)
+                        ? locTop.mindMap || incTop.mindMap
+                        : incTop.mindMap || locTop.mindMap,
+                    mindMapSummary: locTop.mindMapSummary || incTop.mindMapSummary,
                   };
                 }),
                 ...localOnlyTopics,
@@ -361,14 +413,54 @@ export default function App() {
       }
     }
 
+    const moodMap = new Map<string, any>();
+    let storedLocalMoods: any[] = [];
+    try {
+      const rawMoods = localStorage.getItem('studyflow_user_moods_v1');
+      if (rawMoods) {
+        const parsed = JSON.parse(rawMoods);
+        if (Array.isArray(parsed)) storedLocalMoods = parsed;
+      }
+    } catch {
+      // ignore
+    }
+
+    const allMoodSources = [
+      ...(Array.isArray(incoming.moodEntries) ? incoming.moodEntries : []),
+      ...(Array.isArray(local.moodEntries) ? local.moodEntries : []),
+      ...storedLocalMoods,
+    ];
+    for (const m of allMoodSources) {
+      if (m && m.date) {
+        const existing = moodMap.get(m.date);
+        if (
+          !existing ||
+          (m.updatedAt && (!existing.updatedAt || m.updatedAt >= existing.updatedAt))
+        ) {
+          moodMap.set(m.date, m);
+        }
+      }
+    }
+    const mergedMoods = Array.from(moodMap.values()).sort((a, b) =>
+      b.date.localeCompare(a.date)
+    );
+    try {
+      if (mergedMoods.length > 0) {
+        localStorage.setItem('studyflow_user_moods_v1', JSON.stringify(mergedMoods));
+      }
+    } catch {
+      // ignore
+    }
+
     return {
       ...incoming,
       ...local,
       weeklyFixedObligations: Array.from(obMap.values()),
+      moodEntries: mergedMoods,
     };
   };
 
-  // Hydrate full uncompacted programs, blockedEvents and preferences from IndexedDB on initial mount
+  // Hydrate full uncompacted programs, blockedEvents, preferences, pomodoroLogs and activeSelection from IndexedDB (Stale-While-Revalidate)
   useEffect(() => {
     let isCancelled = false;
 
@@ -376,8 +468,10 @@ export default function App() {
       storageService.hydrateProgramsFromIndexedDB(),
       storageService.hydrateBlockedEventsFromIndexedDB(),
       storageService.hydratePreferencesFromIndexedDB(),
+      storageService.hydratePomodoroLogsFromIndexedDB(),
+      storageService.hydrateActiveSelectionFromIndexedDB(),
     ])
-      .then(([idbPrograms, idbBlockedEvents, idbPreferences]) => {
+      .then(([idbPrograms, idbBlockedEvents, idbPreferences, idbPomodoroLogs, idbActiveSelection]) => {
         hasHydratedIdbRef.current = true;
         if (isCancelled) return;
 
@@ -416,6 +510,24 @@ export default function App() {
             storageService.savePreferences(merged, { skipIndexedDB: true });
             return merged;
           });
+        }
+
+        if (idbPomodoroLogs && idbPomodoroLogs.length > 0) {
+          setPomodoroLogs((currentLogs) => {
+            const byId = new Map<string, PomodoroLog>();
+            for (const l of idbPomodoroLogs) if (l?.id) byId.set(l.id, l);
+            for (const l of currentLogs) if (l?.id) byId.set(l.id, l);
+            const merged = Array.from(byId.values());
+            storageService.savePomodoroLogs(merged, { skipIndexedDB: true });
+            return merged;
+          });
+        }
+
+        if (idbActiveSelection?.programId) {
+          setActiveProgramId((prev) => prev || idbActiveSelection.programId || '');
+        }
+        if (idbActiveSelection?.yearId) {
+          setActiveYearId((prev) => prev || idbActiveSelection.yearId || '');
         }
       })
       .catch(() => {
@@ -469,11 +581,44 @@ export default function App() {
                 mergeBlockedEventsPreservingPlans(cloudData.blockedEvents, currentLocalBlocked)
               );
             }
+            // Existing cloud account already has data: ensure onboarding never auto-triggers
+            setIsOnboardingTourOpen(false);
+            try {
+              localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+              localStorage.setItem(`studyflow_onboarding_first_register_done_${user.uid}`, 'true');
+            } catch {
+              // ignore
+            }
           } else {
-            // First time sync for new cloud account: upload current local records
+            // First time registration / brand-new cloud account with no prior cloud study data:
+            // Show the interactive tutorial ONLY if this user has never seen it before, then immediately persist hasSeenOnboarding: true
+            let alreadySeenForUser = Boolean(cloudData?.preferences?.hasSeenOnboarding);
+            try {
+              if (
+                localStorage.getItem(`studyflow_onboarding_first_register_done_${user.uid}`) === 'true'
+              ) {
+                alreadySeenForUser = true;
+              }
+            } catch {
+              // ignore
+            }
+
+            const updatedFirstTimePrefs: StudyPreferences = {
+              ...preferences,
+              hasSeenOnboarding: true,
+            };
+
+            if (!alreadySeenForUser) {
+              resetOnboardingProgressToStart();
+              markOnboardingSeenPermanently(user.uid);
+              setIsOnboardingTourOpen(true);
+            } else {
+              markOnboardingSeenPermanently(user.uid);
+            }
+
             await saveUserStudyData(user.uid, {
               programs,
-              preferences,
+              preferences: updatedFirstTimePrefs,
               pomodoroLogs,
               blockedEvents,
             });
@@ -571,6 +716,43 @@ export default function App() {
 
     return () => clearTimeout(timer);
   }, [programs, preferences, pomodoroLogs, blockedEvents, currentUser]);
+
+  const isInitialPomodoroMountRef = React.useRef(true);
+
+  useEffect(() => {
+    if (isInitialPomodoroMountRef.current) {
+      isInitialPomodoroMountRef.current = false;
+      storageService.savePomodoroLogs(pomodoroLogs, { skipIndexedDB: true });
+      return;
+    }
+    storageService.savePomodoroLogs(pomodoroLogs, { skipIndexedDB: false });
+  }, [pomodoroLogs]);
+
+  // Stale-While-Revalidate background revalidation when returning online
+  useEffect(() => {
+    const handleReconnectRevalidation = async () => {
+      try {
+        if (currentUser) {
+          setIsSyncingCloud(true);
+          await saveUserStudyData(currentUser.uid, {
+            programs,
+            preferences,
+            pomodoroLogs,
+            blockedEvents,
+          });
+          setIsSyncingCloud(false);
+        }
+        await storageService.markOfflineMutationsRevalidated();
+      } catch {
+        setIsSyncingCloud(false);
+      }
+    };
+
+    window.addEventListener('studyflow:network-reconnected', handleReconnectRevalidation);
+    return () => {
+      window.removeEventListener('studyflow:network-reconnected', handleReconnectRevalidation);
+    };
+  }, [currentUser, programs, preferences, pomodoroLogs, blockedEvents]);
 
   // Initialize Service Worker for browser push notifications
   useEffect(() => {
@@ -769,9 +951,17 @@ export default function App() {
     deletedBlockedIdsRef.current.delete(event.id);
     setBlockedEvents((prev) => {
       const isCustomStudyBlock = event.id.startsWith('custom-study-');
+      const normalizedTitle = event.title.trim().toLowerCase();
+      const isRecurringOrHabit =
+        !event.date && Boolean(event.recurringDays && event.recurringDays.length > 0);
       const existingIdx = prev.findIndex(
         (e) =>
           e.id === event.id ||
+          (isRecurringOrHabit &&
+            !e.date &&
+            e.title.trim().toLowerCase() === normalizedTitle &&
+            e.startTime === event.startTime &&
+            e.endTime === event.endTime) ||
           (!isCustomStudyBlock &&
             !e.id.startsWith('custom-study-') &&
             event.linkedTopicId &&
@@ -783,7 +973,7 @@ export default function App() {
       let next: BlockedTimeEvent[];
       if (existingIdx >= 0) {
         next = [...prev];
-        next[existingIdx] = { ...next[existingIdx], ...event };
+        next[existingIdx] = { ...next[existingIdx], ...event, id: next[existingIdx].id };
       } else {
         next = [...prev, event];
       }
@@ -807,9 +997,18 @@ export default function App() {
     deletedBlockedIdsRef.current.delete(updatedEvent.id);
     setBlockedEvents((prev) => {
       const isCustomStudyBlock = updatedEvent.id.startsWith('custom-study-');
+      const normalizedTitle = updatedEvent.title.trim().toLowerCase();
+      const isRecurringOrHabit =
+        !updatedEvent.date &&
+        Boolean(updatedEvent.recurringDays && updatedEvent.recurringDays.length > 0);
       const existingIdx = prev.findIndex(
         (e) =>
           e.id === updatedEvent.id ||
+          (isRecurringOrHabit &&
+            !e.date &&
+            e.title.trim().toLowerCase() === normalizedTitle &&
+            e.startTime === updatedEvent.startTime &&
+            e.endTime === updatedEvent.endTime) ||
           (!isCustomStudyBlock &&
             !e.id.startsWith('custom-study-') &&
             updatedEvent.linkedTopicId &&
@@ -1120,6 +1319,7 @@ export default function App() {
           onSelectTab={(tab) => {
             setActiveTab(tab);
             setSelectedSubjectId(null);
+            setSubjectDetailInitialTab(undefined);
             if (tab === 'asignaturas') {
               setSubjectSectionViewMode('grid');
             }
@@ -1162,17 +1362,23 @@ export default function App() {
           onStartOnboardingTour={() => setIsOnboardingTourOpen(true)}
           preferences={preferences}
           onUpdatePreferences={(updated) => setPreferences(updated)}
+          subjects={activeSubjects}
+          pomodoroLogs={pomodoroLogs}
         />
       )}
 
       {/* Main Content Viewport */}
       <main className="flex-1 min-w-0 w-full max-w-6xl overflow-x-hidden mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
-        {/* Sección desplegable compacta de HabitsTracker en el componente principal */}
-        {!isPomodoroFocusMode && activeTab !== 'calendario' && activeTab !== 'repaso' && (
-          <div className="mb-5">
+        {/* Sección desplegable compacta de HabitsTracker y Logros (Badges) en el componente principal */}
+        {!isPomodoroFocusMode &&
+          activeTab !== 'calendario' &&
+          activeTab !== 'repaso' &&
+          (preferences.interfaceDesignMode || 'complete') !== 'minimal' && (
+          <div className="mb-5 space-y-3">
             <HabitsTracker
               preferences={preferences}
               onUpdatePreferences={(updated) => setPreferences(updated)}
+              pomodoroLogs={pomodoroLogs}
               onScheduleHabitOneDay={(title, dateStr, startTime, endTime, category, notes) => {
                 handleAddBlockedEvent({
                   id: `block-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -1185,8 +1391,13 @@ export default function App() {
                 });
               }}
               onScheduleHabitWeekly={(title, category, days, startTime, endTime, notes) => {
+                const cleanSlug = title
+                  .trim()
+                  .toLowerCase()
+                  .replace(/[^a-z0-9]+/g, '-')
+                  .slice(0, 32);
                 handleAddBlockedEvent({
-                  id: `block-weekly-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  id: `block-weekly-${cleanSlug || Date.now()}`,
                   title,
                   recurringDays: days,
                   startTime,
@@ -1196,6 +1407,25 @@ export default function App() {
                 });
               }}
             />
+
+            {(preferences.interfaceDesignMode || 'complete') === 'complete' && (
+              <StudyAchievementsPanel
+                variant="collapsible"
+                subjects={activeSubjects}
+                pomodoroLogs={pomodoroLogs}
+                preferences={preferences}
+                onOpenActiveRecall={() => setActiveTab('cuestionarios')}
+                onOpenPomodoro={() => setActiveTab('pomodoro')}
+                onOpenFeynman={() => {
+                  if (!feynmanSubjectId && activeSubjects[0]) {
+                    setFeynmanSubjectId(activeSubjects[0].id);
+                  }
+                  setSelectedSubjectId(null);
+                  setSubjectSectionViewMode('feynman');
+                  setActiveTab('asignaturas');
+                }}
+              />
+            )}
           </div>
         )}
 
@@ -1232,6 +1462,12 @@ export default function App() {
               onDeleteBlockedEvent={handleDeleteBlockedEvent}
               onSelectSubject={(subId) => {
                 setSelectedSubjectId(subId);
+                setSubjectDetailInitialTab(undefined);
+                setActiveTab('asignaturas');
+              }}
+              onSelectSubjectSmartGoals={(subId) => {
+                setSelectedSubjectId(subId);
+                setSubjectDetailInitialTab('objetivos_smart');
                 setActiveTab('asignaturas');
               }}
               onOpenNewSubject={() => setIsProgramModalOpen(true)}
@@ -1277,7 +1513,10 @@ export default function App() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <button
-                    onClick={() => setSelectedSubjectId(null)}
+                    onClick={() => {
+                      setSelectedSubjectId(null);
+                      setSubjectDetailInitialTab(undefined);
+                    }}
                     className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
                   >
                     <ArrowLeft className="w-3.5 h-3.5" />
@@ -1305,9 +1544,13 @@ export default function App() {
                 </div>
 
                 <SubjectDetailView
-                  key={currentSubject.id}
+                  key={`${currentSubject.id}-${subjectDetailInitialTab || 'default'}`}
                   subject={currentSubject}
+                  allSubjects={activeSubjects}
+                  initialTab={subjectDetailInitialTab}
+                  blockedEvents={blockedEvents}
                   onUpdateSubject={handleUpdateSubject}
+                  onAddTaskToSubject={handleAddTaskToSubject}
                   onSelectForPomodoro={handleStartPomodoroWithSubject}
                   preferences={preferences}
                   onOpenPreferences={() => setIsPreferencesModalOpen(true)}
@@ -1382,38 +1625,44 @@ export default function App() {
                         <span>Vista Compacta</span>
                       </button>
 
-                      <button
-                        type="button"
-                        onClick={() => setSubjectSectionViewMode('kanban')}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                          subjectSectionViewMode === 'kanban'
-                            ? 'bg-white text-blue-700 shadow-2xs font-bold'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                        title="Tablero Kanban de todos los temas del curso"
-                      >
-                        <Kanban className="w-3.5 h-3.5 text-blue-600" />
-                        <span>Tablero Kanban</span>
-                      </button>
+                      {(preferences.interfaceDesignMode || 'complete') !== 'minimal' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setSubjectSectionViewMode('kanban')}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                              subjectSectionViewMode === 'kanban'
+                                ? 'bg-white text-blue-700 shadow-2xs font-bold'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                            title="Tablero Kanban de todos los temas del curso"
+                          >
+                            <Kanban className="w-3.5 h-3.5 text-blue-600" />
+                            <span>Tablero Kanban</span>
+                          </button>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!feynmanSubjectId && activeSubjects[0]) {
-                            setFeynmanSubjectId(activeSubjects[0].id);
-                          }
-                          setSubjectSectionViewMode('feynman');
-                        }}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                          subjectSectionViewMode === 'feynman'
-                            ? 'bg-purple-600 text-white shadow-2xs font-bold'
-                            : 'text-purple-700 hover:bg-purple-50'
-                        }`}
-                        title="Herramienta guiada de la Técnica Feynman: explica un tema y compáralo con el temario original para detectar lagunas de conocimiento"
-                      >
-                        <Brain className={`w-3.5 h-3.5 ${subjectSectionViewMode === 'feynman' ? 'text-white' : 'text-purple-600'}`} />
-                        <span>Técnica Feynman</span>
-                      </button>
+                          {(preferences.interfaceDesignMode || 'complete') === 'complete' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!feynmanSubjectId && activeSubjects[0]) {
+                                  setFeynmanSubjectId(activeSubjects[0].id);
+                                }
+                                setSubjectSectionViewMode('feynman');
+                              }}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                                subjectSectionViewMode === 'feynman'
+                                  ? 'bg-purple-600 text-white shadow-2xs font-bold'
+                                  : 'text-purple-700 hover:bg-purple-50'
+                              }`}
+                              title="Herramienta guiada de la Técnica Feynman: explica un tema y compáralo con el temario original para detectar lagunas de conocimiento"
+                            >
+                              <Brain className={`w-3.5 h-3.5 ${subjectSectionViewMode === 'feynman' ? 'text-white' : 'text-purple-600'}`} />
+                              <span>Técnica Feynman</span>
+                            </button>
+                          )}
+                        </>
+                      )}
                     </div>
 
                     <button
@@ -1532,7 +1781,9 @@ export default function App() {
                 ) : (
                   <div className="space-y-5">
                     {/* RESUMEN VISUAL GLOBAL DEL CURSO: ANILLO DE DOMINIO + BARRA MULTICOLOR + KPIS VISUALES */}
-                    {activeSubjects.length > 0 && (() => {
+                    {activeSubjects.length > 0 &&
+                      (preferences.interfaceDesignMode || 'complete') !== 'minimal' &&
+                      (() => {
                       const subjectStatsList = activeSubjects.map((sub) => {
                         const prog = schedulerService.calculateSubjectAcademicProgress(
                           sub.topics || [],
@@ -1914,11 +2165,24 @@ export default function App() {
                           );
                           const subjectColor = sub.color || '#3b82f6';
                           const currentVuelta = sub.currentVuelta || 1;
+                          const subSmartGoals = getSubjectSmartGoals(sub);
+                          const subSmartPct =
+                            subSmartGoals.length > 0
+                              ? Math.round(
+                                  subSmartGoals.reduce(
+                                    (acc, g) => acc + calculateSmartGoalProgress(g, sub).pct,
+                                    0
+                                  ) / subSmartGoals.length
+                                )
+                              : null;
 
                           return (
                             <div
                               key={sub.id}
-                              onClick={() => setSelectedSubjectId(sub.id)}
+                              onClick={() => {
+                                setSubjectDetailInitialTab(undefined);
+                                setSelectedSubjectId(sub.id);
+                              }}
                               className={`px-4 py-3.5 bg-white dark:bg-slate-900 rounded-2xl border shadow-2xs hover:shadow-xs cursor-pointer transition-all flex items-center justify-between gap-3 sm:gap-4 group ${
                                 progressAlert.isAlert
                                   ? 'border-amber-300 hover:border-amber-400'
@@ -1943,6 +2207,11 @@ export default function App() {
                                     <span className="text-[11px] font-mono-numbers text-slate-400 shrink-0">
                                       · {currentVuelta}ª Vuelta
                                       {sub.credits ? ` · ${sub.credits} ECTS` : ''}
+                                      {subSmartPct !== null ? (
+                                        <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                                          {' '}· SMART {subSmartPct}%
+                                        </span>
+                                      ) : null}
                                       <span className="sm:hidden font-semibold text-slate-500"> · {studiedTopics}/{totalTopics} temas</span>
                                     </span>
                                   </div>
@@ -2112,11 +2381,24 @@ export default function App() {
                           const cardRingR = 23;
                           const cardRingC = 2 * Math.PI * cardRingR;
                           const cardRingOffset = cardRingC - (pct / 100) * cardRingC;
+                          const subSmartGoals = getSubjectSmartGoals(sub);
+                          const subSmartAvgPct =
+                            subSmartGoals.length > 0
+                              ? Math.round(
+                                  subSmartGoals.reduce(
+                                    (acc, g) => acc + calculateSmartGoalProgress(g, sub).pct,
+                                    0
+                                  ) / subSmartGoals.length
+                                )
+                              : null;
 
                           return (
                             <div
                               key={sub.id}
-                              onClick={() => setSelectedSubjectId(sub.id)}
+                              onClick={() => {
+                                setSubjectDetailInitialTab(undefined);
+                                setSelectedSubjectId(sub.id);
+                              }}
                               className={`bg-white dark:bg-slate-900 rounded-2xl border shadow-2xs hover:shadow-md cursor-pointer transition-all duration-200 flex flex-col justify-between group overflow-hidden ${
                                 progressAlert.isAlert
                                   ? 'border-amber-300 hover:border-amber-400'
@@ -2218,16 +2500,14 @@ export default function App() {
 
                                 {/* Mapa Visual Segmentado de los Temas de la Asignatura */}
                                 <div className="space-y-1.5">
-                                  <div className="flex items-center justify-between text-[11px]">
+                                  <div className="flex items-center justify-between text-[11px] gap-2">
                                     <span className="font-semibold text-slate-600 dark:text-slate-300">
                                       Mapa de temas ({studiedTopics}/{totalTopics} completados)
                                     </span>
                                     <span className="font-mono-numbers text-slate-400">
                                       {inProgressTopics > 0
                                         ? `${inProgressTopics} en lectura`
-                                        : totalDocs > 0
-                                        ? `${totalDocs} PDFs`
-                                        : `${sub.cornellNotes.length} apuntes`}
+                                        : `${totalDocs} PDFs · ${sub.cornellNotes.length} apuntes`}
                                     </span>
                                   </div>
 
@@ -2322,6 +2602,30 @@ export default function App() {
                                       <ArrowRight className="w-3 h-3" />
                                     </span>
                                   </div>
+                                )}
+
+                                {/* Línea compacta de Objetivos SMART de la asignatura */}
+                                {subSmartGoals.length > 0 && subSmartAvgPct !== null && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSubjectDetailInitialTab('objetivos_smart');
+                                      setSelectedSubjectId(sub.id);
+                                    }}
+                                    className="w-full px-3 py-2 rounded-xl bg-slate-50/90 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/80 hover:border-blue-400 dark:hover:border-blue-600 flex items-center justify-between gap-2 text-[11px] transition-colors cursor-pointer text-left"
+                                  >
+                                    <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-200 truncate">
+                                      <Target className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                                      <span className="truncate">
+                                        {subSmartGoals.length}{' '}
+                                        {subSmartGoals.length === 1 ? 'Objetivo SMART' : 'Objetivos SMART'}
+                                      </span>
+                                    </span>
+                                    <span className="font-mono-numbers tabular-nums font-bold text-blue-600 dark:text-blue-400 shrink-0">
+                                      {subSmartAvgPct}%
+                                    </span>
+                                  </button>
                                 )}
                               </div>
 
@@ -2448,10 +2752,10 @@ export default function App() {
           />
         )}
 
-        {/* Tab 5: Temporizador Pomodoro */}
-        {activeTab === 'pomodoro' && activeYear && (
-          <div className="space-y-6">
-            {!isPomodoroFocusMode && (
+        {/* Tab 5: Temporizador Pomodoro (Siempre montado para que no se detenga al cambiar de pestaña) */}
+        {activeYear && (
+          <div className={activeTab === 'pomodoro' ? 'space-y-6' : ''}>
+            {activeTab === 'pomodoro' && !isPomodoroFocusMode && (
               <div className="text-center max-w-lg mx-auto">
                 <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">
                   Zona de Enfoque Profundo (Pomodoro)
@@ -2475,6 +2779,10 @@ export default function App() {
                 }));
               }}
               onFocusModeChange={setIsPomodoroFocusMode}
+              isHiddenTab={activeTab !== 'pomodoro'}
+              onNavigateToPomodoro={() => setActiveTab('pomodoro')}
+              currentUser={currentUser}
+              onOpenAuthModal={() => setIsAuthModalOpen(true)}
             />
           </div>
         )}
@@ -2622,9 +2930,14 @@ export default function App() {
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
+        onFirstTimeRegister={(uid) => {
+          resetOnboardingProgressToStart();
+          markOnboardingSeenPermanently(uid);
+          setIsOnboardingTourOpen(true);
+        }}
       />
 
-      {/* Interactive Guided Onboarding Tour (First-Time User & On-Demand) */}
+      {/* Interactive Guided Onboarding Tour (First-Time User Registration & On-Demand via ? Ayuda) */}
       <InteractiveOnboardingTour
         isOpen={isOnboardingTourOpen}
         onClose={handleCloseOnboardingTour}
@@ -2636,6 +2949,9 @@ export default function App() {
           if (!selectedSubjectId && activeSubjects.length > 0) {
             setSelectedSubjectId(activeSubjects[0].id);
           }
+        }}
+        onOpenHelpGuide={() => {
+          window.dispatchEvent(new CustomEvent('studyflow:open-help-guide'));
         }}
       />
 
@@ -2651,6 +2967,9 @@ export default function App() {
         }}
         onOpenQuizzes={(subId, topIds) => handleJumpToSubjectQuizzes(subId, topIds)}
       />
+
+      {/* Indicador de Modo Offline y Revalidación SWR + IndexedDB */}
+      <OfflineIndicator />
     </div>
   );
 }

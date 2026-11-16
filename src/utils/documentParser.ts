@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import katex from 'katex';
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
 import {
@@ -807,17 +808,128 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;');
 }
 
+function escapeAttr(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '&#10;');
+}
+
+export const SUPPORTED_CODE_LANGUAGES: Array<{ id: string; label: string }> = [
+  { id: 'python', label: 'Python' },
+  { id: 'javascript', label: 'JavaScript' },
+  { id: 'typescript', label: 'TypeScript' },
+  { id: 'java', label: 'Java' },
+  { id: 'cpp', label: 'C++' },
+  { id: 'c', label: 'C' },
+  { id: 'sql', label: 'SQL' },
+  { id: 'html', label: 'HTML' },
+  { id: 'css', label: 'CSS' },
+  { id: 'bash', label: 'Bash / Terminal' },
+  { id: 'r', label: 'R' },
+  { id: 'rust', label: 'Rust' },
+  { id: 'go', label: 'Go' },
+  { id: 'pseudocodigo', label: 'Pseudocódigo' },
+  { id: 'texto', label: 'Texto plano' },
+];
+
+export function renderLatexToKatexHtml(latex: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(latex || ' ', {
+      throwOnError: false,
+      displayMode,
+      strict: false,
+    });
+  } catch {
+    return `<code class="font-mono text-xs text-rose-600">${escapeHtml(latex)}</code>`;
+  }
+}
+
+export function buildMathHtml(latex: string, displayMode: boolean): string {
+  const cleanLatex = (latex || '').trim();
+  const renderedKatex = renderLatexToKatexHtml(cleanLatex, displayMode);
+  const modeAttr = displayMode ? 'block' : 'inline';
+  if (displayMode) {
+    return `<div data-math-latex="${escapeAttr(cleanLatex)}" data-math-display="${modeAttr}" contenteditable="false" class="my-3.5 px-4 py-3 bg-indigo-50/45 border border-indigo-200/80 rounded-xl flex items-center justify-center overflow-x-auto select-none text-slate-900" title="Haz clic para editar esta fórmula matemática">${renderedKatex}</div>`;
+  }
+  return `<span data-math-latex="${escapeAttr(cleanLatex)}" data-math-display="${modeAttr}" contenteditable="false" class="inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded-md bg-indigo-50/75 border border-indigo-200/70 text-slate-900 align-baseline select-none" title="Haz clic para editar esta fórmula">${renderedKatex}</span>`;
+}
+
+export function buildCodeBlockHtml(
+  code: string,
+  language: string = 'python',
+  title?: string
+): string {
+  const safeLang = (language || 'texto').trim().toLowerCase() || 'texto';
+  const langLabel =
+    SUPPORTED_CODE_LANGUAGES.find((l) => l.id === safeLang)?.label ||
+    safeLang.toUpperCase();
+  const safeTitle = title ? title.trim() : '';
+  const blockId = `code-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  return `<div data-code-block="true" data-code-id="${blockId}" data-code-lang="${escapeAttr(safeLang)}"${
+    safeTitle ? ` data-code-title="${escapeAttr(safeTitle)}"` : ''
+  } class="my-4 rounded-xl overflow-hidden border border-slate-800 bg-slate-950 shadow-sm text-left"><div data-code-header="true" contenteditable="false" class="px-3.5 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-2 select-none"><div class="flex items-center gap-2 min-w-0"><span class="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold uppercase tracking-wider font-mono">${escapeHtml(
+    langLabel
+  )}</span>${
+    safeTitle
+      ? `<span class="text-xs text-slate-300 font-mono truncate">${escapeHtml(safeTitle)}</span>`
+      : ''
+  }</div><div class="flex items-center gap-1.5 shrink-0"><button type="button" data-code-action="edit" class="px-2 py-0.5 text-[11px] font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md cursor-pointer transition-colors">Editar</button><button type="button" data-code-action="copy" class="px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md cursor-pointer transition-colors">Copiar</button></div></div><pre class="m-0 p-4 overflow-x-auto bg-slate-950"><code data-code-content="true" spellcheck="false" class="block text-[13px] font-mono text-slate-100 leading-relaxed whitespace-pre outline-none">${escapeHtml(
+    code
+  )}</code></pre></div>`;
+}
+
 function formatInlineMarkdownToHtml(line: string): string {
-  let html = escapeHtml(line);
+  const placeholders: string[] = [];
+  const stashToken = (htmlFragment: string): string => {
+    const idx = placeholders.length;
+    placeholders.push(htmlFragment);
+    return `\u0000STASH_${idx}\u0000`;
+  };
+
+  // 1. Proteger código en línea `code` antes de procesar negrita/cursiva o fórmulas
+  let working = line.replace(/`([^`\n]+)`/g, (_, codeBody) =>
+    stashToken(
+      `<code class="px-1.5 py-0.5 bg-slate-100 border border-slate-200/80 rounded text-[12px] font-mono text-indigo-700">${escapeHtml(
+        codeBody
+      )}</code>`
+    )
+  );
+
+  // 2. Proteger fórmulas en bloque escritas en una línea $$...$$
+  working = working.replace(/\$\$([^$\n]+?)\$\$/g, (_, mathBody) =>
+    stashToken(buildMathHtml(mathBody.trim(), true))
+  );
+
+  // 3. Proteger fórmulas matemáticas en línea $...$ evitando confundir importes monetarios ($10 y $20)
+  working = working.replace(
+    /(^|[^\\$])\$([^\s$][^$\n]*?[^\s$\\]|[^\s$\\])\$(?!\d)/g,
+    (fullMatch, prefix, expr) => {
+      const trimmedExpr = String(expr || '').trim();
+      if (
+        /^\d+(?:[.,]\d+)?(?:\s|$)/.test(trimmedExpr) &&
+        !/[=+\-*/^_\\{}]/.test(trimmedExpr)
+      ) {
+        return fullMatch;
+      }
+      return `${prefix}${stashToken(buildMathHtml(trimmedExpr, false))}`;
+    }
+  );
+
+  let html = escapeHtml(working);
   // Bold **text**
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   // Italic *text*
   html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  // Inline code `code`
-  html = html.replace(
-    /`([^`]+)`/g,
-    '<code class="px-1.5 py-0.5 bg-slate-100 rounded text-xs font-mono text-indigo-700">$1</code>'
-  );
+
+  // Restaurar fragmentos protegidos (código en línea y fórmulas KaTeX)
+  html = html.replace(/\u0000STASH_(\d+)\u0000/g, (_, idxStr) => {
+    const idx = parseInt(idxStr, 10);
+    return placeholders[idx] ?? '';
+  });
+
   return html;
 }
 
@@ -893,6 +1005,63 @@ export function convertMarkdownAndImagesToRichHtml(
         htmlBlocks.push('</ul>');
         inList = false;
       }
+      continue;
+    }
+
+    // Check fenced code blocks ```lang ... ```
+    if (trimmed.startsWith('```')) {
+      if (inList) {
+        htmlBlocks.push('</ul>');
+        inList = false;
+      }
+      const lang = trimmed.slice(3).trim() || 'texto';
+      const codeLines: string[] = [];
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() !== '```') {
+        codeLines.push(lines[j]);
+        j++;
+      }
+      htmlBlocks.push(buildCodeBlockHtml(codeLines.join('\n'), lang));
+      i = j;
+      continue;
+    }
+
+    // Check single-line display math $$ ... $$
+    const singleLineMathMatch = trimmed.match(/^\$\$(.+)\$\$$/);
+    if (singleLineMathMatch) {
+      if (inList) {
+        htmlBlocks.push('</ul>');
+        inList = false;
+      }
+      htmlBlocks.push(buildMathHtml(singleLineMathMatch[1].trim(), true));
+      continue;
+    }
+
+    // Check multi-line display math $$ ... $$
+    if (trimmed.startsWith('$$')) {
+      if (inList) {
+        htmlBlocks.push('</ul>');
+        inList = false;
+      }
+      const mathLines: string[] = [];
+      const afterOpen = trimmed.slice(2).trim();
+      if (afterOpen) mathLines.push(afterOpen);
+      let j = i + 1;
+      while (j < lines.length) {
+        const nextTrim = lines[j].trim();
+        if (nextTrim === '$$') {
+          break;
+        }
+        if (nextTrim.endsWith('$$')) {
+          const beforeClose = nextTrim.slice(0, -2).trim();
+          if (beforeClose) mathLines.push(beforeClose);
+          break;
+        }
+        mathLines.push(lines[j]);
+        j++;
+      }
+      htmlBlocks.push(buildMathHtml(mathLines.join('\n').trim(), true));
+      i = j;
       continue;
     }
 
@@ -1013,10 +1182,48 @@ export function convertRichHtmlToPlainText(html: string): string {
         return '';
       }
 
+      if (el.getAttribute('data-code-header') === 'true') {
+        return '';
+      }
+
+      if (el.hasAttribute('data-math-latex')) {
+        const latex = el.getAttribute('data-math-latex') || '';
+        const isBlock = el.getAttribute('data-math-display') === 'block';
+        if (isBlock) {
+          lines.push(`\n$$\n${latex}\n$$\n`);
+          return '';
+        }
+        return `$${latex}$`;
+      }
+
+      if (el.getAttribute('data-code-block') === 'true') {
+        const lang = el.getAttribute('data-code-lang') || '';
+        const codeEl = el.querySelector('[data-code-content="true"]') || el.querySelector('code') || el;
+        const codeText = (codeEl.textContent || '')
+          .replace(/\r\n/g, '\n')
+          .replace(/\u00a0/g, ' ')
+          .replace(/\n+$/, '');
+        lines.push(`\n\`\`\`${lang}\n${codeText}\n\`\`\`\n`);
+        return '';
+      }
+
+      if (tag === 'pre') {
+        const codeText = (el.textContent || '')
+          .replace(/\r\n/g, '\n')
+          .replace(/\u00a0/g, ' ')
+          .replace(/\n+$/, '');
+        lines.push(`\n\`\`\`\n${codeText}\n\`\`\`\n`);
+        return '';
+      }
+
       let inner = '';
       el.childNodes.forEach((child) => {
         inner += walk(child);
       });
+
+      if (tag === 'code') {
+        return `\`${inner}\``;
+      }
 
       if (tag === 'h1') {
         lines.push(`\n# ${inner.trim()}\n`);

@@ -14,6 +14,7 @@ import {
   Repeat,
   HelpCircle,
   FileCheck2,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   Subject,
@@ -26,6 +27,8 @@ import {
   collectCalendarEventsForExport,
   generateIcsFileContent,
   downloadIcsFile,
+  generateCsvFileContent,
+  downloadCsvFile,
 } from '../services/icsExportService';
 import { formatReadableDate, getTodayLocalDateStr } from '../utils/dateUtils';
 
@@ -37,6 +40,8 @@ interface IcsCalendarExportModalProps {
   blockedEvents: BlockedTimeEvent[];
   precomputedStudySessions?: ScheduledStudySession[];
   initialSubjectFilterId?: string;
+  initialHorizonDays?: number;
+  initialWeekRange?: { startDate: string; endDate: string; label?: string } | null;
 }
 
 export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
@@ -47,6 +52,8 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
   blockedEvents,
   precomputedStudySessions,
   initialSubjectFilterId = 'all',
+  initialHorizonDays = 7,
+  initialWeekRange = null,
 }) => {
   const [options, setOptions] = useState<IcsExportOptions>({
     includeStudySessions: true,
@@ -55,13 +62,28 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
     includeBlockedEvents: true,
     includeExams: true,
     includeTasks: true,
-    horizonDays: 60,
+    horizonDays: initialHorizonDays,
+    startDateStr: initialWeekRange?.startDate,
+    endDateStr: initialWeekRange?.endDate,
     useRRuleForRecurring: true,
     includeAlarms: true,
     subjectFilterId: initialSubjectFilterId,
   });
 
-  const [activeGuideTab, setActiveGuideTab] = useState<'google' | 'apple' | null>(null);
+  // Sincronizar rango semanal cuando se abre desde la vista semanal o con un rango distinto
+  React.useEffect(() => {
+    if (!isOpen) return;
+    setOptions((prev) => ({
+      ...prev,
+      horizonDays: initialHorizonDays,
+      startDateStr: initialWeekRange?.startDate,
+      endDateStr: initialWeekRange?.endDate,
+      subjectFilterId: initialSubjectFilterId,
+    }));
+    setExportedSuccessMsg(null);
+  }, [isOpen, initialHorizonDays, initialWeekRange?.startDate, initialWeekRange?.endDate, initialSubjectFilterId]);
+
+  const [activeGuideTab, setActiveGuideTab] = useState<'google' | 'outlook' | 'apple' | null>(null);
   const [exportedSuccessMsg, setExportedSuccessMsg] = useState<string | null>(null);
 
   const previewEvents = useMemo(() => {
@@ -102,14 +124,43 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
 
   const handleDownloadIcs = () => {
     if (previewEvents.length === 0) return;
+    const isWeekly = options.horizonDays <= 7 || Boolean(options.endDateStr);
     const content = generateIcsFileContent(
       previewEvents,
-      'StudyFlow · Plan de Estudio, Hábitos y Exámenes'
+      isWeekly
+        ? 'StudyFlow · Plan de Estudio Semanal'
+        : 'StudyFlow · Plan de Estudio, Hábitos y Exámenes'
     );
-    const filename = `studyflow-calendario-${getTodayLocalDateStr()}.ics`;
+    const filename = isWeekly
+      ? `studyflow-plan-semanal-${options.startDateStr || getTodayLocalDateStr()}.ics`
+      : `studyflow-calendario-${getTodayLocalDateStr()}.ics`;
     downloadIcsFile(content, filename);
     setExportedSuccessMsg(
-      `¡Archivo "${filename}" generado con ${previewEvents.length} eventos! Ya puedes importarlo en Google Calendar o Apple Calendar.`
+      `¡Archivo iCal "${filename}" generado con ${previewEvents.length} eventos! Ya puedes importarlo en Google Calendar, Outlook o Apple Calendar.`
+    );
+  };
+
+  const handleDownloadCsv = () => {
+    // Al exportar a CSV expandimos cualquier hábito/horario recurrente en filas individuales dentro del rango seleccionado
+    const expandedEvents = collectCalendarEventsForExport(
+      subjects,
+      preferences,
+      blockedEvents,
+      {
+        ...options,
+        useRRuleForRecurring: false,
+      },
+      precomputedStudySessions
+    );
+    if (expandedEvents.length === 0) return;
+    const isWeekly = options.horizonDays <= 7 || Boolean(options.endDateStr);
+    const csvContent = generateCsvFileContent(expandedEvents);
+    const filename = isWeekly
+      ? `studyflow-plan-semanal-${options.startDateStr || getTodayLocalDateStr()}.csv`
+      : `studyflow-calendario-${getTodayLocalDateStr()}.csv`;
+    downloadCsvFile(csvContent, filename);
+    setExportedSuccessMsg(
+      `¡Archivo CSV "${filename}" descargado con ${expandedEvents.length} filas! Compatible con Google Calendar, Microsoft Outlook y Excel.`
     );
   };
 
@@ -159,10 +210,10 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-extrabold tracking-tight">
-                Sincronizar Plan con Google Calendar / Apple Calendar (.ICS)
+                Exportar Plan de Estudio Semanal y Calendario (.ICS / .CSV)
               </h2>
               <p className="text-xs text-blue-100">
-                Exporta tus bloques de estudio, hábitos, horas bloqueadas y exámenes en estándar universal iCalendar
+                Integra tu plan semanal, repasos, hábitos y exámenes en Google Calendar, Outlook o Apple Calendar
               </p>
             </div>
           </div>
@@ -183,7 +234,7 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
           <div>
             <div className="flex items-center justify-between mb-2.5">
               <label className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                1. Selecciona qué eventos bloqueados incluir
+                1. Selecciona qué eventos incluir en el calendario
               </label>
               <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
                 {previewEvents.length} eventos listos para exportar
@@ -280,28 +331,61 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
                 <span>Horizonte de exportación</span>
               </label>
               <div className="flex flex-wrap gap-1.5">
-                {[
-                  { days: 30, label: '30 días' },
-                  { days: 60, label: '60 días' },
-                  { days: 90, label: '90 días' },
-                  { days: 180, label: 'Semestre (180d)' },
-                ].map((h) => (
+                {initialWeekRange && (
                   <button
-                    key={h.days}
                     type="button"
                     onClick={() => {
-                      setOptions((prev) => ({ ...prev, horizonDays: h.days }));
+                      setOptions((prev) => ({
+                        ...prev,
+                        horizonDays: 7,
+                        startDateStr: initialWeekRange.startDate,
+                        endDateStr: initialWeekRange.endDate,
+                      }));
                       setExportedSuccessMsg(null);
                     }}
                     className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                      options.horizonDays === h.days
-                        ? 'bg-indigo-600 text-white shadow-2xs'
-                        : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                      options.startDateStr === initialWeekRange.startDate &&
+                      options.endDateStr === initialWeekRange.endDate
+                        ? 'bg-emerald-600 text-white shadow-2xs'
+                        : 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 hover:border-emerald-500'
                     }`}
                   >
-                    {h.label}
+                    📅 {initialWeekRange.label || 'Semana visible (7d)'}
                   </button>
-                ))}
+                )}
+                {[
+                  { days: 7, label: 'Plan Semanal (7d)' },
+                  { days: 14, label: '14 días' },
+                  { days: 30, label: '30 días' },
+                  { days: 60, label: '60 días' },
+                  { days: 180, label: 'Semestre (180d)' },
+                ].map((h) => {
+                  const isExactWeekRange =
+                    Boolean(options.startDateStr) && Boolean(options.endDateStr);
+                  const active = !isExactWeekRange && options.horizonDays === h.days;
+                  return (
+                    <button
+                      key={h.days}
+                      type="button"
+                      onClick={() => {
+                        setOptions((prev) => ({
+                          ...prev,
+                          horizonDays: h.days,
+                          startDateStr: undefined,
+                          endDateStr: undefined,
+                        }));
+                        setExportedSuccessMsg(null);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                        active
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                      }`}
+                    >
+                      {h.label}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -392,7 +476,7 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
               <span className="text-xs font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 2. Vista previa de eventos a exportar ({previewEvents.length})
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() =>
@@ -405,7 +489,21 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
                   }`}
                 >
                   <HelpCircle className="w-3 h-3" />
-                  <span>Cómo importar en Google Calendar</span>
+                  <span>Google Calendar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setActiveGuideTab(activeGuideTab === 'outlook' ? null : 'outlook')
+                  }
+                  className={`text-[11px] font-bold px-2.5 py-1 rounded-lg border transition-colors cursor-pointer flex items-center gap-1 ${
+                    activeGuideTab === 'outlook'
+                      ? 'bg-cyan-600 text-white border-cyan-600'
+                      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  <HelpCircle className="w-3 h-3" />
+                  <span>Outlook</span>
                 </button>
                 <button
                   type="button"
@@ -426,11 +524,22 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
 
             {activeGuideTab === 'google' && (
               <div className="p-3.5 rounded-2xl bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-xs text-blue-950 dark:text-blue-200 space-y-1">
-                <p className="font-extrabold">Pasos para Google Calendar:</p>
+                <p className="font-extrabold">Pasos para Google Calendar (.ICS o .CSV):</p>
                 <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
-                  <li>Haz clic en <strong>«Descargar Archivo .ICS»</strong> abajo.</li>
-                  <li>Abre <strong>Google Calendar</strong> en tu navegador (icono de engranaje ⚙️ → <em>Configuración</em>).</li>
-                  <li>En el menú izquierdo selecciona <strong>Importar y exportar</strong> → elige el archivo <code>.ics</code> descargado y pulsa <strong>Importar</strong>.</li>
+                  <li>Haz clic en <strong>«Descargar iCal (.ICS)»</strong> o <strong>«Descargar CSV (.CSV)»</strong> abajo.</li>
+                  <li>Abre <strong>Google Calendar</strong> en tu navegador (icono ⚙️ → <em>Configuración</em>).</li>
+                  <li>En el menú izquierdo selecciona <strong>Importar y exportar</strong> → elige el archivo <code>.ics</code> o <code>.csv</code> y pulsa <strong>Importar</strong>.</li>
+                </ol>
+              </div>
+            )}
+
+            {activeGuideTab === 'outlook' && (
+              <div className="p-3.5 rounded-2xl bg-cyan-50/80 dark:bg-cyan-950/40 border border-cyan-200 dark:border-cyan-800 text-xs text-cyan-950 dark:text-cyan-200 space-y-1">
+                <p className="font-extrabold">Pasos para Microsoft Outlook (.ICS o .CSV):</p>
+                <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
+                  <li>Descarga el archivo <strong>.ICS</strong> (recomendado para bloques y recordatorios) o <strong>.CSV</strong>.</li>
+                  <li>En <strong>Outlook Web</strong>: ve a <em>Calendario</em> → <strong>Agregar calendario</strong> → <strong>Cargar desde archivo</strong> y sube el <code>.ics</code>.</li>
+                  <li>En <strong>Outlook de escritorio</strong>: ve a <em>Archivo → Abrir y exportar → Importar o exportar</em> y selecciona el archivo <code>.ics</code> o <code>.csv</code>.</li>
                 </ol>
               </div>
             )}
@@ -439,7 +548,7 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
               <div className="p-3.5 rounded-2xl bg-slate-100 dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 space-y-1">
                 <p className="font-extrabold">Pasos para Apple Calendar (Mac / iPhone / iPad):</p>
                 <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
-                  <li>Haz clic en <strong>«Descargar Archivo .ICS»</strong> abajo.</li>
+                  <li>Haz clic en <strong>«Descargar iCal (.ICS)»</strong> abajo.</li>
                   <li>En <strong>Mac</strong>: haz doble clic directamente sobre el archivo <code>.ics</code> descargado y elige en qué calendario añadir los eventos.</li>
                   <li>En <strong>iPhone / iPad</strong>: abre el archivo descargado desde <em>Archivos</em> o Safari y pulsa <strong>«Añadir todos»</strong>.</li>
                 </ol>
@@ -509,25 +618,36 @@ export const IcsCalendarExportModal: React.FC<IcsCalendarExportModalProps> = ({
         {/* Pie del modal */}
         <div className="px-6 py-4 bg-slate-50 dark:bg-slate-800/60 border-t border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-slate-500 dark:text-slate-400">
-            Formato estándar <strong>RFC 5545 (.ics)</strong> compatible con Google Calendar, Apple Calendar y Outlook.
+            Compatible con <strong>Google Calendar, Outlook y Apple Calendar</strong> en formato <strong>.ICS</strong> y <strong>.CSV</strong>.
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-bold text-xs transition-colors cursor-pointer"
+              className="px-3.5 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-bold text-xs transition-colors cursor-pointer"
             >
               Cerrar
             </button>
             <button
               type="button"
               disabled={previewEvents.length === 0}
+              onClick={handleDownloadCsv}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold text-xs shadow-sm transition-all cursor-pointer"
+              title="Descargar tabla de eventos en formato CSV para Google Calendar, Outlook o Excel"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Descargar CSV (.CSV)</span>
+            </button>
+            <button
+              type="button"
+              disabled={previewEvents.length === 0}
               onClick={handleDownloadIcs}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 text-white font-extrabold text-xs shadow-md shadow-indigo-500/20 transition-all cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 disabled:opacity-50 text-white font-extrabold text-xs shadow-md shadow-indigo-500/20 transition-all cursor-pointer"
+              title="Descargar calendario iCal estándar (.ICS) para Google Calendar, Outlook y Apple Calendar"
             >
               <Download className="w-4 h-4" />
-              <span>Descargar Archivo .ICS ({previewEvents.length})</span>
+              <span>Descargar iCal (.ICS) ({previewEvents.length})</span>
             </button>
           </div>
         </div>

@@ -84,6 +84,214 @@
         }
       },
       "required": ["id", "userId", "updatedAt"]
+    },
+    "PomodoroRoom": {
+      "title": "PomodoroRoom",
+      "description": "Synchronized virtual Pomodoro study room allowing multiple authenticated users to study together in real time",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique room invite code and document ID",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the virtual study room",
+          "maxLength": 80
+        },
+        "subjectLabel": {
+          "type": "string",
+          "description": "Optional subject or study goal label for the room",
+          "maxLength": 100
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the room creator/host",
+          "maxLength": 128
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Public display name of the room host",
+          "maxLength": 80
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether the room appears in the open rooms directory or is joinable only by code"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["focus", "shortBreak", "longBreak"],
+          "description": "Current synchronized Pomodoro phase"
+        },
+        "isRunning": {
+          "type": "boolean",
+          "description": "Whether the shared timer is currently ticking"
+        },
+        "focusMinutes": {
+          "type": "number",
+          "description": "Configured focus duration in minutes"
+        },
+        "shortBreakMinutes": {
+          "type": "number",
+          "description": "Configured short break duration in minutes"
+        },
+        "longBreakMinutes": {
+          "type": "number",
+          "description": "Configured long break duration in minutes"
+        },
+        "pausedRemainingSeconds": {
+          "type": "number",
+          "description": "Remaining seconds when the timer is paused"
+        },
+        "targetEndTimeMs": {
+          "type": "number",
+          "description": "UTC epoch timestamp in milliseconds when the running phase finishes (0 when paused)"
+        },
+        "cycleCount": {
+          "type": "number",
+          "description": "Completed focus cycles in this room session"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "closed"],
+          "description": "Lifecycle state of the study room"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation timestamp",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO last-update timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "subjectLabel",
+        "hostUid",
+        "hostName",
+        "isPublic",
+        "mode",
+        "isRunning",
+        "focusMinutes",
+        "shortBreakMinutes",
+        "longBreakMinutes",
+        "pausedRemainingSeconds",
+        "targetEndTimeMs",
+        "cycleCount",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PomodoroRoomParticipant": {
+      "title": "PomodoroRoomParticipant",
+      "description": "Active student participating in a synchronized Pomodoro study room",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Participant document ID matching userId",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "description": "Parent Pomodoro room ID",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Participant Firebase Auth UID",
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Participant display alias (non-PII)",
+          "maxLength": 80
+        },
+        "currentTask": {
+          "type": "string",
+          "description": "Subject or topic the participant is currently studying",
+          "maxLength": 120
+        },
+        "focusState": {
+          "type": "string",
+          "enum": ["studying", "break", "ready"],
+          "description": "Participant current state"
+        },
+        "joinedAt": {
+          "type": "string",
+          "description": "ISO join timestamp",
+          "maxLength": 64
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "description": "ISO heartbeat timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "userId",
+        "displayName",
+        "currentTask",
+        "focusState",
+        "joinedAt",
+        "lastActiveAt"
+      ]
+    },
+    "PomodoroRoomNote": {
+      "title": "PomodoroRoomNote",
+      "description": "Lightweight motivation note or milestone check-in inside a synchronized study room",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message document ID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "description": "Parent room ID",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Author Firebase Auth UID",
+          "maxLength": 128
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Author display name",
+          "maxLength": 80
+        },
+        "text": {
+          "type": "string",
+          "description": "Short encouragement or check-in message",
+          "maxLength": 240
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["message", "cheer"],
+          "description": "Note type"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO creation timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "roomId", "userId", "authorName", "text", "kind", "createdAt"]
     }
   },
   "firestore": {
@@ -94,6 +302,18 @@
     "/users/{userId}/studyData/{docId}": {
       "schema": "UserStudyData",
       "description": "User study data state for persistent synchronization across devices"
+    },
+    "/pomodoroRooms/{roomId}": {
+      "schema": "PomodoroRoom",
+      "description": "Synchronized virtual Pomodoro study rooms shared across authenticated participants"
+    },
+    "/pomodoroRooms/{roomId}/participants/{participantId}": {
+      "schema": "PomodoroRoomParticipant",
+      "description": "Active participants studying inside a specific Pomodoro room"
+    },
+    "/pomodoroRooms/{roomId}/messages/{messageId}": {
+      "schema": "PomodoroRoomNote",
+      "description": "Motivation notes and quick check-ins inside a Pomodoro room"
     }
   }
 }

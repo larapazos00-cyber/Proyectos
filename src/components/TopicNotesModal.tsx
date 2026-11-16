@@ -26,6 +26,7 @@ import {
   FolderOpen,
   Mic,
   MicOff,
+  GitBranch,
 } from 'lucide-react';
 import {
   Topic,
@@ -35,6 +36,8 @@ import {
   DocumentImageAsset,
   DocumentComment,
   EditableKeyPoint,
+  DifficultyLevel,
+  Mindmap,
 } from '../types';
 import { pdfCornellExportService } from '../services/pdfCornellExportService';
 import { schedulerService } from '../services/schedulerService';
@@ -48,6 +51,100 @@ import {
 } from '../utils/documentParser';
 import { CornellPdfExportModal } from './CornellPdfExportModal';
 import { RichEditableDocumentWorkspace } from './RichEditableDocumentWorkspace';
+import { D3MindMapCanvas } from './D3MindMapCanvas';
+
+function extractLocalTermsAndCuesFromText(
+  rawText: string,
+  fallbackTitle: string
+): {
+  keyTerms: Array<{ term: string; definition: string; semanticLevel?: string; parentConcept?: string }>;
+  cues: string[];
+} {
+  const lines = (rawText || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const keyTerms: Array<{ term: string; definition: string; semanticLevel?: string; parentConcept?: string }> = [];
+  const seenTerms = new Set<string>();
+  const cues: string[] = [];
+  const seenCues = new Set<string>();
+  let currentMacro = fallbackTitle || 'Tema Principal';
+
+  const pushTerm = (t: string, d: string, semanticLevel?: string, parentConcept?: string) => {
+    const cleanT = t.replace(/^[-•*0-9.)#>\s]+/, '').replace(/\*+/g, '').replace(/:$/, '').trim();
+    const cleanD = d.replace(/^[-•*:\s]+/, '').replace(/\*+/g, '').trim();
+    if (cleanT.length < 2 || cleanT.length > 80 || cleanD.length < 8) return;
+    const low = cleanT.toLowerCase();
+    if (seenTerms.has(low)) return;
+    seenTerms.add(low);
+    const inferredLevel =
+      semanticLevel ||
+      (/causa|produce|provoca|proceso|etapa|fase|regula|mecanismo/i.test(cleanD)
+        ? 'Nivel 2 · Mecanismo/Proceso'
+        : 'Nivel 3 · Micro-concepto/Detalle');
+    keyTerms.push({
+      term: cleanT,
+      definition: cleanD,
+      semanticLevel: inferredLevel,
+      parentConcept: parentConcept || currentMacro,
+    });
+  };
+
+  const pushCue = (q: string) => {
+    const cleanQ = q.trim();
+    if (cleanQ.length < 10) return;
+    const low = cleanQ.toLowerCase();
+    if (seenCues.has(low)) return;
+    seenCues.add(low);
+    cues.push(cleanQ);
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^#{1,4}\s+/.test(line)) {
+      const heading = line.replace(/^#{1,4}\s+/, '').replace(/\*+/g, '').trim();
+      const next = lines[i + 1] || '';
+      if (heading.length > 2) {
+        currentMacro = heading;
+      }
+      if (heading.length > 2 && next && !/^#{1,4}\s+/.test(next) && next.length > 15) {
+        pushTerm(heading, next, 'Nivel 1 · Macro-concepto', fallbackTitle);
+      }
+      if (heading.length > 3 && !heading.toLowerCase().includes(fallbackTitle.toLowerCase())) {
+        pushCue(`[Macro] ¿Qué conceptos subordinados y fundamentos abarca "${heading}"?`);
+      }
+      continue;
+    }
+
+    const clean = line.replace(/^[-•*0-9.)\s]+/, '').trim();
+    const colonIdx = clean.indexOf(':');
+    if (colonIdx > 2 && colonIdx < 65 && clean.length > colonIdx + 10) {
+      const candidateTerm = clean.slice(0, colonIdx).replace(/\*+/g, '').trim();
+      const candidateDef = clean.slice(colonIdx + 1).trim();
+      if (candidateTerm.split(/\s+/).length <= 8) {
+        const isMeso = /causa|produce|provoca|proceso|etapa|fase|regula|mecanismo|función/i.test(
+          candidateDef
+        );
+        pushTerm(
+          candidateTerm,
+          candidateDef,
+          isMeso ? 'Nivel 2 · Mecanismo/Proceso' : 'Nivel 3 · Micro-concepto/Detalle',
+          currentMacro
+        );
+        pushCue(
+          isMeso
+            ? `[Meso] ¿Qué mecanismo o relación causal explica "${candidateTerm}" en los apuntes?`
+            : `[Micro] ¿Qué es "${candidateTerm}" y cómo se define exactamente en los apuntes?`
+        );
+      }
+    }
+  }
+
+  return {
+    keyTerms: keyTerms.slice(0, 14),
+    cues: cues.slice(0, 12),
+  };
+}
 
 interface TopicNotesModalProps {
   isOpen: boolean;
@@ -56,14 +153,19 @@ interface TopicNotesModalProps {
   subjectName: string;
   initialDocumentId?: string;
   initialOpenKeyPoints?: boolean;
+  initialTriggerFormatAI?: boolean;
   onOpenReadingMode?: () => void;
+  onChangeTopicDifficulty?: (topicId: string, difficulty: DifficultyLevel) => void;
   onAiError?: (actionTitle: string, errorMessage: string) => void;
+  initialMindmap?: Mindmap | null;
+  onSaveMindmap?: (mindmap: Mindmap) => void;
   onSaveTopicNotes: (
     topicId: string,
     data: {
       notes: string;
       cues: string[];
       summary: string;
+      difficulty?: DifficultyLevel;
       attachedFiles?: AttachedTopicFile[];
       pageCount?: number;
       richGeneralNotes?: string;
@@ -81,13 +183,40 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   subjectName,
   initialDocumentId,
   initialOpenKeyPoints = false,
+  initialTriggerFormatAI = false,
   onOpenReadingMode,
+  onChangeTopicDifficulty,
   onAiError,
+  initialMindmap = null,
+  onSaveMindmap,
   onSaveTopicNotes,
 }) => {
   const [activeTab, setActiveTab] = useState<'editor' | 'cornell_ia' | 'import'>('editor');
   const [noteFormat, setNoteFormat] = useState<'free' | 'cornell'>('free'); // Página de escritura de apuntes libre por defecto
-  const [cornellKeyTerms, setCornellKeyTerms] = useState<Array<{ term: string; definition: string }>>([]);
+  const [isFreeReadingMode, setIsFreeReadingMode] = useState<boolean>(false);
+  const [topicDifficulty, setTopicDifficulty] = useState<DifficultyLevel>(
+    topic?.difficulty || 'Intermedio'
+  );
+  const [externalFormatVersion, setExternalFormatVersion] = useState<number>(0);
+  const [cornellKeyTerms, setCornellKeyTerms] = useState<
+    Array<{ term: string; definition: string; semanticLevel?: string; parentConcept?: string }>
+  >(() => {
+    if (topic?.keyPoints && topic.keyPoints.length > 0) {
+      return topic.keyPoints.map((kp) => ({
+        term: kp.title,
+        definition: kp.detail,
+        semanticLevel: kp.semanticLevel || 'Nivel 2 · Mecanismo/Proceso',
+        parentConcept: kp.parentConcept,
+      }));
+    }
+    const initialSource = topic?.notes || topic?.generalNotes || '';
+    if (initialSource.trim().length > 30) {
+      return extractLocalTermsAndCuesFromText(initialSource, topic?.title || '').keyTerms;
+    }
+    return [];
+  });
+  const [newKeyTermName, setNewKeyTermName] = useState<string>('');
+  const [newKeyTermDef, setNewKeyTermDef] = useState<string>('');
   const [isActiveRecallMask, setIsActiveRecallMask] = useState<boolean>(false);
   const [notes, setNotes] = useState<string>(
     topic?.notes || topic?.generalNotes || topic?.description || ''
@@ -109,13 +238,16 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     topic?.keyPoints || []
   );
 
-  const [cues, setCues] = useState<string[]>(
-    topic?.cues && topic.cues.length > 0
-      ? topic.cues
-      : topic?.subtopics && topic.subtopics.length > 0
-      ? topic.subtopics.map((st) => `¿En qué consiste ${st}?`)
-      : ['¿Cuál es la definición fundamental?', '¿Qué aplicaciones prácticas tiene?']
-  );
+  const [cues, setCues] = useState<string[]>(() => {
+    if (topic?.cues && topic.cues.length > 0) return topic.cues;
+    const initialSource = topic?.notes || topic?.generalNotes || '';
+    const extracted = extractLocalTermsAndCuesFromText(initialSource, topic?.title || '').cues;
+    if (extracted.length > 0) return extracted;
+    if (topic?.subtopics && topic.subtopics.length > 0) {
+      return topic.subtopics.map((st) => `¿En qué consiste ${st}?`);
+    }
+    return ['¿Cuál es la definición fundamental?', '¿Qué aplicaciones prácticas tiene?'];
+  });
   const [summary, setSummary] = useState<string>(topic?.summary || '');
   const [newCue, setNewCue] = useState<string>('');
 
@@ -169,6 +301,11 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   const [actionBannerNotice, setActionBannerNotice] = useState<string | null>(null);
   const [isPdfExportModalOpen, setIsPdfExportModalOpen] = useState<boolean>(false);
   const [pdfNotice, setPdfNotice] = useState<string | null>(null);
+  const [showMindmapPanel, setShowMindmapPanel] = useState<boolean>(false);
+  const [isGeneratingMindmapModal, setIsGeneratingMindmapModal] = useState<boolean>(false);
+  const [generatedModalMindmap, setGeneratedModalMindmap] = useState<Mindmap | null>(
+    initialMindmap
+  );
 
   const lastSyncedTopicIdRef = React.useRef<string>(topic?.id || '');
 
@@ -220,7 +357,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     if (initialOpenKeyPoints) {
       setShowKeyPointsPanel(true);
     }
-  }, [topic?.id, topic?.attachedFiles?.length, initialDocumentId, initialOpenKeyPoints]);
+    if (topic.difficulty) {
+      setTopicDifficulty(topic.difficulty);
+    }
+  }, [topic?.id, topic?.attachedFiles?.length, initialDocumentId, initialOpenKeyPoints, topic?.difficulty]);
 
   // Total pages from attached files included in organization
   const organizedFilesPageCount = useMemo(
@@ -239,12 +379,12 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   // Estimated study hours based on detected pages & topic difficulty
   const estimatedStudyHours = useMemo(() => {
     return schedulerService.calculateTopicTime(
-      topic?.difficulty || 'Media',
+      topicDifficulty || topic?.difficulty || 'Media',
       topic?.subtopics ? topic.subtopics.length : 0,
       notes.length,
       effectivePageCount > 0 ? effectivePageCount : undefined
     );
-  }, [topic?.difficulty, topic?.subtopics, notes.length, effectivePageCount]);
+  }, [topicDifficulty, topic?.difficulty, topic?.subtopics, notes.length, effectivePageCount]);
 
   const activeAttachedFile = useMemo(
     () => attachedFiles.find((f) => f.id === activeEditingDocId) || null,
@@ -275,38 +415,91 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   // Current text shown in the Free-Writing Notes editor
   const currentEditorText = activeAttachedFile ? activeAttachedFile.content : notes;
 
-  // Resuelve el texto efectivo más completo disponible (documento activo, HTML rico, apuntes generales o temario)
-  const getEffectiveSourceText = (): string => {
-    const candidates: string[] = [];
+  // Cambiar la dificultad del tema directamente desde el modal de apuntes
+  const handleSelectDifficulty = (newDiff: DifficultyLevel) => {
+    setTopicDifficulty(newDiff);
+    if (onChangeTopicDifficulty) {
+      onChangeTopicDifficulty(topic.id, newDiff);
+    }
+    onSaveTopicNotes(topic.id, {
+      notes,
+      cues,
+      summary,
+      difficulty: newDiff,
+      attachedFiles,
+      pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
+      richGeneralNotes,
+      generalImages,
+      generalComments,
+      keyPoints: activeEditableKeyPoints,
+    });
+    showTransientNotice(`Dificultad del tema actualizada a ${newDiff} (~${schedulerService.calculateTopicTime(
+      newDiff,
+      topic.subtopics ? topic.subtopics.length : 0,
+      notes.length,
+      effectivePageCount > 0 ? effectivePageCount : undefined
+    )}h estimadas).`);
+  };
+
+  // Resuelve el texto efectivo más completo disponible (combinando apuntes actuales + documentos adjuntos para no perder información)
+  const getEffectiveSourceText = (onlyActiveEditor = false): string => {
+    if (onlyActiveEditor) {
+      if (activeAttachedFile) {
+        const activeDocText =
+          activeAttachedFile.content?.trim() ||
+          (activeAttachedFile.richHtmlContent
+            ? convertRichHtmlToPlainText(activeAttachedFile.richHtmlContent).trim()
+            : '') ||
+          activeAttachedFile.rawExtractedText?.trim() ||
+          '';
+        if (activeDocText) return activeDocText;
+      } else {
+        const activeMainText =
+          notes?.trim() ||
+          (richGeneralNotes ? convertRichHtmlToPlainText(richGeneralNotes).trim() : '') ||
+          '';
+        if (activeMainText) return activeMainText;
+      }
+    }
+
+    const blocks: string[] = [];
+    const seenBlocks = new Set<string>();
+    const pushUniqueBlock = (txt: string) => {
+      const clean = (txt || '').trim();
+      if (!clean) return;
+      const sig = clean.slice(0, 120).toLowerCase();
+      if (seenBlocks.has(sig)) return;
+      seenBlocks.add(sig);
+      blocks.push(clean);
+    };
+
     if (activeAttachedFile) {
-      if (activeAttachedFile.content?.trim()) candidates.push(activeAttachedFile.content.trim());
-      if (activeAttachedFile.rawExtractedText?.trim()) {
-        candidates.push(activeAttachedFile.rawExtractedText.trim());
-      }
-      if (activeAttachedFile.richHtmlContent?.trim()) {
-        const plainFromRich = convertRichHtmlToPlainText(activeAttachedFile.richHtmlContent).trim();
-        if (plainFromRich) candidates.push(plainFromRich);
-      }
-    }
-    if (notes?.trim()) candidates.push(notes.trim());
-    if (richGeneralNotes?.trim()) {
-      const plainGeneral = convertRichHtmlToPlainText(richGeneralNotes).trim();
-      if (plainGeneral) candidates.push(plainGeneral);
-    }
-    for (const f of attachedFiles) {
-      if (f.content?.trim()) candidates.push(f.content.trim());
-      else if (f.rawExtractedText?.trim()) candidates.push(f.rawExtractedText.trim());
-    }
-    if (topic.notes?.trim()) candidates.push(topic.notes.trim());
-    if (topic.generalNotes?.trim()) candidates.push(topic.generalNotes.trim());
-    if (topic.description?.trim()) candidates.push(topic.description.trim());
-    if (topic.subtopics && topic.subtopics.length > 0) {
-      candidates.push(
-        `Tema: ${topic.title}\nSubtemas:\n${topic.subtopics.map((s) => `- ${s}`).join('\n')}`
+      pushUniqueBlock(
+        activeAttachedFile.content ||
+          (activeAttachedFile.richHtmlContent
+            ? convertRichHtmlToPlainText(activeAttachedFile.richHtmlContent)
+            : '') ||
+          activeAttachedFile.rawExtractedText ||
+          ''
       );
     }
-    const longest = candidates.sort((a, b) => b.length - a.length)[0];
-    return (longest || topic.title || '').trim();
+    pushUniqueBlock(
+      notes || (richGeneralNotes ? convertRichHtmlToPlainText(richGeneralNotes) : '')
+    );
+    for (const f of attachedFiles) {
+      pushUniqueBlock(f.content || f.rawExtractedText || '');
+    }
+    pushUniqueBlock(topic.notes || '');
+    pushUniqueBlock(topic.generalNotes || '');
+    if (blocks.length === 0) {
+      pushUniqueBlock(topic.description || '');
+      if (topic.subtopics && topic.subtopics.length > 0) {
+        pushUniqueBlock(
+          `Tema: ${topic.title}\nSubtemas:\n${topic.subtopics.map((s) => `- ${s}`).join('\n')}`
+        );
+      }
+    }
+    return (blocks.join('\n\n') || topic.title || '').trim();
   };
 
   const handleGenerateKeyPointsFromDocumentWithAI = async () => {
@@ -344,6 +537,14 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           title: kp.title || `Punto clave ${idx + 1}`,
           detail: kp.detail || '',
           category: kp.category || 'Concepto Clave',
+          semanticLevel:
+            kp.semanticLevel ||
+            (idx < 2
+              ? 'Nivel 1 · Macro-concepto'
+              : idx < 5
+              ? 'Nivel 2 · Mecanismo/Proceso'
+              : 'Nivel 3 · Micro-concepto/Detalle'),
+          parentConcept: kp.parentConcept || topic.title,
           importance:
             kp.importance === 'alta' || kp.importance === 'baja' ? kp.importance : 'media',
           sourceDocName: activeAttachedFile ? activeAttachedFile.name : topic.title,
@@ -353,7 +554,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       const nextSummary = data.summary || summary;
       const nextCues =
         Array.isArray(data.cues) && data.cues.length > 0
-          ? Array.from(new Set([...cues, ...data.cues]))
+          ? Array.from(new Set([...data.cues, ...cues])).slice(0, 14)
           : cues;
       const nextKeyPoints =
         generatedPoints.length > 0 ? generatedPoints : activeEditableKeyPoints;
@@ -378,6 +579,14 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       }
       if (generatedPoints.length > 0) {
         setTopicKeyPoints(generatedPoints);
+        setCornellKeyTerms(
+          generatedPoints.map((kp) => ({
+            term: kp.title,
+            definition: kp.detail,
+            semanticLevel: kp.semanticLevel,
+            parentConcept: kp.parentConcept,
+          }))
+        );
       }
       if (nextCues !== cues) {
         setCues(nextCues);
@@ -388,6 +597,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
         notes,
         cues: nextCues,
         summary: nextSummary,
+        difficulty: topicDifficulty,
         attachedFiles: nextAttachedFiles,
         pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
         richGeneralNotes,
@@ -397,7 +607,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       });
 
       showTransientNotice(
-        `¡Resumen automático y ${generatedPoints.length} puntos clave editables generados y guardados con IA!`
+        `¡Extracción de Jerarquía Semántica completada: ${generatedPoints.length} conceptos clave y ${nextCues.length} indicios detectados!`
       );
     } catch (err: any) {
       console.error(err);
@@ -628,9 +838,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     setCues(cues.filter((_, i) => i !== index));
   };
 
-  // AI Structure & Enhance (Método Cornell Automático con IA)
-  const handleStructureWithAI = async (forceRefresh = false) => {
-    const rawSource = getEffectiveSourceText();
+  // AI Structure & Enhance (Mejorar Formato IA en Apuntes Libres y Método Cornell Automático con IA — Espacio ilimitado)
+  const handleStructureWithAI = async (forceRefresh = true) => {
+    const activeEditorSource = getEffectiveSourceText(true);
+    const fullCombinedSource = getEffectiveSourceText(false);
     const fallbackSyllabusContext = [
       `Tema: ${topic.title}`,
       topic.description ? `Descripción: ${topic.description}` : '',
@@ -641,7 +852,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       .filter(Boolean)
       .join('\n');
 
-    const textToStructure = rawSource || fallbackSyllabusContext || topic.title;
+    const textToStructure =
+      activeEditorSource || fullCombinedSource || fallbackSyllabusContext || topic.title;
 
     setIsStructuring(true);
     setImportError(null);
@@ -651,7 +863,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          topicTitle: topic.title,
+          topicTitle: activeAttachedFile ? `${topic.title} — ${activeAttachedFile.name}` : topic.title,
           rawNotes: textToStructure,
           subjectName,
           subtopics: topic.subtopics || [],
@@ -662,13 +874,76 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       const resData = await response.json();
       if (resData.success && resData.data) {
         const structuredText = resData.data.notes || textToStructure;
-        const nextCues =
+        const localExtracted = extractLocalTermsAndCuesFromText(
+          `${textToStructure}\n\n${structuredText}`,
+          topic.title
+        );
+
+        const aiCues =
           Array.isArray(resData.data.cues) && resData.data.cues.length > 0
-            ? resData.data.cues
+            ? resData.data.cues.map(String).filter(Boolean)
+            : [];
+        const nextCues =
+          aiCues.length > 0 || localExtracted.cues.length > 0
+            ? Array.from(new Set([...aiCues, ...localExtracted.cues])).slice(0, 12)
             : cues;
+
         const nextSummary = resData.data.summary || summary;
-        if (Array.isArray(resData.data.keyTerms) && resData.data.keyTerms.length > 0) {
-          setCornellKeyTerms(resData.data.keyTerms);
+
+        const aiKeyTerms: Array<{
+          term: string;
+          definition: string;
+          semanticLevel?: string;
+          parentConcept?: string;
+        }> =
+          Array.isArray(resData.data.keyTerms) && resData.data.keyTerms.length > 0
+            ? resData.data.keyTerms
+                .filter((kt: any) => kt && kt.term && kt.definition)
+                .map((kt: any) => ({
+                  term: String(kt.term).trim(),
+                  definition: String(kt.definition).trim(),
+                  semanticLevel: kt.semanticLevel
+                    ? String(kt.semanticLevel)
+                    : 'Nivel 2 · Mecanismo/Proceso',
+                  parentConcept: kt.parentConcept ? String(kt.parentConcept) : topic.title,
+                }))
+            : [];
+
+        const seenTerms = new Set(aiKeyTerms.map((k) => k.term.toLowerCase()));
+        const mergedKeyTerms = [...aiKeyTerms];
+        for (const locKt of localExtracted.keyTerms) {
+          if (!seenTerms.has(locKt.term.toLowerCase()) && mergedKeyTerms.length < 16) {
+            seenTerms.add(locKt.term.toLowerCase());
+            mergedKeyTerms.push(locKt);
+          }
+        }
+
+        if (mergedKeyTerms.length > 0) {
+          setCornellKeyTerms(mergedKeyTerms);
+        }
+
+        const nextKeyPoints: EditableKeyPoint[] =
+          mergedKeyTerms.length > 0
+            ? mergedKeyTerms.map((kt, idx) => ({
+                id: `kp-struct-${Date.now()}-${idx}`,
+                title: kt.term,
+                detail: kt.definition,
+                category: 'Concepto Clave IA',
+                semanticLevel:
+                  kt.semanticLevel ||
+                  (idx < 2
+                    ? 'Nivel 1 · Macro-concepto'
+                    : idx < 5
+                    ? 'Nivel 2 · Mecanismo/Proceso'
+                    : 'Nivel 3 · Micro-concepto/Detalle'),
+                parentConcept: kt.parentConcept || topic.title,
+                importance: idx < 4 ? 'alta' : 'media',
+                sourceDocName: activeAttachedFile ? activeAttachedFile.name : topic.title,
+              }))
+            : activeEditableKeyPoints;
+
+        if (nextKeyPoints.length > 0) {
+          setTopicKeyPoints(nextKeyPoints);
         }
 
         const nowIso = new Date().toISOString();
@@ -688,6 +963,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   content: structuredText,
                   richHtmlContent: nextRichDoc,
                   summary: nextSummary,
+                  keyPoints: nextKeyPoints,
+                  cues: nextCues,
                   lastEditedAt: nowIso,
                 }
               : f
@@ -712,27 +989,31 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           setRichGeneralNotes(nextRichGeneral);
         }
 
-        if (nextCues !== cues) {
-          setCues(nextCues);
-        }
-        if (nextSummary !== summary) {
+        setCues(nextCues);
+        if (nextSummary) {
           setSummary(nextSummary);
         }
+
+        // Forzar refresco inmediato del lienzo visual en RichEditableDocumentWorkspace
+        setExternalFormatVersion((v) => v + 1);
 
         // Auto-persistir el formato estructurado con IA en la asignatura
         onSaveTopicNotes(topic.id, {
           notes: nextMainNotes,
           cues: nextCues,
           summary: nextSummary,
+          difficulty: topicDifficulty,
           attachedFiles: nextAttachedFiles,
           pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
           richGeneralNotes: nextRichGeneral,
           generalImages,
           generalComments,
-          keyPoints: activeEditableKeyPoints,
+          keyPoints: nextKeyPoints,
         });
 
-        showTransientNotice('¡Formato mejorado, estructurado y guardado automáticamente con IA!');
+        showTransientNotice(
+          `¡Formato académico mejorado con IA aplicado (${mergedKeyTerms.length} conceptos clave y ${nextCues.length} preguntas detectadas, conservando el 100% de tus apuntes)!`
+        );
       } else {
         throw new Error(resData.error || 'No se pudieron estructurar los apuntes.');
       }
@@ -1004,6 +1285,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       notes: finalMainNotes,
       cues,
       summary,
+      difficulty: topicDifficulty,
       attachedFiles: finalAttachedFiles,
       pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
       richGeneralNotes: finalRichGeneralNotes,
@@ -1066,6 +1348,99 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     setTimeout(() => setPdfNotice(null), 2500);
   };
 
+  // Generar Mapa Mental con IA a partir de los apuntes actuales del modal
+  const handleGenerateMindmapFromModalNotes = async () => {
+    setShowMindmapPanel(true);
+    setIsGeneratingMindmapModal(true);
+    setImportError(null);
+    try {
+      const combinedNotesParts: string[] = [];
+      if (currentEditorText?.trim()) combinedNotesParts.push(currentEditorText.trim());
+      if (notes?.trim() && notes.trim() !== currentEditorText?.trim()) {
+        combinedNotesParts.push(notes.trim());
+      }
+      attachedFiles.forEach((f) => {
+        if (f.content?.trim() && !combinedNotesParts.includes(f.content.trim())) {
+          combinedNotesParts.push(`[${f.name}]\n${f.content.trim()}`);
+        }
+      });
+      if (activeEditableKeyPoints.length > 0) {
+        combinedNotesParts.push(
+          `[Puntos Clave]\n${activeEditableKeyPoints
+            .map((kp, i) => `${i + 1}. ${kp.title}: ${kp.detail}`)
+            .join('\n')}`
+        );
+      }
+      const fullSourceNotes =
+        combinedNotesParts.join('\n\n') || topic.description || topic.title;
+
+      const response = await fetch('/api/gemini/generate-cornell-mindmap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topicTitle: topic.title,
+          topicDescription: topic.description || '',
+          subtopics: topic.subtopics || [],
+          subjectName,
+          cornellTitle: topic.title,
+          cues,
+          notes: fullSourceNotes,
+          summary: summary || topic.summary || '',
+        }),
+      });
+
+      const resData = await response.json();
+      if (!response.ok || !resData.success || !resData.data) {
+        throw new Error(
+          resData.error || 'No se pudo generar el mapa mental con IA desde los apuntes.'
+        );
+      }
+
+      const newMindmap: Mindmap = {
+        id: `mm-cornell-${Date.now()}`,
+        topicIds: [topic.id],
+        title: resData.data.title || `Mapa Mental: ${topic.title}`,
+        summary: resData.data.summary || summary || '',
+        rootNode: resData.data.rootNode,
+        createdAt: new Date().toISOString(),
+      };
+
+      setGeneratedModalMindmap(newMindmap);
+      if (onSaveMindmap) {
+        onSaveMindmap(newMindmap);
+      }
+      setActionBannerNotice(
+        `¡Mapa mental interactivo de "${topic.title}" generado con IA a partir de tus apuntes!`
+      );
+    } catch (err: any) {
+      const msg = err?.message || 'Error al generar el mapa mental con IA.';
+      setImportError(msg);
+      onAiError?.('Mapa Mental IA', msg);
+    } finally {
+      setIsGeneratingMindmapModal(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'editor' || noteFormat !== 'free') {
+      setIsFreeReadingMode(false);
+    }
+  }, [isOpen, activeTab, noteFormat]);
+
+  useEffect(() => {
+    if (!isOpen || !isFreeReadingMode) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsFreeReadingMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [isOpen, isFreeReadingMode]);
+
+  const showFocusedFreeReading =
+    isFreeReadingMode && activeTab === 'editor' && noteFormat === 'free';
+
   const mainNotesWordCount = notes.split(/\s+/).filter(Boolean).length;
   const totalExtractedWords =
     mainNotesWordCount +
@@ -1077,7 +1452,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs">
       <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-6xl h-[94vh] flex flex-col overflow-hidden animate-in fade-in duration-200">
-        {/* Cabecera Visual del Estudio de Apuntes y Documentos */}
+        {/* Cabecera Visual del Estudio de Apuntes y Documentos (oculta en Modo Lectura) */}
+        {!showFocusedFreeReading && (
         <div className="px-6 py-4 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-4 shrink-0 bg-white">
           <div className="flex items-center gap-3.5 min-w-0">
             {/* Indicador Visual de Volumen de Páginas */}
@@ -1121,6 +1497,35 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Selector directo de Dificultad del Tema (Básico / Intermedio / Avanzado) */}
+            <div
+              className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl p-1 text-xs"
+              title="Cambiar el nivel de dificultad de este tema (recalcula automáticamente el tiempo estimado de estudio)"
+            >
+              <span className="text-[11px] font-semibold text-slate-500 px-1.5">Dificultad:</span>
+              {(['Básico', 'Intermedio', 'Avanzado'] as const).map((lvl) => {
+                const isSelected =
+                  schedulerService.normalizeDifficultyToCanonical(topicDifficulty) === lvl;
+                const activeStyle =
+                  lvl === 'Avanzado'
+                    ? 'bg-rose-600 text-white shadow-2xs'
+                    : lvl === 'Intermedio'
+                    ? 'bg-amber-500 text-white shadow-2xs'
+                    : 'bg-emerald-600 text-white shadow-2xs';
+                return (
+                  <button
+                    key={lvl}
+                    type="button"
+                    onClick={() => handleSelectDifficulty(lvl)}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                      isSelected ? activeStyle : 'text-slate-600 hover:bg-slate-200/70'
+                    }`}
+                  >
+                    {lvl}
+                  </button>
+                );
+              })}
+            </div>
             {onOpenReadingMode && (
               <button
                 type="button"
@@ -1189,8 +1594,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             </button>
           </div>
         </div>
+        )}
 
-        {/* Barra de Navegación del Estudio y Herramientas IA */}
+        {/* Barra de Navegación del Estudio y Herramientas IA (oculta en Modo Lectura) */}
+        {!showFocusedFreeReading && (
         <div className="px-6 py-2.5 bg-slate-50/90 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-1 bg-white border border-slate-200 p-1 rounded-xl text-xs flex-wrap">
             <button
@@ -1323,6 +1730,18 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                 </button>
               </div>
 
+              {noteFormat === 'free' && (
+                <button
+                  type="button"
+                  onClick={() => setIsFreeReadingMode(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap shadow-2xs"
+                  title="Ocultar interfaz de edición, centrar el contenido y ampliar el espaciado entre líneas para leer sin distracciones"
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  <span>Modo Lectura</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 disabled={isGeneratingKeyPoints}
@@ -1377,13 +1796,53 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   </>
                 )}
               </button>
+
+              <button
+                type="button"
+                disabled={isGeneratingMindmapModal}
+                onClick={() => {
+                  if (!showMindmapPanel) {
+                    setShowMindmapPanel(true);
+                    if (!generatedModalMindmap) {
+                      handleGenerateMindmapFromModalNotes();
+                    }
+                  } else {
+                    setShowMindmapPanel(false);
+                  }
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border transition-colors cursor-pointer disabled:opacity-60 whitespace-nowrap ${
+                  showMindmapPanel
+                    ? 'bg-violet-600 text-white border-violet-600 hover:bg-violet-700'
+                    : 'bg-white hover:bg-violet-50 text-violet-700 border-violet-200'
+                }`}
+                title="Generar o ver un Mapa Mental interactivo con IA a partir de los apuntes de este tema"
+              >
+                {isGeneratingMindmapModal ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Creando Mapa IA...</span>
+                  </>
+                ) : (
+                  <>
+                    <GitBranch className="w-3.5 h-3.5" />
+                    <span>Mapa Mental IA</span>
+                  </>
+                )}
+              </button>
             </div>
           )}
         </div>
+        )}
 
         {/* Contenido Principal */}
-        <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4">
-          {importError && (
+        <div
+          className={
+            showFocusedFreeReading
+              ? 'flex-1 overflow-hidden flex flex-col p-0'
+              : 'flex-1 overflow-y-auto p-5 sm:p-6 space-y-4'
+          }
+        >
+          {!showFocusedFreeReading && importError && (
             <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-start justify-between gap-2">
               <div className="flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
@@ -1398,7 +1857,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             </div>
           )}
 
-          {actionBannerNotice && (
+          {!showFocusedFreeReading && actionBannerNotice && (
             <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center justify-between gap-2 animate-in fade-in duration-150">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -1413,7 +1872,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             </div>
           )}
 
-          {isProcessingFile && activeTab === 'editor' && (
+          {!showFocusedFreeReading && isProcessingFile && activeTab === 'editor' && (
             <div className="p-3.5 bg-blue-50/90 border border-blue-200 rounded-2xl flex items-center gap-3 text-xs text-blue-900">
               <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
               <div>
@@ -1427,8 +1886,9 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
           {/* TAB 1: ESTUDIO DE ESCRITURA LIBRE Y DOCUMENTOS EDITABLES */}
           {activeTab === 'editor' && (
-            <div className="space-y-4">
+            <div className={showFocusedFreeReading ? 'flex-1 flex flex-col min-h-0 h-full' : 'space-y-4'}>
               {/* Estantería Visual de Documentos y Control de Páginas del Tema */}
+              {!showFocusedFreeReading && (
               <div className="bg-slate-50/80 border border-slate-200/90 rounded-2xl p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -1689,9 +2149,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   </div>
                 )}
               </div>
+              )}
 
               {/* Panel Interactivo: Resumen Automático IA y Puntos Clave Editables */}
-              {showKeyPointsPanel && (
+              {!showFocusedFreeReading && showKeyPointsPanel && (
                 <div className="bg-indigo-50/40 border border-indigo-200/90 rounded-2xl p-4 space-y-4 animate-in fade-in duration-150">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100 pb-3">
                     <div className="flex items-center gap-2.5">
@@ -1933,6 +2394,96 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                 </div>
               )}
 
+              {/* Panel Interactivo Desplegable: Mapa Mental con IA de los Apuntes */}
+              {!showFocusedFreeReading && showMindmapPanel && (
+                <div className="bg-violet-50/40 border border-violet-200/90 rounded-2xl p-4 space-y-3 animate-in fade-in duration-150">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-violet-100 pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 rounded-xl bg-violet-600 text-white">
+                        <GitBranch className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900">
+                          Mapa Mental con IA de tus Apuntes · {topic.title}
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          Árbol jerárquico interactivo D3.js generado a partir de tus apuntes libres, documentos y puntos clave.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isGeneratingMindmapModal}
+                        onClick={handleGenerateMindmapFromModalNotes}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isGeneratingMindmapModal ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Generando con IA...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>
+                              {generatedModalMindmap
+                                ? 'Regenerar Mapa Mental IA'
+                                : 'Generar Mapa Mental IA'}
+                            </span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowMindmapPanel(false)}
+                        className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-white rounded-lg cursor-pointer"
+                        title="Ocultar panel de mapa mental"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {isGeneratingMindmapModal ? (
+                    <div className="p-8 bg-white rounded-xl border border-violet-100 flex flex-col items-center justify-center text-center space-y-2">
+                      <Loader2 className="w-6 h-6 text-violet-600 animate-spin" />
+                      <div className="text-xs font-bold text-slate-900">
+                        Construyendo mapa mental con IA desde tus apuntes...
+                      </div>
+                      <p className="text-[11px] text-slate-500 max-w-md">
+                        Sintetizando conceptos principales, subramas y preguntas de repaso activo.
+                      </p>
+                    </div>
+                  ) : generatedModalMindmap ? (
+                    <div className="rounded-xl overflow-hidden border border-violet-200 bg-white">
+                      <D3MindMapCanvas
+                        rootNode={generatedModalMindmap.rootNode}
+                        title={generatedModalMindmap.title}
+                        summary={generatedModalMindmap.summary}
+                        height={420}
+                      />
+                    </div>
+                  ) : (
+                    <div className="p-5 bg-white/90 border border-dashed border-violet-200 rounded-xl text-center space-y-2">
+                      <p className="text-xs font-semibold text-slate-700">
+                        Pulsa el botón para crear el mapa mental de tus apuntes con IA
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleGenerateMindmapFromModalNotes}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold rounded-xl cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Hacer Mapa Mental con IA</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Workspace del Documento Editable Rico (Subrayar, Comentarios, Editar Texto, Imágenes) */}
               {noteFormat === 'free' && (
                 <RichEditableDocumentWorkspace
@@ -1964,6 +2515,31 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                       ? `Aquí tienes todo el texto e imágenes extraídas de "${activeAttachedFile.name}". Puedes modificar o eliminar cualquier parte, subrayar en colores, añadir comentarios al margen o insertar imágenes...`
                       : 'Escribe tus apuntes o sube un documento externo (PDF, Word, PowerPoint, imagen o texto) para volcar toda su información e imágenes en este documento editable...'
                   }
+                  externalFormatVersion={externalFormatVersion}
+                  onImproveFormatAI={() => handleStructureWithAI(true)}
+                  isFormattingAI={isStructuring}
+                  isReadingMode={isFreeReadingMode}
+                  onToggleReadingMode={setIsFreeReadingMode}
+                  subjectName={subjectName}
+                  documentSwitcherSlot={
+                    attachedFiles.length > 0 ? (
+                      <select
+                        value={activeEditingDocId}
+                        onChange={(e) => setActiveEditingDocId(e.target.value)}
+                        aria-label="Cambiar documento en lectura"
+                        className="text-xs font-bold bg-transparent border border-current/20 rounded-lg px-2.5 py-1 focus:outline-none cursor-pointer max-w-[240px] truncate"
+                      >
+                        <option value="main" className="text-slate-900 bg-white">
+                          Apuntes Libres del Tema
+                        </option>
+                        {attachedFiles.map((f) => (
+                          <option key={f.id} value={f.id} className="text-slate-900 bg-white">
+                            {f.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : undefined
+                  }
                   onChange={handleRichWorkspaceChange}
                 />
               )}
@@ -1977,13 +2553,13 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                 <div className="space-y-1">
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white/15 text-[11px] font-bold tracking-wide uppercase">
                     <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                    <span>Sistema Oficial de la Universidad de Cornell · Generación Automática IA</span>
+                    <span>Sistema Oficial de la Universidad de Cornell · Espacio Ilimitado</span>
                   </div>
                   <h3 className="text-sm sm:text-base font-extrabold">
                     Hoja Cornell Inteligente: {topic.title}
                   </h3>
                   <p className="text-xs text-indigo-100 max-w-2xl">
-                    La IA analiza tus documentos importados, apuntes y subtemas para estructurar automáticamente las 3 zonas del Método Cornell: Preguntas Detonadoras (Active Recall), Apuntes Estructurados y Síntesis Ejecutiva.
+                    La IA analiza el 100% de tus apuntes y documentos sin recortar ni limitar la extensión, extrayendo preguntas detonadoras específicas (Indicios/Cues), Conceptos Clave IA con su definición exacta y el Resumen Ejecutivo.
                   </p>
                 </div>
 
@@ -1997,12 +2573,32 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                     {isStructuring ? (
                       <>
                         <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
-                        <span>Creando Método Cornell con IA...</span>
+                        <span>Estructurando Cornell con IA...</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="w-4 h-4 text-indigo-600" />
-                        <span>Generar / Actualizar Cornell con IA</span>
+                        <span>Generar / Mejorar Formato Cornell IA</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isGeneratingKeyPoints}
+                    onClick={handleGenerateKeyPointsFromDocumentWithAI}
+                    className="px-3.5 py-2.5 rounded-xl bg-indigo-950/50 hover:bg-indigo-950/70 border border-white/25 text-white text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
+                    title="Analizar a fondo los apuntes actuales para detectar Indicios, Preguntas y Conceptos Clave IA"
+                  >
+                    {isGeneratingKeyPoints ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Detectando Conceptos...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        <span>Detectar Indicios y Conceptos IA</span>
                       </>
                     )}
                   </button>
@@ -2040,130 +2636,292 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   <Loader2 className="w-5 h-5 text-indigo-600 animate-spin shrink-0" />
                   <div>
                     <div className="font-bold">
-                      Generando estructura del Método Cornell automáticamente con IA...
+                      Estructurando apuntes Cornell con IA respetando el 100% de tu extensión...
                     </div>
                     <div className="text-[11px] text-indigo-700 mt-0.5">
-                      Redactando preguntas detonadoras para Active Recall, estructurando apuntes por epígrafes y sintetizando el resumen ejecutivo para examen.
+                      Extrayendo preguntas detonadoras específicas de tus párrafos, detectando conceptos clave con su definición exacta y aplicando formato enriquecido sin recortar información.
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                {/* Columna Izquierda (4 cols): Preguntas Detonadoras (Cues) + Términos Clave */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                {/* Columna Izquierda (4 cols): Preguntas Detonadoras (Cues) + Conceptos Clave IA */}
                 <div className="lg:col-span-4 bg-slate-50/80 border border-slate-200 rounded-2xl p-4 space-y-4 flex flex-col justify-between">
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-200/80 pb-2">
-                      <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                        <HelpCircle className="w-3.5 h-3.5 text-indigo-600" />
-                        <span>1. Columna de Indicios y Preguntas (Cues)</span>
-                      </span>
-                      <span className="text-xs font-mono-numbers bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md font-bold">
-                        {cues.length}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">
-                      Preguntas clave del Método Cornell para autoevaluarte con Active Recall tapando la columna derecha. Puedes editar cualquiera haciendo clic sobre ella.
-                    </p>
-
-                    <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
-                      {cues.map((cue, idx) => (
-                        <div
-                          key={idx}
-                          className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-start justify-between gap-2 text-xs hover:border-indigo-300 transition-colors shadow-2xs"
-                        >
-                          <span className="w-5 h-5 rounded-md bg-indigo-50 text-indigo-700 font-mono-numbers font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
-                            {idx + 1}
-                          </span>
-                          <input
-                            type="text"
-                            value={cue}
-                            onChange={(e) => {
-                              const next = [...cues];
-                              next[idx] = e.target.value;
-                              setCues(next);
-                            }}
-                            className="flex-1 text-slate-800 font-semibold leading-snug bg-transparent focus:outline-none focus:border-b focus:border-indigo-400"
-                          />
+                  <div className="space-y-4">
+                    {/* Bloque 1A: Columna de Indicios y Preguntas (Cues) */}
+                    <div className="space-y-2.5">
+                      <div className="flex items-center justify-between border-b border-slate-200/80 pb-2 gap-2">
+                        <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                          <HelpCircle className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          <span>1. Columna de Indicios y Preguntas (Cues)</span>
+                        </span>
+                        <div className="flex items-center gap-1.5">
                           <button
-                            onClick={() => handleRemoveCue(idx)}
-                            className="text-slate-300 hover:text-rose-500 p-0.5 shrink-0 cursor-pointer"
-                            title="Eliminar pregunta"
+                            type="button"
+                            disabled={isGeneratingKeyPoints || isStructuring}
+                            onClick={handleGenerateKeyPointsFromDocumentWithAI}
+                            className="px-2 py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold transition-colors cursor-pointer inline-flex items-center gap-1 disabled:opacity-50"
+                            title="Detectar automáticamente preguntas e indicios a partir del contenido escrito en tus apuntes"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>Detectar de apuntes</span>
                           </button>
+                          <span className="text-xs font-mono-numbers bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md font-bold">
+                            {cues.length}
+                          </span>
                         </div>
-                      ))}
+                      </div>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        Indicios y preguntas extraídos por <strong>Jerarquía Semántica</strong> (Macro · Meso · Micro) de tus apuntes para Active Recall.
+                      </p>
 
-                      {cues.length === 0 && (
-                        <div className="text-center py-6 text-[11px] text-slate-400 italic">
-                          Sin preguntas detonadoras aún. Pulsa "Generar / Actualizar Cornell con IA" arriba.
-                        </div>
-                      )}
+                      <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
+                        {cues.map((cue, idx) => {
+                          const isMacro = /^\[Macro\]/i.test(cue);
+                          const isMeso = /^\[Meso\]/i.test(cue);
+                          const isMicro = /^\[Micro\]/i.test(cue);
+                          return (
+                            <div
+                              key={idx}
+                              className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-start justify-between gap-2 text-xs hover:border-indigo-300 transition-colors shadow-2xs"
+                            >
+                              <span
+                                className={`px-1.5 py-0.5 rounded-md font-mono-numbers font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5 ${
+                                  isMacro
+                                    ? 'bg-purple-100 text-purple-800'
+                                    : isMeso
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : isMicro
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-indigo-50 text-indigo-700'
+                                }`}
+                              >
+                                {isMacro ? 'N1' : isMeso ? 'N2' : isMicro ? 'N3' : idx + 1}
+                              </span>
+                              <textarea
+                                rows={2}
+                                value={cue}
+                                onChange={(e) => {
+                                  const next = [...cues];
+                                  next[idx] = e.target.value;
+                                  setCues(next);
+                                }}
+                                className="flex-1 text-slate-800 font-semibold leading-snug bg-transparent focus:outline-none focus:border-b focus:border-indigo-400 resize-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveCue(idx)}
+                                className="text-slate-300 hover:text-rose-500 p-0.5 shrink-0 cursor-pointer"
+                                title="Eliminar indicio/pregunta"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })}
+
+                        {cues.length === 0 && (
+                          <div className="text-center py-5 text-[11px] text-slate-400 italic">
+                            Sin preguntas detonadoras aún. Pulsa "Detectar de apuntes" para extraerlas de tu texto.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Añadir pregunta manual */}
+                      <div className="pt-1 flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={newCue}
+                          onChange={(e) => setNewCue(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleAddCue()}
+                          placeholder="Añadir indicio o pregunta detonadora..."
+                          className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddCue}
+                          className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl cursor-pointer"
+                          title="Añadir pregunta"
+                        >
+                          <Plus className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
 
-                    {/* Glosario de Términos Clave extraídos por IA */}
-                    {cornellKeyTerms.length > 0 && (
-                      <div className="pt-3 border-t border-slate-200/80 space-y-2">
-                        <div className="text-[11px] font-bold text-indigo-900 uppercase tracking-wider flex items-center justify-between">
-                          <span>Conceptos Clave IA</span>
-                          <span className="font-mono-numbers text-indigo-600">{cornellKeyTerms.length}</span>
+                    {/* Bloque 1B: Conceptos Clave IA con Jerarquía Semántica */}
+                    <div className="pt-3 border-t border-slate-200/90 space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] font-bold text-indigo-950 uppercase tracking-wider flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Conceptos Clave (Jerarquía Semántica)</span>
                         </div>
-                        <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleGenerateKeyPointsFromDocumentWithAI()}
+                            disabled={isGeneratingKeyPoints}
+                            className="px-2 py-0.5 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                            title="Extraer jerarquía semántica (Macro, Meso, Micro) con la API de Gemini"
+                          >
+                            Extraer Jerarquía IA
+                          </button>
+                          <span className="font-mono-numbers text-xs bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md font-bold">
+                            {cornellKeyTerms.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {cornellKeyTerms.length === 0 ? (
+                        <div className="p-3 rounded-xl bg-white border border-dashed border-indigo-200 text-[11px] text-slate-500 text-center">
+                          Pulsa <strong>"Extraer Jerarquía IA"</strong> para clasificar los conceptos clave en Nivel 1 (Macro), Nivel 2 (Meso) y Nivel 3 (Micro).
+                        </div>
+                      ) : (
+                        <div className="space-y-2 max-h-[340px] overflow-y-auto pr-1">
                           {cornellKeyTerms.map((kt, kIdx) => (
                             <div
                               key={kIdx}
-                              className="p-2 rounded-lg bg-indigo-50/60 border border-indigo-100 text-[11px]"
+                              className="p-2.5 rounded-xl bg-indigo-50/60 border border-indigo-200/80 text-[11px] space-y-1.5"
                             >
-                              <span className="font-bold text-indigo-950">{kt.term}: </span>
-                              <span className="text-slate-700">{kt.definition}</span>
+                              <div className="flex items-center justify-between gap-1.5">
+                                <input
+                                  type="text"
+                                  value={kt.term}
+                                  onChange={(e) => {
+                                    const next = [...cornellKeyTerms];
+                                    next[kIdx] = { ...next[kIdx], term: e.target.value };
+                                    setCornellKeyTerms(next);
+                                  }}
+                                  className="flex-1 font-bold text-indigo-950 bg-transparent border-b border-transparent focus:border-indigo-400 focus:outline-none"
+                                  placeholder="Término o concepto..."
+                                />
+                                {kt.semanticLevel && (
+                                  <span
+                                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0 ${
+                                      kt.semanticLevel.includes('Nivel 1')
+                                        ? 'bg-purple-100 text-purple-800 border-purple-200'
+                                        : kt.semanticLevel.includes('Nivel 2')
+                                        ? 'bg-blue-100 text-blue-800 border-blue-200'
+                                        : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                    }`}
+                                    title={
+                                      kt.parentConcept
+                                        ? `${kt.semanticLevel} · Eje: ${kt.parentConcept}`
+                                        : kt.semanticLevel
+                                    }
+                                  >
+                                    {kt.semanticLevel.split('·')[0].trim()}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setCornellKeyTerms(cornellKeyTerms.filter((_, i) => i !== kIdx))
+                                  }
+                                  className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                  title="Eliminar concepto clave"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                              <textarea
+                                rows={2}
+                                value={kt.definition}
+                                onChange={(e) => {
+                                  const next = [...cornellKeyTerms];
+                                  next[kIdx] = { ...next[kIdx], definition: e.target.value };
+                                  setCornellKeyTerms(next);
+                                }}
+                                className="w-full text-slate-700 bg-white/80 border border-indigo-100 rounded-lg p-1.5 focus:outline-none focus:border-indigo-400 resize-none leading-snug"
+                                placeholder="Definición o explicación extraída de los apuntes..."
+                              />
                             </div>
                           ))}
                         </div>
-                      </div>
-                    )}
-                  </div>
+                      )}
 
-                  {/* Añadir pregunta */}
-                  <div className="pt-2 border-t border-slate-200/80 flex items-center gap-1.5">
-                    <input
-                      type="text"
-                      value={newCue}
-                      onChange={(e) => setNewCue(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleAddCue()}
-                      placeholder="Añadir pregunta detonadora..."
-                      className="flex-1 bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    />
-                    <button
-                      onClick={handleAddCue}
-                      className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl cursor-pointer"
-                      title="Añadir pregunta"
-                    >
-                      <Plus className="w-4 h-4" />
-                    </button>
+                      {/* Añadir nuevo Concepto Clave manual */}
+                      <div className="pt-1 space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={newKeyTermName}
+                            onChange={(e) => setNewKeyTermName(e.target.value)}
+                            placeholder="Nuevo concepto clave..."
+                            className="w-2/5 bg-white border border-slate-200 rounded-lg px-2 py-1 text-[11px] font-semibold text-slate-800 focus:outline-none focus:border-indigo-500"
+                          />
+                          <input
+                            type="text"
+                            value={newKeyTermDef}
+                            onChange={(e) => setNewKeyTermDef(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && newKeyTermName.trim() && newKeyTermDef.trim()) {
+                                setCornellKeyTerms([
+                                  ...cornellKeyTerms,
+                                  {
+                                    term: newKeyTermName.trim(),
+                                    definition: newKeyTermDef.trim(),
+                                    semanticLevel: 'Nivel 3 · Micro-concepto/Detalle',
+                                  },
+                                ]);
+                                setNewKeyTermName('');
+                                setNewKeyTermDef('');
+                              }
+                            }}
+                            placeholder="Definición breve..."
+                            className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-800 focus:outline-none focus:border-indigo-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!newKeyTermName.trim() || !newKeyTermDef.trim()) return;
+                              setCornellKeyTerms([
+                                ...cornellKeyTerms,
+                                {
+                                  term: newKeyTermName.trim(),
+                                  definition: newKeyTermDef.trim(),
+                                  semanticLevel: 'Nivel 3 · Micro-concepto/Detalle',
+                                },
+                              ]);
+                              setNewKeyTermName('');
+                              setNewKeyTermDef('');
+                            }}
+                            className="p-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg cursor-pointer shrink-0"
+                            title="Añadir concepto clave"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                {/* Columna Derecha (8 cols): Cuerpo de Apuntes Cornell */}
-                <div className="lg:col-span-8 space-y-2 relative">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
+                {/* Columna Derecha (8 cols): Cuerpo de Apuntes Cornell con Espacio Ilimitado (Sin límite de caracteres ni filas) */}
+                <div className="lg:col-span-8 space-y-2.5 relative">
+                  <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-50 border border-slate-200/90 px-3.5 py-2 rounded-xl">
                     <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                       <BookOpen className="w-3.5 h-3.5 text-indigo-600" />
                       <span>2. Columna Principal de Apuntes Estructurados Cornell</span>
                     </label>
-                    <span className="text-[11px] text-slate-400 font-mono-numbers">
-                      {currentEditorText.length} caracteres ·{' '}
-                      {currentEditorText.split(/\s+/).filter(Boolean).length} palabras
-                    </span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-bold">
+                        <span>∞ Espacio ilimitado · Sin límite de caracteres</span>
+                      </span>
+                      <span className="text-[11px] text-slate-500 font-mono-numbers font-semibold">
+                        {currentEditorText.length.toLocaleString()} caracteres ·{' '}
+                        {currentEditorText.split(/\s+/).filter(Boolean).length.toLocaleString()} palabras
+                      </span>
+                    </div>
                   </div>
 
                   <div className="relative">
                     <textarea
                       value={currentEditorText}
                       onChange={(e) => handleEditorTextChange(e.target.value)}
-                      rows={18}
-                      placeholder="Pulsa 'Generar / Actualizar Cornell con IA' para desarrollar automáticamente los apuntes estructurados de este tema o escribe aquí..."
-                      className={`w-full text-xs font-mono p-4 bg-white border border-slate-200 rounded-2xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-y transition-all ${
+                      rows={Math.max(24, currentEditorText.split(/\r?\n/).length + 4)}
+                      placeholder="Escribe o pega aquí tus apuntes sin límite de caracteres. Al pulsar 'Generar / Mejorar Formato Cornell IA', la IA estructurará todo tu contenido con encabezados, negritas y listas respetando el 100% de tu extensión sin recortar nada..."
+                      className={`w-full min-h-[480px] text-xs font-mono p-4 bg-white border border-slate-200 rounded-2xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-y transition-all ${
                         isActiveRecallMask ? 'blur-md select-none opacity-40' : ''
                       }`}
                     />
@@ -2208,8 +2966,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                 <textarea
                   value={summary}
                   onChange={(e) => setSummary(e.target.value)}
-                  rows={3}
-                  placeholder="Pulsa 'Generar / Actualizar Cornell con IA' para sintetizar automáticamente la esencia de este tema..."
+                  rows={4}
+                  placeholder="Pulsa 'Generar / Mejorar Formato Cornell IA' para sintetizar automáticamente la esencia de este tema..."
                   className="w-full text-xs p-3.5 bg-white border border-indigo-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed resize-y"
                 />
               </div>
@@ -2518,7 +3276,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           )}
         </div>
 
-        {/* Pie de página persistente */}
+        {/* Pie de página persistente (oculto en Modo Lectura) */}
+        {!showFocusedFreeReading && (
         <div className="px-6 py-3 bg-white border-t border-slate-200 flex items-center justify-between gap-4 shrink-0">
           <div className="text-xs text-slate-500 flex items-center gap-2 font-mono-numbers">
             <Paperclip className="w-3.5 h-3.5 text-blue-600" />
@@ -2547,6 +3306,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             </button>
           </div>
         </div>
+        )}
 
         <CornellPdfExportModal
           isOpen={isPdfExportModalOpen}

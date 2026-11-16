@@ -41,6 +41,10 @@ import {
   GitBranch,
   Mic,
   MicOff,
+  Maximize2,
+  Copy,
+  Target,
+  ArrowDownWideNarrow,
 } from 'lucide-react';
 import {
   Subject,
@@ -60,8 +64,12 @@ import {
   DocumentComment,
   EditableKeyPoint,
   StudyPreferences,
+  DifficultyLevel,
+  SchedulingPriorityLevel,
+  BlockedTimeEvent,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
+import { storageService } from '../services/storageService';
 import { checkSubjectProgressAlert } from '../utils/courseAlerts';
 import {
   calculateOrganizedPagesFromFiles,
@@ -77,7 +85,7 @@ import { QuizRunner } from './QuizRunner';
 import { PracticeQuizModule } from './PracticeQuizModule';
 import { FeynmanCoachModal } from './FeynmanCoachModal';
 import { FeynmanChallenge } from './FeynmanChallenge';
-import { MindmapViewer } from './MindmapViewer';
+import { MindMapViewer, MindmapViewer } from './MindMapViewer';
 import { ErrorAnalysisModal } from './ErrorAnalysisModal';
 import { ConceptDiagramModal } from './ConceptDiagramModal';
 import { SubjectProjectsTab } from './SubjectProjectsTab';
@@ -89,12 +97,25 @@ import { TopicKanbanBoard } from './TopicKanbanBoard';
 import { SubjectVueltasTab } from './SubjectVueltasTab';
 import { D3MindMapCanvas } from './D3MindMapCanvas';
 import { TopicReviewScheduleModal } from './TopicReviewScheduleModal';
+import { CustomTopicQuestionsModal } from './CustomTopicQuestionsModal';
+import { GoalAssistantModal } from './GoalAssistantModal';
+import { SubjectPriorityDashboard } from './SubjectPriorityDashboard';
+import { SubjectSmartGoalsTab } from './SubjectSmartGoalsTab';
+import {
+  getSubjectSmartGoals,
+  calculateSmartGoalProgress,
+  upsertGoalOnSubject,
+} from '../utils/smartGoalsUtils';
 
 interface SubjectDetailViewProps {
   subject: Subject;
+  allSubjects?: Subject[];
   preferences?: StudyPreferences;
+  blockedEvents?: BlockedTimeEvent[];
+  initialTab?: string;
   onOpenPreferences?: () => void;
   onUpdateSubject: (updated: Subject) => void;
+  onAddTaskToSubject?: (subjectId: string, task: Task) => void;
   onSelectForPomodoro: (subjectId: string, topicId?: string) => void;
   onOpenExamsManager?: (subjectId?: string) => void;
 }
@@ -151,14 +172,20 @@ class SubjectAiErrorBoundary extends React.Component<
 
 export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   subject,
+  allSubjects,
   preferences,
+  blockedEvents = [],
+  initialTab,
   onOpenPreferences,
   onUpdateSubject,
+  onAddTaskToSubject,
   onSelectForPomodoro,
   onOpenExamsManager,
 }) => {
   const [activeTab, setActiveTab] = useState<
     | 'temario'
+    | 'objetivos_smart'
+    | 'prioridad'
     | 'vueltas'
     | 'apuntes'
     | 'active_recall'
@@ -168,15 +195,51 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     | 'calificaciones'
     | 'mapas_mentales'
     | 'tareas'
-  >('temario');
+  >((initialTab as any) || 'temario');
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab as any);
+    }
+  }, [initialTab, subject.id]);
 
   // Topic View Mode (Lista detallada vs Tablero Kanban)
   const [topicViewMode, setTopicViewMode] = useState<'lista' | 'kanban'>('lista');
+
+  // Reajuste seguro de sub-pestaña al cambiar el modo de interfaz (nunca modifica datos ni apuntes/vueltas)
+  useEffect(() => {
+    const mode = preferences?.interfaceDesignMode || 'complete';
+    if (mode === 'minimal') {
+      if (!['temario', 'objetivos_smart', 'apuntes', 'active_recall', 'examenes'].includes(activeTab)) {
+        setActiveTab('temario');
+      }
+      if (topicViewMode === 'kanban') {
+        setTopicViewMode('lista');
+      }
+    } else if (mode === 'intermediate') {
+      if (
+        ![
+          'temario',
+          'objetivos_smart',
+          'prioridad',
+          'vueltas',
+          'apuntes',
+          'active_recall',
+          'examenes',
+          'tareas',
+          'mapas_mentales',
+        ].includes(activeTab)
+      ) {
+        setActiveTab('temario');
+      }
+    }
+  }, [preferences?.interfaceDesignMode, subject.id, activeTab, topicViewMode]);
 
   // Action menu dropdown on topic list item
   const [openActionsMenuTopicId, setOpenActionsMenuTopicId] = useState<string | null>(null);
   const [showHeaderToolsMenu, setShowHeaderToolsMenu] = useState(false);
   const [showMoreTabsMenu, setShowMoreTabsMenu] = useState(false);
+  const [isGoalAssistantOpen, setIsGoalAssistantOpen] = useState(false);
 
   // Automatic Weighted Grade Summary
   const subjectGradeSummary = useMemo(() => calculateSubjectGradeSummary(subject), [subject]);
@@ -199,6 +262,8 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [isFlashcardGeneratorOpen, setIsFlashcardGeneratorOpen] = useState(false);
   const [flashcardGenTopicId, setFlashcardGenTopicId] = useState<string | undefined>(undefined);
   const [flashcardGenNoteId, setFlashcardGenNoteId] = useState<string | undefined>(undefined);
+  const [isCustomQuestionsModalOpen, setIsCustomQuestionsModalOpen] = useState(false);
+  const [customQuestionsModalTopicId, setCustomQuestionsModalTopicId] = useState<string | undefined>(undefined);
 
   // Cornell Mindmap (Gemini + D3.js) State
   const [isCornellMindmapModalOpen, setIsCornellMindmapModalOpen] = useState(false);
@@ -224,6 +289,12 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   } | null>(null);
   const [expandedKeyPointsByTopic, setExpandedKeyPointsByTopic] = useState<
     Record<string, boolean>
+  >({});
+  const [expandedMindmapByTopic, setExpandedMindmapByTopic] = useState<
+    Record<string, boolean>
+  >({});
+  const [inlineMindmapViewModeByTopic, setInlineMindmapViewModeByTopic] = useState<
+    Record<string, 'mermaid' | 'd3' | 'branches' | 'outline'>
   >({});
 
   // Helper to format API/network errors into clear user-facing explanations
@@ -351,7 +422,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [showAddTopic, setShowAddTopic] = useState(false);
   const [newTopicTitle, setNewTopicTitle] = useState('');
   const [newTopicDesc, setNewTopicDesc] = useState('');
-  const [newTopicDifficulty, setNewTopicDifficulty] = useState<'Baja' | 'Media' | 'Alta'>('Media');
+  const [newTopicDifficulty, setNewTopicDifficulty] = useState<DifficultyLevel>('Intermedio');
   const [newTopicPages, setNewTopicPages] = useState<string>('');
   const [newTopicSubtopics, setNewTopicSubtopics] = useState<string[]>([]);
   const [newTopicSubtopicInput, setNewTopicSubtopicInput] = useState<string>('');
@@ -366,7 +437,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [editingTopic, setEditingTopic] = useState<Topic | null>(null);
   const [editTopicTitle, setEditTopicTitle] = useState('');
   const [editTopicDesc, setEditTopicDesc] = useState('');
-  const [editTopicDifficulty, setEditTopicDifficulty] = useState<'Baja' | 'Media' | 'Alta'>('Media');
+  const [editTopicDifficulty, setEditTopicDifficulty] = useState<DifficultyLevel>('Intermedio');
   const [editTopicPages, setEditTopicPages] = useState('');
   const [editTopicSubtopics, setEditTopicSubtopics] = useState<string[]>([]);
   const [editTopicNewSubtopicInput, setEditTopicNewSubtopicInput] = useState('');
@@ -450,7 +521,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     pdfCornellExportService.exportSingleNote(subject, noteToExport, topic);
   };
 
-  // Helper to resolve Cornell Notes data (cues, notes, summary) for a given topic
+  // Helper to resolve Cornell Notes & full topic notes (cues, notes, attached documents, key points, summary) for a given topic
   const getTopicCornellData = (topicId: string, cornellNoteOverride?: CornellNote) => {
     const targetTopic = subject.topics.find((t) => t.id === topicId) || subject.topics[0];
     const linkedNote =
@@ -465,13 +536,51 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         ? targetTopic.cues
         : (targetTopic?.subtopics || []).map((st) => `¿Qué es y cómo funciona ${st}?`);
 
-    const notes =
-      linkedNote?.notes && linkedNote.notes.trim().length > 0
-        ? linkedNote.notes
-        : targetTopic?.notes ||
-          targetTopic?.generalNotes ||
-          targetTopic?.description ||
-          '';
+    // Combine all available notes: free notes, Cornell notes, attached PDFs/docs, and key points
+    const noteParts: string[] = [];
+    if (cornellNoteOverride?.notes?.trim()) {
+      noteParts.push(cornellNoteOverride.notes.trim());
+    } else {
+      const seenBlocks = new Set<string>();
+      const pushBlock = (txt?: string) => {
+        const clean = (txt || '').trim();
+        if (!clean || seenBlocks.has(clean)) return;
+        seenBlocks.add(clean);
+        noteParts.push(clean);
+      };
+
+      pushBlock(targetTopic?.generalNotes);
+      pushBlock(targetTopic?.notes);
+      if (targetTopic?.richGeneralNotes) {
+        pushBlock(convertRichHtmlToPlainText(targetTopic.richGeneralNotes));
+      }
+      pushBlock(linkedNote?.notes);
+
+      if (targetTopic?.attachedFiles && targetTopic.attachedFiles.length > 0) {
+        targetTopic.attachedFiles.forEach((f) => {
+          const fileContent =
+            f.content?.trim() ||
+            f.rawExtractedText?.trim() ||
+            (f.richHtmlContent ? convertRichHtmlToPlainText(f.richHtmlContent).trim() : '');
+          if (fileContent) {
+            pushBlock(`[Documento: ${f.name}]\n${fileContent}`);
+          }
+        });
+      }
+
+      if (targetTopic?.keyPoints && targetTopic.keyPoints.length > 0) {
+        const kpText = targetTopic.keyPoints
+          .map((kp, idx) => `${idx + 1}. ${kp.title}: ${kp.detail}`)
+          .join('\n');
+        pushBlock(`[Puntos Clave del Tema]\n${kpText}`);
+      }
+
+      if (noteParts.length === 0 && targetTopic?.description?.trim()) {
+        pushBlock(targetTopic.description);
+      }
+    }
+
+    const notes = noteParts.join('\n\n');
 
     const summary =
       linkedNote?.summary && linkedNote.summary.trim().length > 0
@@ -588,6 +697,88 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     }
   };
 
+  // Guardar ediciones manuales del código Mermaid en la propiedad mindMap del tema
+  const handleSaveTopicMermaidMindMap = (topicId: string, newMermaidCode: string) => {
+    const updatedTopics = subject.topics.map((t) =>
+      t.id === topicId ? { ...t, mindMap: newMermaidCode } : t
+    );
+    onUpdateSubject({
+      ...subject,
+      topics: updatedTopics,
+    });
+  };
+
+  // Invocar a Gemini para generar una estructura de mapa mental en formato Mermaid.js basada en los apuntes y guardarla en topic.mindMap
+  const handleGenerateTopicMermaidMindMap = async (topic: Topic): Promise<string | null> => {
+    setExpandedMindmapByTopic((prev) => ({ ...prev, [topic.id]: true }));
+    setInlineMindmapViewModeByTopic((prev) => ({ ...prev, [topic.id]: 'mermaid' }));
+
+    const { linkedNote, cues, notes, summary } = getTopicCornellData(topic.id);
+
+    const generatedResult = await runSubjectAiTask(
+      `mindmap-${topic.id}`,
+      `Mapa Mental Mermaid IA (${topic.title})`,
+      async () => {
+        const response = await fetch('/api/gemini/generate-topic-mermaid-mindmap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topicTitle: topic.title,
+            topicDescription: topic.description || '',
+            subtopics: topic.subtopics || [],
+            subjectName: subject.name,
+            cues,
+            notes: notes || linkedNote?.notes || topic.generalNotes || topic.notes || '',
+            summary,
+            keyPoints: topic.keyPoints || [],
+          }),
+        });
+
+        const resData = await response.json();
+        if (!response.ok || !resData.success || !resData.data?.mermaidCode) {
+          throw new Error(
+            resData.error || 'No se pudo generar el mapa mental Mermaid desde los apuntes del tema.'
+          );
+        }
+
+        const mermaidCode: string = resData.data.mermaidCode;
+        const mindMapSummary: string = resData.data.summary || summary || '';
+
+        const updatedTopics = subject.topics.map((t) =>
+          t.id === topic.id
+            ? {
+                ...t,
+                mindMap: mermaidCode,
+                mindMapSummary,
+              }
+            : t
+        );
+
+        onUpdateSubject({
+          ...subject,
+          topics: updatedTopics,
+        });
+
+        return mermaidCode;
+      }
+    );
+
+    if (generatedResult) {
+      setAiSuccessBanner({
+        message: `¡Mapa mental interactivo (Mermaid.js) de "${topic.title}" generado con IA y guardado en el tema!`,
+        topicId: topic.id,
+      });
+      setTimeout(() => setAiSuccessBanner(null), 5000);
+    }
+
+    return generatedResult;
+  };
+
+  // Generar y desplegar directamente dentro del desplegable del tema el Mapa Mental con IA a partir de sus apuntes
+  const handleGenerateTopicMindmapFromNotes = async (topic: Topic) => {
+    await handleGenerateTopicMermaidMindMap(topic);
+  };
+
   // Save notes, attached imported documents & page counts directly inside a topic & synchronize with Cornell notes
   const handleSaveTopicNotes = (
     topicId: string,
@@ -599,11 +790,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     richGeneralNotes?: string,
     generalImages?: DocumentImageAsset[],
     generalComments?: DocumentComment[],
-    keyPoints?: EditableKeyPoint[]
+    keyPoints?: EditableKeyPoint[],
+    difficulty?: DifficultyLevel
   ) => {
     const nowIso = new Date().toISOString();
     const updatedTopics = subject.topics.map((t) => {
       if (t.id === topicId) {
+        const nextDifficulty = difficulty || t.difficulty;
         const nextAttached = attachedFiles !== undefined ? attachedFiles : t.attachedFiles;
         const orgPages = calculateOrganizedPagesFromFiles(nextAttached);
         const nextPages =
@@ -614,14 +807,16 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             : t.pageCount;
 
         const nextEstimatedHours = schedulerService.calculateTopicTime(
-          t.difficulty,
+          nextDifficulty,
           t.subtopics ? t.subtopics.length : 0,
           notes ? notes.length : t.description.length,
-          nextPages
+          nextPages,
+          preferences
         );
 
         return {
           ...t,
+          difficulty: nextDifficulty,
           notes,
           generalNotes: notes,
           richGeneralNotes:
@@ -1077,6 +1272,15 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           topic.generalImages || []
         );
 
+        const nextKeyPoints: EditableKeyPoint[] =
+          Array.isArray(resJson.data.keyTerms) && resJson.data.keyTerms.length > 0
+            ? resJson.data.keyTerms.map((kt: any, i: number) => ({
+                id: `kp-fmt-${Date.now()}-${i}`,
+                title: String(kt.term || `Concepto ${i + 1}`).trim(),
+                detail: String(kt.definition || '').trim(),
+              }))
+            : topic.keyPoints || [];
+
         const nowIso = new Date().toISOString();
         const updatedAttachedFiles =
           topic.attachedFiles && topic.attachedFiles.length > 0
@@ -1090,6 +1294,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         f.extractedImages || []
                       ),
                       summary: nextSummary,
+                      keyPoints: nextKeyPoints,
                       lastEditedAt: nowIso,
                     }
                   : f
@@ -1106,11 +1311,29 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           nextRichGeneral,
           topic.generalImages,
           topic.generalComments,
-          topic.keyPoints
+          nextKeyPoints,
+          topic.difficulty
         );
 
+        // Si el modal de apuntes de este tema está abierto (o si se pulsó desde Apuntes Libre), sincronizar y mostrar
+        setSelectedNotesTopic((prev) =>
+          prev && prev.id === topic.id
+            ? {
+                ...prev,
+                notes: structuredNotes,
+                generalNotes: structuredNotes,
+                richGeneralNotes: nextRichGeneral,
+                cues: nextCues,
+                summary: nextSummary,
+                keyPoints: nextKeyPoints,
+                attachedFiles: updatedAttachedFiles || prev.attachedFiles,
+              }
+            : prev
+        );
+
+        setExpandedKeyPointsByTopic((prev) => ({ ...prev, [topic.id]: true }));
         setAiSuccessBanner({
-          message: `¡Formato académico, preguntas Cornell y resumen de "${topic.title}" mejorados y guardados con IA!`,
+          message: `¡Formato académico, ${nextCues.length} preguntas Cornell y ${nextKeyPoints.length} conceptos clave IA de "${topic.title}" mejorados y guardados!`,
           topicId: topic.id,
         });
         setTimeout(() => setAiSuccessBanner(null), 5000);
@@ -1705,7 +1928,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     setEditingTopic(topic);
     setEditTopicTitle(topic.title);
     setEditTopicDesc(topic.description || '');
-    setEditTopicDifficulty(topic.difficulty);
+    setEditTopicDifficulty(schedulerService.normalizeDifficultyToCanonical(topic.difficulty));
     setEditTopicPages(topic.pageCount ? String(topic.pageCount) : '');
     setEditTopicSubtopics([...(topic.subtopics || [])]);
     setEditTopicNewSubtopicInput('');
@@ -1757,6 +1980,35 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     });
     setEditingTopic(null);
     setEditTopicNewSubtopicInput('');
+  };
+
+  // Cambiar directamente el nivel de dificultad de cualquier tema (Básico | Intermedio | Avanzado) desde su tarjeta
+  const handleChangeTopicDifficulty = (
+    topicId: string,
+    newDifficulty: DifficultyLevel
+  ) => {
+    const updatedTopics = subject.topics.map((t) => {
+      if (t.id === topicId) {
+        const nextEstimatedHours = schedulerService.calculateTopicTime(
+          newDifficulty,
+          t.subtopics ? t.subtopics.length : 0,
+          t.notes ? t.notes.length : t.description.length,
+          t.pageCount,
+          preferences
+        );
+        return {
+          ...t,
+          difficulty: newDifficulty,
+          estimatedHours: nextEstimatedHours,
+        };
+      }
+      return t;
+    });
+
+    onUpdateSubject({
+      ...subject,
+      topics: updatedTopics,
+    });
   };
 
   // ==========================================
@@ -1967,10 +2219,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
       Math.round(((topic.estimatedHours || 1.5) * 60) / totalSubtopics)
     );
     const isCompleted = (topic.completedSubtopics || []).includes(subtopicText);
-    const priorityMap: Record<'Baja' | 'Media' | 'Alta', 'baja' | 'media' | 'alta'> = {
+    const priorityMap: Record<DifficultyLevel, 'baja' | 'media' | 'alta'> = {
       Baja: 'baja',
       Media: 'media',
       Alta: 'alta',
+      Básico: 'baja',
+      Intermedio: 'media',
+      Avanzado: 'alta',
     };
 
     const newTask: Task = {
@@ -2017,10 +2272,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
       15,
       Math.round(((topic.estimatedHours || 1.5) * 60) / totalSubtopics)
     );
-    const priorityMap: Record<'Baja' | 'Media' | 'Alta', 'baja' | 'media' | 'alta'> = {
+    const priorityMap: Record<DifficultyLevel, 'baja' | 'media' | 'alta'> = {
       Baja: 'baja',
       Media: 'media',
       Alta: 'alta',
+      Básico: 'baja',
+      Intermedio: 'media',
+      Avanzado: 'alta',
     };
     const dueDate = topic.scheduledDate || new Date().toISOString().split('T')[0];
 
@@ -2441,7 +2699,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             <button
               type="button"
               onClick={() => onSelectForPomodoro(subject.id)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer whitespace-nowrap"
             >
               <Clock className="w-3.5 h-3.5" />
               <span>Estudiar con Pomodoro</span>
@@ -2449,17 +2707,29 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
 
             <button
               type="button"
-              onClick={() => {
-                setFeynmanChallengeTopicId(subject.topics[0]?.id);
-                setFeynmanChallengeSubtopic(undefined);
-                setActiveTab('feynman_challenge');
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl shadow-2xs transition-colors cursor-pointer"
-              title="Abrir módulo FeynmanChallenge para explicar un tema con tus propias palabras y analizar simplicidad y precisión con IA"
+              onClick={() => setIsGoalAssistantOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl shadow-2xs transition-colors cursor-pointer whitespace-nowrap"
+              title="Abrir Asistente Guiado de Metas SMART y crear tareas sincronizadas con tu calendario"
             >
-              <Brain className="w-3.5 h-3.5 text-purple-600" />
-              <span>Reto Feynman IA</span>
+              <Target className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Asistente SMART</span>
             </button>
+
+            {(preferences?.interfaceDesignMode || 'complete') === 'complete' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFeynmanChallengeTopicId(subject.topics[0]?.id);
+                  setFeynmanChallengeSubtopic(undefined);
+                  setActiveTab('feynman_challenge');
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-xl shadow-2xs transition-colors cursor-pointer whitespace-nowrap"
+                title="Abrir módulo FeynmanChallenge para explicar un tema con tus propias palabras y analizar simplicidad y precisión con IA"
+              >
+                <Brain className="w-3.5 h-3.5 text-purple-600" />
+                <span>Reto Feynman IA</span>
+              </button>
+            )}
 
             <div className="relative">
               <button
@@ -2575,6 +2845,36 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         type="button"
                         onClick={() => {
                           setShowHeaderToolsMenu(false);
+                          setActiveTab('prioridad');
+                        }}
+                        className="w-full px-3.5 py-2 text-left text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-900 flex items-center gap-2.5 transition-colors cursor-pointer"
+                      >
+                        <ArrowDownWideNarrow className="w-4 h-4 text-indigo-600 shrink-0" />
+                        <div>
+                          <div className="font-semibold">Panel de Prioridad y Pesos (%)</div>
+                          <div className="text-[10px] text-slate-400">Orden manual Drag & Drop de temas y tareas</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowHeaderToolsMenu(false);
+                          setIsGoalAssistantOpen(true);
+                        }}
+                        className="w-full px-3.5 py-2 text-left text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-900 flex items-center gap-2.5 transition-colors cursor-pointer"
+                      >
+                        <Target className="w-4 h-4 text-indigo-600 shrink-0" />
+                        <div>
+                          <div className="font-semibold">Asistente de Metas SMART</div>
+                          <div className="text-[10px] text-slate-400">Crear metas y tareas en calendario</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowHeaderToolsMenu(false);
                           setIsErrorModalOpen(true);
                         }}
                         className="w-full px-3.5 py-2 text-left text-xs text-slate-700 hover:bg-amber-50 hover:text-amber-900 flex items-center gap-2.5 transition-colors cursor-pointer"
@@ -2595,8 +2895,9 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           </div>
         </div>
 
-        {/* Mapa Interactivo de Temas en la Cabecera */}
-        {subject.topics.length > 0 && (
+        {/* Mapa Interactivo de Temas en la Cabecera (oculto en modo minimalista) */}
+        {subject.topics.length > 0 &&
+          (preferences?.interfaceDesignMode || 'complete') !== 'minimal' && (
           <div className="mt-5 pt-4 border-t border-slate-100">
             <div className="flex items-center justify-between text-[11px] text-slate-500 mb-2">
               <span className="font-semibold text-slate-700">
@@ -2739,7 +3040,8 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           </div>
         )}
 
-        {/* 4 Tarjetas de Métricas Visuales */}
+        {/* 4 Tarjetas de Métricas Visuales (ocultas en modo minimalista) */}
+        {(preferences?.interfaceDesignMode || 'complete') !== 'minimal' && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mt-5 pt-5 border-t border-slate-100">
           <div className="p-3.5 rounded-xl bg-slate-50/80 border border-slate-200/70">
             <div className="flex items-center justify-between">
@@ -2822,6 +3124,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             </div>
           </div>
         </div>
+        )}
         </div>
       </div>
 
@@ -3012,7 +3315,53 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           },
         ];
 
+        const manualPriorityItemsCount =
+          subject.topics.filter((t) => t.manualPriorityOrder !== undefined).length +
+          subject.tasks.filter((tk) => !tk.completed && tk.manualPriorityOrder !== undefined).length;
+        const totalQueueItemsCount =
+          subject.topics.length + subject.tasks.filter((tk) => !tk.completed).length;
+
+        const subjectGoalsList = getSubjectSmartGoals(subject);
+        const smartGoalsAvgPct =
+          subjectGoalsList.length > 0
+            ? Math.round(
+                subjectGoalsList.reduce(
+                  (acc, g) => acc + calculateSmartGoalProgress(g, subject).pct,
+                  0
+                ) / subjectGoalsList.length
+              )
+            : 0;
+
         const secondaryVisualTabs = [
+          {
+            id: 'objetivos_smart',
+            title: 'Objetivos SMART',
+            metric: subjectGoalsList.length > 0 ? `${smartGoalsAvgPct}%` : '0',
+            sublabel:
+              subjectGoalsList.length > 0
+                ? `${subjectGoalsList.length} ${subjectGoalsList.length === 1 ? 'meta' : 'metas'} SMART`
+                : 'Definir metas SMART',
+            pct: smartGoalsAvgPct,
+            icon: Target,
+            colorClass: 'text-blue-600',
+            barColor: 'bg-blue-500',
+          },
+          {
+            id: 'prioridad',
+            title: 'Prioridad y Pesos',
+            metric: `${totalQueueItemsCount}`,
+            sublabel:
+              manualPriorityItemsCount > 0
+                ? `${manualPriorityItemsCount} orden manual`
+                : 'Drag & drop · % Nota',
+            pct:
+              totalQueueItemsCount > 0
+                ? Math.min(100, Math.round((Math.max(1, manualPriorityItemsCount) / totalQueueItemsCount) * 100))
+                : 0,
+            icon: ArrowDownWideNarrow,
+            colorClass: 'text-indigo-600',
+            barColor: 'bg-indigo-500',
+          },
           {
             id: 'tareas',
             title: 'Tareas y Entregas',
@@ -3056,16 +3405,32 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         ];
 
         const isSidebarNav = preferences?.navigationPosition === 'sidebar';
+        const designMode = preferences?.interfaceDesignMode || 'complete';
+
+        const visibleCoreTabs =
+          designMode === 'minimal'
+            ? coreVisualTabs.filter((t) =>
+                ['temario', 'apuntes', 'active_recall', 'examenes'].includes(t.id)
+              )
+            : designMode === 'intermediate'
+            ? coreVisualTabs.filter((t) => t.id !== 'feynman_challenge')
+            : coreVisualTabs;
 
         return (
           <div className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
-            {/* Fila 1: 6 Tarjetas Visuales Principales */}
+            {/* Fila 1: Tarjetas Visuales Principales */}
             <div
-              className={`grid grid-cols-2 sm:grid-cols-3 ${
-                isSidebarNav ? 'xl:grid-cols-6' : 'lg:grid-cols-6'
+              className={`grid grid-cols-2 ${
+                designMode === 'minimal'
+                  ? 'sm:grid-cols-4'
+                  : designMode === 'intermediate'
+                  ? 'sm:grid-cols-3 lg:grid-cols-5'
+                  : isSidebarNav
+                  ? 'sm:grid-cols-3 xl:grid-cols-6'
+                  : 'sm:grid-cols-3 lg:grid-cols-6'
               } gap-2.5`}
             >
-              {coreVisualTabs.map((tab) => {
+              {visibleCoreTabs.map((tab) => {
                 const IconComponent = tab.icon;
                 const isActive = activeTab === tab.id;
                 return (
@@ -3139,58 +3504,160 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               })}
             </div>
 
-            {/* Fila 2: 4 Accesos Visuales Complementarios (Tareas, Calificaciones, Proyectos, Mapas Mentales) */}
-            <div
-              className={`grid grid-cols-2 ${
-                isSidebarNav ? 'xl:grid-cols-4' : 'lg:grid-cols-4'
-              } gap-2 pt-1 border-t border-slate-100`}
-            >
-              {secondaryVisualTabs.map((tab) => {
-                const IconComponent = tab.icon;
-                const isActive = activeTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => {
-                      setActiveTab(tab.id as any);
-                      setShowMoreTabsMenu(false);
-                    }}
-                    className={`px-3 py-2 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2.5 ${
-                      isActive
-                        ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
-                        : 'bg-slate-50/60 hover:bg-slate-100/80 border-slate-200/70 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <IconComponent
-                        className={`w-3.5 h-3.5 shrink-0 ${
-                          isActive ? 'text-white' : tab.colorClass
-                        }`}
-                      />
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-bold truncate">{tab.title}</div>
-                        <div
-                          className={`text-[10px] truncate ${
-                            isActive ? 'text-slate-300' : 'text-slate-400'
-                          }`}
-                        >
-                          {tab.sublabel}
-                        </div>
-                      </div>
-                    </div>
-
-                    <span
-                      className={`text-xs font-extrabold font-mono-numbers shrink-0 ${
-                        isActive ? 'text-white' : 'text-slate-900'
+            {/* Fila 2: Accesos Visuales Complementarios (Objetivos SMART, Prioridad, Tareas, Calificaciones, Proyectos, Mapas Mentales) */}
+            {designMode === 'complete' && (
+              <div
+                className={`grid grid-cols-2 ${
+                  isSidebarNav ? 'xl:grid-cols-6' : 'lg:grid-cols-6'
+                } gap-2 pt-1 border-t border-slate-100`}
+              >
+                {secondaryVisualTabs.map((tab) => {
+                  const IconComponent = tab.icon;
+                  const isActive = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveTab(tab.id as any);
+                        setShowMoreTabsMenu(false);
+                      }}
+                      className={`px-3 py-2 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2.5 ${
+                        isActive
+                          ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                          : 'bg-slate-50/60 hover:bg-slate-100/80 border-slate-200/70 text-slate-700'
                       }`}
                     >
-                      {tab.metric}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <IconComponent
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            isActive ? 'text-white' : tab.colorClass
+                          }`}
+                        />
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-bold truncate">{tab.title}</div>
+                          <div
+                            className={`text-[10px] truncate ${
+                              isActive ? 'text-slate-300' : 'text-slate-400'
+                            }`}
+                          >
+                            {tab.sublabel}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span
+                        className={`text-xs font-extrabold font-mono-numbers shrink-0 ${
+                          isActive ? 'text-white' : 'text-slate-900'
+                        }`}
+                      >
+                        {tab.metric}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {designMode === 'intermediate' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-100">
+                {secondaryVisualTabs
+                  .filter((t) =>
+                    ['objetivos_smart', 'prioridad', 'tareas', 'mapas_mentales'].includes(t.id)
+                  )
+                  .map((tab) => {
+                    const IconComponent = tab.icon;
+                    const isActive = activeTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => {
+                          setActiveTab(tab.id as any);
+                          setShowMoreTabsMenu(false);
+                        }}
+                        className={`px-3 py-2 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2.5 ${
+                          isActive
+                            ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                            : 'bg-slate-50/60 hover:bg-slate-100/80 border-slate-200/70 text-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <IconComponent
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              isActive ? 'text-white' : tab.colorClass
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-[11px] font-bold truncate">{tab.title}</div>
+                            <div
+                              className={`text-[10px] truncate ${
+                                isActive ? 'text-slate-300' : 'text-slate-400'
+                              }`}
+                            >
+                              {tab.sublabel}
+                            </div>
+                          </div>
+                        </div>
+
+                        <span
+                          className={`text-xs font-extrabold font-mono-numbers shrink-0 ${
+                            isActive ? 'text-white' : 'text-slate-900'
+                          }`}
+                        >
+                          {tab.metric}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
+
+            {designMode === 'minimal' && (
+              <div className="pt-1 border-t border-slate-100 flex items-center justify-between gap-2">
+                {secondaryVisualTabs
+                  .filter((t) => t.id === 'objetivos_smart')
+                  .map((tab) => {
+                    const IconComponent = tab.icon;
+                    const isActive = activeTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setActiveTab('objetivos_smart')}
+                        className={`w-full px-3.5 py-2 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2.5 ${
+                          isActive
+                            ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                            : 'bg-slate-50/60 hover:bg-slate-100/80 border-slate-200/70 text-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <IconComponent
+                            className={`w-3.5 h-3.5 shrink-0 ${
+                              isActive ? 'text-white' : tab.colorClass
+                            }`}
+                          />
+                          <span className="text-xs font-bold truncate">{tab.title}</span>
+                          <span
+                            className={`text-[11px] truncate ${
+                              isActive ? 'text-slate-300' : 'text-slate-500'
+                            }`}
+                          >
+                            · {tab.sublabel}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-xs font-extrabold font-mono-numbers shrink-0 ${
+                            isActive ? 'text-white' : 'text-slate-900'
+                          }`}
+                        >
+                          {tab.metric}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         );
       })()}
@@ -3272,24 +3739,37 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 <option value="digital">💻 Digitales ({digitalTopicsCount})</option>
               </select>
 
-              <button
-                type="button"
-                onClick={() => setTopicViewMode(topicViewMode === 'lista' ? 'kanban' : 'lista')}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-all cursor-pointer shadow-2xs"
-                title="Alternar entre vista en Lista y Tablero Kanban"
-              >
-                {topicViewMode === 'lista' ? (
-                  <>
-                    <Kanban className="w-3.5 h-3.5 text-blue-600" />
-                    <span>Ver Kanban</span>
-                  </>
-                ) : (
-                  <>
-                    <LayoutList className="w-3.5 h-3.5 text-slate-700" />
-                    <span>Ver Lista</span>
-                  </>
-                )}
-              </button>
+              {(preferences?.interfaceDesignMode || 'complete') !== 'minimal' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('prioridad')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
+                    title="Reordenar manualmente temas y tareas por % de peso académico para influir en la planificación automática"
+                  >
+                    <ArrowDownWideNarrow className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Prioridad y Pesos</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTopicViewMode(topicViewMode === 'lista' ? 'kanban' : 'lista')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-all cursor-pointer shadow-2xs whitespace-nowrap"
+                    title="Alternar entre vista en Lista y Tablero Kanban"
+                  >
+                    {topicViewMode === 'lista' ? (
+                      <>
+                        <Kanban className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Ver Kanban</span>
+                      </>
+                    ) : (
+                      <>
+                        <LayoutList className="w-3.5 h-3.5 text-slate-700" />
+                        <span>Ver Lista</span>
+                      </>
+                    )}
+                  </button>
+                </>
+              )}
 
               <button
                 type="button"
@@ -3515,20 +3995,20 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Dificultad</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Nivel de Dificultad</label>
                   <select
-                    value={newTopicDifficulty}
-                    onChange={(e) => setNewTopicDifficulty(e.target.value as any)}
+                    value={schedulerService.normalizeDifficultyToCanonical(newTopicDifficulty)}
+                    onChange={(e) => setNewTopicDifficulty(e.target.value as DifficultyLevel)}
                     className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-slate-800 focus:outline-none"
                   >
-                    <option value="Baja">
-                      Baja (~{schedulerService.getMinutesPerPage('Baja', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Básico">
+                      Básico (~{schedulerService.getMinutesPerPage('Básico', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
-                    <option value="Media">
-                      Media (~{schedulerService.getMinutesPerPage('Media', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Intermedio">
+                      Intermedio (~{schedulerService.getMinutesPerPage('Intermedio', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
-                    <option value="Alta">
-                      Alta (~{schedulerService.getMinutesPerPage('Alta', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Avanzado">
+                      Avanzado (~{schedulerService.getMinutesPerPage('Avanzado', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
                   </select>
                 </div>
@@ -3691,6 +4171,9 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               onStartPomodoro={(topicId) => onSelectForPomodoro(subject.id, topicId)}
               onEditTopic={(t) => handleOpenEditTopicModal(t)}
               onDeleteTopic={(topicId) => handleDeleteTopic(topicId)}
+              onUpdateTopicDifficulty={(topicId, newDiff) =>
+                handleChangeTopicDifficulty(topicId, newDiff)
+              }
             />
           ) : (
             /* Lista Visual de Temas (Tarjetas Estructuradas en 3 Zonas) */
@@ -3786,17 +4269,40 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                               Tema {idx + 1}
                             </span>
                             <span>·</span>
-                            <span
-                              className={`font-semibold ${
-                                topic.difficulty === 'Alta'
-                                  ? 'text-rose-600'
-                                  : topic.difficulty === 'Baja'
-                                  ? 'text-emerald-600'
-                                  : 'text-amber-600'
-                              }`}
+                            {/* Selector interactivo directo de Nivel de Dificultad (Básico, Intermedio, Avanzado) */}
+                            <div
+                              className="inline-flex items-center gap-0.5 bg-slate-100/90 border border-slate-200 rounded-lg p-0.5"
+                              title="Clasificar nivel de dificultad del material de este tema (Básico, Intermedio, Avanzado)"
                             >
-                              Dificultad {topic.difficulty}
-                            </span>
+                              <span className="text-[10px] font-bold text-slate-500 px-1.5">
+                                Dificultad:
+                              </span>
+                              {(['Básico', 'Intermedio', 'Avanzado'] as const).map((diffLevel) => {
+                                const canonicalTopicDiff =
+                                  schedulerService.normalizeDifficultyToCanonical(topic.difficulty);
+                                const isCurrent = canonicalTopicDiff === diffLevel;
+                                const activeColor =
+                                  diffLevel === 'Avanzado'
+                                    ? 'bg-rose-600 text-white shadow-2xs'
+                                    : diffLevel === 'Intermedio'
+                                    ? 'bg-amber-500 text-white shadow-2xs'
+                                    : 'bg-emerald-600 text-white shadow-2xs';
+                                return (
+                                  <button
+                                    key={diffLevel}
+                                    type="button"
+                                    onClick={() => handleChangeTopicDifficulty(topic.id, diffLevel)}
+                                    className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${
+                                      isCurrent
+                                        ? activeColor
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+                                    }`}
+                                  >
+                                    {diffLevel}
+                                  </button>
+                                );
+                              })}
+                            </div>
                             <span>·</span>
                             {effectivePages > 0 ? (
                               <button
@@ -3903,6 +4409,51 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                             );
                           })}
                         </div>
+
+                        {/* Selector de Prioridad de Agendado al Calendario (% Nota Final / Manual) */}
+                        {(() => {
+                          const prioInfo = schedulerService.calculateTopicSchedulingPriority(
+                            topic,
+                            subject,
+                            todayStr
+                          );
+                          const currentPrio = topic.schedulingPriority || 'auto';
+                          const prioColor =
+                            prioInfo.effectiveLevel === 'critica'
+                              ? 'bg-rose-50 text-rose-800 border-rose-300'
+                              : prioInfo.effectiveLevel === 'alta'
+                              ? 'bg-amber-50 text-amber-800 border-amber-300'
+                              : prioInfo.effectiveLevel === 'media'
+                              ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                              : 'bg-slate-50 text-slate-600 border-slate-200';
+                          return (
+                            <select
+                              value={currentPrio}
+                              onChange={(e) => {
+                                const nextLevel = e.target.value as SchedulingPriorityLevel;
+                                const updatedTopics = subject.topics.map((t) =>
+                                  t.id === topic.id
+                                    ? { ...t, schedulingPriority: nextLevel }
+                                    : t
+                                );
+                                onUpdateSubject({
+                                  ...subject,
+                                  topics: updatedTopics,
+                                });
+                              }}
+                              className={`text-[11px] px-2.5 py-1.5 rounded-xl border font-bold cursor-pointer focus:outline-none transition-colors shadow-2xs ${prioColor}`}
+                              title={`Prioridad al agendar al calendario: ${prioInfo.summaryLabel} (${prioInfo.reasons.join(' · ')}) — Exámenes: ${prioInfo.examWeightPct}% · Proyectos: ${prioInfo.projectWeightPct}% · Tareas: ${prioInfo.taskWeightPct}% = ${prioInfo.totalGradeWeightPct}% de la nota final`}
+                            >
+                              <option value="auto">
+                                🎯 Prioridad Auto ({prioInfo.totalGradeWeightPct}% nota)
+                              </option>
+                              <option value="critica">🔥 Prioridad Crítica ({prioInfo.totalGradeWeightPct}% nota)</option>
+                              <option value="alta">⚡ Prioridad Alta ({prioInfo.totalGradeWeightPct}% nota)</option>
+                              <option value="media">● Prioridad Media ({prioInfo.totalGradeWeightPct}% nota)</option>
+                              <option value="baja">▽ Prioridad Baja ({prioInfo.totalGradeWeightPct}% nota)</option>
+                            </select>
+                          );
+                        })()}
 
                         {/* Selector de Estado */}
                         <select
@@ -4078,6 +4629,56 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                                     type="button"
                                     onClick={() => {
                                       setOpenActionsMenuTopicId(null);
+                                      handleGenerateTopicMermaidMindMap(topic);
+                                    }}
+                                    className="w-full px-3.5 py-2.5 text-left text-xs text-violet-950 bg-violet-50/70 hover:bg-violet-100/90 flex items-center gap-2.5 transition-colors cursor-pointer"
+                                  >
+                                    <GitBranch className="w-4 h-4 text-violet-600 shrink-0" />
+                                    <div>
+                                      <div className="font-bold flex items-center gap-1">
+                                        <span>
+                                          {topic.mindMap
+                                            ? 'Regenerar Mapa Mental IA (Mermaid)'
+                                            : 'Generar Mapa Mental IA (Mermaid)'}
+                                        </span>
+                                        <Sparkles className="w-3 h-3 text-violet-600" />
+                                      </div>
+                                      <div className="text-[10px] text-violet-700/80">
+                                        Estructura Mermaid.js interactiva desde tus apuntes
+                                      </div>
+                                    </div>
+                                  </button>
+
+                                  {topic.mindMap && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setOpenActionsMenuTopicId(null);
+                                        setExpandedMindmapByTopic((prev) => ({
+                                          ...prev,
+                                          [topic.id]: true,
+                                        }));
+                                        setInlineMindmapViewModeByTopic((prev) => ({
+                                          ...prev,
+                                          [topic.id]: 'mermaid',
+                                        }));
+                                      }}
+                                      className="w-full px-3.5 py-2 text-left text-xs text-indigo-900 hover:bg-indigo-50 flex items-center gap-2.5 transition-colors cursor-pointer"
+                                    >
+                                      <Network className="w-4 h-4 text-indigo-600 shrink-0" />
+                                      <div>
+                                        <div className="font-semibold">Ver Mapa Mental Guardado</div>
+                                        <div className="text-[10px] text-slate-400">
+                                          Abrir visor interactivo MindMapViewer del tema
+                                        </div>
+                                      </div>
+                                    </button>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setOpenActionsMenuTopicId(null);
                                       setFlashcardGenTopicId(topic.id);
                                       setFlashcardGenNoteId(undefined);
                                       setIsFlashcardGeneratorOpen(true);
@@ -4119,11 +4720,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                                     }}
                                     className="w-full px-3.5 py-2 text-left text-xs text-slate-700 hover:bg-indigo-50 hover:text-indigo-900 flex items-center gap-2.5 transition-colors cursor-pointer"
                                   >
-                                    <GitBranch className="w-4 h-4 text-indigo-600 shrink-0" />
+                                    <Maximize2 className="w-4 h-4 text-indigo-600 shrink-0" />
                                     <div>
-                                      <div className="font-semibold">Mapa Mental Cornell (D3.js)</div>
+                                      <div className="font-semibold">Abrir Mapa Mental a Pantalla Completa</div>
                                       <div className="text-[10px] text-slate-400">
-                                        Árbol jerárquico IA desde apuntes Cornell
+                                        Visor interactivo D3.js en ventana amplia
                                       </div>
                                     </div>
                                   </button>
@@ -4967,6 +5568,357 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         </div>
                       )}
 
+                      {/* Panel Desplegable en Cada Tema: Mapa Mental con IA de los Apuntes (MindMapViewer Mermaid + D3) */}
+                      {(() => {
+                        const topicMindmaps = subject.mindmaps.filter((m) =>
+                          m.topicIds.includes(topic.id)
+                        );
+                        const latestTopicMindmap = topicMindmaps[0] || null;
+                        const hasMermaidMindMap = Boolean(
+                          topic.mindMap && topic.mindMap.trim().length > 0
+                        );
+                        const hasAnyTopicMindmap =
+                          hasMermaidMindMap || Boolean(latestTopicMindmap);
+                        const isMindmapExpanded = Boolean(expandedMindmapByTopic[topic.id]);
+                        const isGeneratingTopicMindmap = Boolean(
+                          aiLoadingByKey[`mindmap-${topic.id}`]
+                        );
+                        const defaultMode: 'mermaid' | 'd3' | 'branches' | 'outline' =
+                          hasMermaidMindMap || !latestTopicMindmap ? 'mermaid' : 'd3';
+                        const inlineMode =
+                          inlineMindmapViewModeByTopic[topic.id] || defaultMode;
+                        const topicNotesInfo = getTopicCornellData(topic.id);
+                        const notesWordCount = (topicNotesInfo.notes || '')
+                          .split(/\s+/)
+                          .filter(Boolean).length;
+                        const hasAttachedDocs = Boolean(
+                          topic.attachedFiles && topic.attachedFiles.length > 0
+                        );
+
+                        return (
+                          <div className="rounded-xl border border-violet-200/90 bg-gradient-to-r from-violet-50/50 via-indigo-50/30 to-white p-3 space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedMindmapByTopic((prev) => ({
+                                    ...prev,
+                                    [topic.id]: !prev[topic.id],
+                                  }))
+                                }
+                                className="inline-flex items-center gap-1.5 text-xs font-bold text-violet-950 hover:text-violet-700 cursor-pointer"
+                              >
+                                <GitBranch className="w-3.5 h-3.5 text-violet-600" />
+                                <span>Mapa Mental con IA de los Apuntes</span>
+                                {hasAnyTopicMindmap ? (
+                                  <span className="px-1.5 py-0.5 rounded-md bg-violet-100 text-violet-800 text-[10px] font-mono-numbers">
+                                    {hasMermaidMindMap ? 'Mermaid IA ✓' : 'Generado ✓'}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-normal text-slate-500">
+                                    ({notesWordCount} palabras de apuntes
+                                    {hasAttachedDocs
+                                      ? ` · ${topic.attachedFiles?.length} doc(s)`
+                                      : ''}
+                                    )
+                                  </span>
+                                )}
+                                {isMindmapExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5 text-violet-500" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5 text-violet-500" />
+                                )}
+                              </button>
+
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  disabled={isGeneratingTopicMindmap}
+                                  onClick={() => handleGenerateTopicMermaidMindMap(topic)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-[11px] font-bold transition-colors cursor-pointer shadow-2xs"
+                                  title="Invocar a la IA (Gemini) para generar un mapa mental interactivo en formato Mermaid.js basado en los apuntes de este tema"
+                                >
+                                  {isGeneratingTopicMindmap ? (
+                                    <>
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                      <span>Generando Mapa IA...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Sparkles className="w-3 h-3" />
+                                      <span>
+                                        {hasAnyTopicMindmap
+                                          ? 'Regenerar Mapa IA'
+                                          : 'Hacer Mapa Mental con IA'}
+                                      </span>
+                                    </>
+                                  )}
+                                </button>
+
+                                {latestTopicMindmap && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleOpenCornellMindmapForTopic(topic.id, false)
+                                    }
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white hover:bg-violet-50 text-violet-800 border border-violet-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                                    title="Abrir el árbol D3.js de este tema en ventana amplia"
+                                  >
+                                    <Maximize2 className="w-3 h-3 text-violet-600" />
+                                    <span>Árbol D3</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {isMindmapExpanded && (
+                              <div className="pt-2 border-t border-violet-200/70 space-y-3 animate-in fade-in duration-150">
+                                {isGeneratingTopicMindmap ? (
+                                  <div className="p-6 rounded-xl bg-white border border-violet-100 flex flex-col items-center justify-center text-center space-y-2">
+                                    <Loader2 className="w-6 h-6 text-violet-600 animate-spin" />
+                                    <div className="text-xs font-bold text-slate-900">
+                                      Generando estructura Mermaid.js de &ldquo;{topic.title}&rdquo; con Gemini...
+                                    </div>
+                                    <p className="text-[11px] text-slate-500 max-w-md">
+                                      Analizando tus apuntes ({notesWordCount} palabras), ideas clave y resumen para construir el mapa mental interactivo y guardarlo en el tema.
+                                    </p>
+                                  </div>
+                                ) : hasAnyTopicMindmap ? (
+                                  <div className="space-y-2.5">
+                                    {/* Barra de modo de vista dentro del desplegable */}
+                                    <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 rounded-xl border border-violet-100">
+                                      <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg text-[11px] flex-wrap">
+                                        {hasMermaidMindMap && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setInlineMindmapViewModeByTopic((prev) => ({
+                                                ...prev,
+                                                [topic.id]: 'mermaid',
+                                              }))
+                                            }
+                                            className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                                              inlineMode === 'mermaid'
+                                                ? 'bg-white text-violet-700 shadow-2xs'
+                                                : 'text-slate-600 hover:text-slate-900'
+                                            }`}
+                                          >
+                                            Mapa Mermaid Interactivo
+                                          </button>
+                                        )}
+                                        {latestTopicMindmap && (
+                                          <>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setInlineMindmapViewModeByTopic((prev) => ({
+                                                  ...prev,
+                                                  [topic.id]: 'd3',
+                                                }))
+                                              }
+                                              className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                                                inlineMode === 'd3'
+                                                  ? 'bg-white text-violet-700 shadow-2xs'
+                                                  : 'text-slate-600 hover:text-slate-900'
+                                              }`}
+                                            >
+                                              Árbol D3.js
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setInlineMindmapViewModeByTopic((prev) => ({
+                                                  ...prev,
+                                                  [topic.id]: 'branches',
+                                                }))
+                                              }
+                                              className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                                                inlineMode === 'branches'
+                                                  ? 'bg-white text-violet-700 shadow-2xs'
+                                                  : 'text-slate-600 hover:text-slate-900'
+                                              }`}
+                                            >
+                                              Ramas Conceptuales
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setInlineMindmapViewModeByTopic((prev) => ({
+                                                  ...prev,
+                                                  [topic.id]: 'outline',
+                                                }))
+                                              }
+                                              className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                                                inlineMode === 'outline'
+                                                  ? 'bg-white text-violet-700 shadow-2xs'
+                                                  : 'text-slate-600 hover:text-slate-900'
+                                              }`}
+                                            >
+                                              Esquema de Texto
+                                            </button>
+                                          </>
+                                        )}
+                                      </div>
+
+                                      <div className="flex items-center gap-1.5">
+                                        {!latestTopicMindmap && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleGenerateCornellMindmap(topic.id)}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-violet-200 bg-violet-50/70 hover:bg-violet-100 text-[11px] font-semibold text-violet-800 cursor-pointer"
+                                          >
+                                            <GitBranch className="w-3 h-3 text-violet-600" />
+                                            <span>Generar también Árbol D3</span>
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setSelectedDiagramTopic(topic);
+                                            setIsDiagramModalOpen(true);
+                                          }}
+                                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[11px] font-semibold text-blue-800 cursor-pointer"
+                                        >
+                                          <Network className="w-3 h-3 text-blue-600" />
+                                          <span>Modal Pantalla Completa</span>
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {inlineMode === 'mermaid' && hasMermaidMindMap ? (
+                                      <MindMapViewer
+                                        mermaidCode={topic.mindMap!}
+                                        topicTitle={topic.title}
+                                        summary={topic.mindMapSummary || topic.summary}
+                                        isGenerating={isGeneratingTopicMindmap}
+                                        onRegenerate={() => handleGenerateTopicMermaidMindMap(topic)}
+                                        onSaveCode={(newCode) =>
+                                          handleSaveTopicMermaidMindMap(topic.id, newCode)
+                                        }
+                                        height={430}
+                                      />
+                                    ) : inlineMode === 'd3' && latestTopicMindmap ? (
+                                      <div className="rounded-xl overflow-hidden border border-violet-200/80 bg-white">
+                                        <D3MindMapCanvas
+                                          rootNode={latestTopicMindmap.rootNode}
+                                          title={latestTopicMindmap.title}
+                                          summary={latestTopicMindmap.summary}
+                                          subjectColor={subject.color}
+                                          height={420}
+                                        />
+                                      </div>
+                                    ) : inlineMode === 'branches' && latestTopicMindmap ? (
+                                      <div className="p-3.5 rounded-xl bg-white border border-violet-100 space-y-3">
+                                        <div className="p-3 rounded-xl bg-slate-900 text-white">
+                                          <div className="text-xs font-bold">
+                                            {latestTopicMindmap.rootNode.label}
+                                          </div>
+                                          <p className="text-[11px] text-slate-300 mt-0.5">
+                                            {latestTopicMindmap.rootNode.description}
+                                          </p>
+                                        </div>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                          {(latestTopicMindmap.rootNode.children || []).map(
+                                            (branch) => (
+                                              <div
+                                                key={branch.id}
+                                                className="p-3 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2"
+                                              >
+                                                <div>
+                                                  <span className="text-xs font-bold text-violet-900">
+                                                    {branch.label}
+                                                  </span>
+                                                  <p className="text-[11px] text-slate-600 mt-0.5">
+                                                    {branch.description}
+                                                  </p>
+                                                </div>
+                                                {branch.children && branch.children.length > 0 && (
+                                                  <div className="space-y-1.5 pl-2.5 border-l-2 border-violet-300">
+                                                    {branch.children.map((leaf) => (
+                                                      <div
+                                                        key={leaf.id}
+                                                        className="p-2 rounded-lg bg-white border border-slate-200/80 text-[11px]"
+                                                      >
+                                                        <div className="font-bold text-slate-800">
+                                                          • {leaf.label}
+                                                        </div>
+                                                        <div className="text-slate-600 mt-0.5">
+                                                          {leaf.description}
+                                                        </div>
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )
+                                          )}
+                                        </div>
+                                      </div>
+                                    ) : latestTopicMindmap ? (
+                                      <div className="p-4 rounded-xl bg-white border border-violet-100 text-xs space-y-2">
+                                        <div className="font-bold text-slate-900">
+                                          {latestTopicMindmap.title}
+                                        </div>
+                                        {latestTopicMindmap.summary && (
+                                          <p className="text-[11px] text-slate-600 pb-2 border-b border-slate-100">
+                                            {latestTopicMindmap.summary}
+                                          </p>
+                                        )}
+                                        <div className="space-y-2 pl-2 border-l-2 border-violet-200">
+                                          {(latestTopicMindmap.rootNode.children || []).map(
+                                            (branch) => (
+                                              <div key={branch.id} className="space-y-1">
+                                                <div className="font-bold text-violet-900">
+                                                  {branch.label}:{' '}
+                                                  <span className="font-normal text-slate-600">
+                                                    {branch.description}
+                                                  </span>
+                                                </div>
+                                                {branch.children && branch.children.length > 0 && (
+                                                  <div className="pl-4 space-y-1 text-[11px] text-slate-700">
+                                                    {branch.children.map((leaf) => (
+                                                      <div key={leaf.id}>
+                                                        <strong className="text-slate-900">
+                                                          • {leaf.label}:
+                                                        </strong>{' '}
+                                                        {leaf.description}
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                              </div>
+                                            )
+                                          )}
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : (
+                                  <div className="p-4 rounded-xl bg-white border border-violet-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+                                    <div className="space-y-0.5">
+                                      <div className="text-xs font-bold text-slate-900">
+                                        Convierte los apuntes de &ldquo;{topic.title}&rdquo; en un Mapa Mental Mermaid.js con IA
+                                      </div>
+                                      <p className="text-[11px] text-slate-500">
+                                        Gemini analizará tus apuntes libres, notas Cornell, documentos adjuntos y puntos clave para generar y guardar un mapa mental interactivo en el tema.
+                                      </p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleGenerateTopicMermaidMindMap(topic)}
+                                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer shrink-0"
+                                    >
+                                      <Sparkles className="w-3.5 h-3.5" />
+                                      <span>Generar Mapa Mental con IA</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       {/* Panel de Grabación de Voz en Vivo y Notas Generales del Tema */}
                       {(voiceRecordingTopicId === topic.id ||
                         voiceNoticeByTopic[topic.id] ||
@@ -5205,6 +6157,49 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                           )}
                         </button>
 
+                        {/* 3b. Mapa Mental IA de los Apuntes (Desplegable directo en el tema) */}
+                        <button
+                          type="button"
+                          disabled={Boolean(aiLoadingByKey[`mindmap-${topic.id}`])}
+                          onClick={() => {
+                            const hasMindmap =
+                              Boolean(topic.mindMap && topic.mindMap.trim().length > 0) ||
+                              subject.mindmaps.some((m) => m.topicIds.includes(topic.id));
+                            if (!hasMindmap) {
+                              handleGenerateTopicMermaidMindMap(topic);
+                            } else {
+                              setExpandedMindmapByTopic((prev) => ({
+                                ...prev,
+                                [topic.id]: !prev[topic.id],
+                              }));
+                            }
+                          }}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer disabled:opacity-60 ${
+                            expandedMindmapByTopic[topic.id]
+                              ? 'border-violet-600 bg-violet-600 text-white shadow-2xs'
+                              : 'border-violet-200 bg-white hover:bg-violet-50 text-violet-900'
+                          }`}
+                          title="Generar o ver el mapa mental con IA a partir de los apuntes de este tema"
+                        >
+                          {aiLoadingByKey[`mindmap-${topic.id}`] ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Creando Mapa IA...</span>
+                            </>
+                          ) : (
+                            <>
+                              <GitBranch
+                                className={`w-3.5 h-3.5 ${
+                                  expandedMindmapByTopic[topic.id]
+                                    ? 'text-white'
+                                    : 'text-violet-600'
+                                }`}
+                              />
+                              <span>Mapa Mental IA</span>
+                            </>
+                          )}
+                        </button>
+
                         {/* 4. Reto Feynman */}
                         <button
                           type="button"
@@ -5217,6 +6212,25 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         >
                           <Brain className="w-3.5 h-3.5 text-purple-600" />
                           <span>Reto Feynman</span>
+                        </button>
+
+                        {/* 5. Crear / Revisar Preguntas Propias (Test, V/F, Flashcards) */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCustomQuestionsModalTopicId(topic.id);
+                            setIsCustomQuestionsModalOpen(true);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-300 bg-amber-50/70 hover:bg-amber-100 text-amber-900 text-xs font-bold transition-all cursor-pointer"
+                          title="Crear y revisar tus propias flashcards, preguntas de test y verdadero/falso de este tema"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5 text-amber-700" />
+                          <span>
+                            Mis Preguntas / V-F / Flashcards
+                            {(topic.customQuestions?.length || 0) > 0
+                              ? ` (${topic.customQuestions?.length})`
+                              : ''}
+                          </span>
                         </button>
                       </div>
 
@@ -5272,6 +6286,29 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
       </div>
         );
       })()}
+
+      {/* Tab: Objetivos SMART por Asignatura */}
+      {activeTab === 'objetivos_smart' && (
+        <SubjectSmartGoalsTab
+          subject={subject}
+          allSubjects={allSubjects}
+          preferences={preferences}
+          onUpdateSubject={onUpdateSubject}
+          onOpenGoalAssistant={() => setIsGoalAssistantOpen(true)}
+        />
+      )}
+
+      {/* Tab: Panel Drag & Drop de Prioridad y Peso Académico */}
+      {activeTab === 'prioridad' && (
+        <SubjectPriorityDashboard
+          subject={subject}
+          preferences={preferences}
+          onUpdateSubject={onUpdateSubject}
+          onOpenGoalAssistant={() => setIsGoalAssistantOpen(true)}
+          onStartPomodoro={(subId, topId) => onSelectForPomodoro(subId, topId)}
+          onOpenExamsManager={onOpenExamsManager}
+        />
+      )}
 
       {/* Tab: Vueltas al Temario */}
       {activeTab === 'vueltas' && (
@@ -5353,25 +6390,88 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                               </>
                             )}
                           </div>
+                          {/* Selector rápido de Nivel de Dificultad (Básico, Intermedio, Avanzado) en tarjeta de Apuntes */}
+                          <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                            <span className="text-[10px] font-semibold text-slate-400">
+                              Dificultad:
+                            </span>
+                            {(['Básico', 'Intermedio', 'Avanzado'] as const).map((dl) => {
+                              const active =
+                                schedulerService.normalizeDifficultyToCanonical(t.difficulty) ===
+                                dl;
+                              return (
+                                <button
+                                  key={dl}
+                                  type="button"
+                                  onClick={() => handleChangeTopicDifficulty(t.id, dl)}
+                                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                                    active
+                                      ? dl === 'Avanzado'
+                                        ? 'bg-rose-600 text-white'
+                                        : dl === 'Intermedio'
+                                        ? 'bg-amber-500 text-white'
+                                        : 'bg-emerald-600 text-white'
+                                      : 'bg-slate-200/70 text-slate-600 hover:bg-slate-300'
+                                  }`}
+                                >
+                                  {dl}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-slate-200/70">
                         <button
                           type="button"
                           onClick={() => {
                             setSelectedNotesTopic(t);
                             setIsNotesModalOpen(true);
                           }}
-                          className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                           <span>Lienzo Libre y Docs</span>
                         </button>
                         <button
                           type="button"
+                          disabled={Boolean(aiLoadingByKey[`format-${t.id}`])}
+                          onClick={async () => {
+                            await handleImproveTopicFormatAI(t);
+                            const updated =
+                              subject.topics.find((item) => item.id === t.id) || t;
+                            setSelectedNotesTopic(updated);
+                            setIsNotesModalOpen(true);
+                          }}
+                          className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200 text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                          title="Mejorar formato con IA de los apuntes y documentos de este tema y abrir el editor"
+                        >
+                          {aiLoadingByKey[`format-${t.id}`] ? (
+                            <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3.5 h-3.5 text-sky-600" />
+                          )}
+                          <span>Mejorar formato IA</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={Boolean(aiLoadingByKey[`mindmap-${t.id}`])}
+                          onClick={() => handleOpenCornellMindmapForTopic(t.id, true)}
+                          className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 bg-violet-50 hover:bg-violet-100 text-violet-900 border border-violet-200 text-xs font-bold rounded-xl transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+                          title="Generar o abrir Mapa Mental con IA a partir de los apuntes de este tema"
+                        >
+                          {aiLoadingByKey[`mindmap-${t.id}`] ? (
+                            <Loader2 className="w-3.5 h-3.5 text-violet-600 animate-spin" />
+                          ) : (
+                            <GitBranch className="w-3.5 h-3.5 text-violet-600" />
+                          )}
+                          <span>Mapa Mental IA</span>
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => setReadingTopic(t)}
-                          className="px-2.5 py-1.5 bg-white hover:bg-purple-50 text-slate-700 hover:text-purple-700 border border-slate-200 hover:border-purple-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+                          className="px-2 py-1.5 bg-white hover:bg-purple-50 text-slate-700 hover:text-purple-700 border border-slate-200 hover:border-purple-200 text-xs font-semibold rounded-xl transition-colors cursor-pointer whitespace-nowrap"
                           title="Abrir este tema en Modo Lectura"
                         >
                           <BookOpen className="w-3.5 h-3.5 text-purple-600" />
@@ -5724,6 +6824,10 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 const filtered = subject.flashcards.filter((f) => f.id !== cardId);
                 onUpdateSubject({ ...subject, flashcards: filtered });
               }}
+              onOpenCustomQuestionsModal={(topicId) => {
+                setCustomQuestionsModalTopicId(topicId || subject.topics[0]?.id);
+                setIsCustomQuestionsModalOpen(true);
+              }}
             />
           </div>
 
@@ -5738,6 +6842,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 onUpdateSubject({ ...subject, errorLogs: [mistake, ...subject.errorLogs] });
               }}
               onOpenErrorAnalysis={() => setIsErrorModalOpen(true)}
+              onSaveFlashcards={(subId, newCards) => {
+                onUpdateSubject({
+                  ...subject,
+                  flashcards: [...newCards, ...(subject.flashcards || [])],
+                });
+              }}
+              onUpdateSubject={onUpdateSubject}
             />
           </div>
         </div>
@@ -6420,11 +7531,29 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setIsGoalAssistantOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-xl border border-indigo-200 transition-colors cursor-pointer whitespace-nowrap"
+                title="Crear una meta SMART guiada con tareas sincronizadas en tu calendario"
+              >
+                <Target className="w-3.5 h-3.5" />
+                <span>Asistente SMART</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('prioridad')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-xl border border-slate-200 transition-colors cursor-pointer whitespace-nowrap"
+                title="Ordenar manualmente tareas y temas por peso en la nota"
+              >
+                <ArrowDownWideNarrow className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Ordenar Prioridad</span>
+              </button>
               {onOpenExamsManager && (
                 <button
                   type="button"
                   onClick={() => onOpenExamsManager(subject.id)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold rounded-xl border border-blue-200 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold rounded-xl border border-blue-200 transition-colors cursor-pointer whitespace-nowrap"
                   title="Gestionar tareas y exámenes con cálculo ponderado"
                 >
                   <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -6433,7 +7562,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               )}
               <button
                 onClick={() => setShowAddTask(!showAddTask)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Añadir Tarea</span>
@@ -6654,7 +7783,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           )}
 
           <div className="space-y-2">
-            {subject.tasks.map((task) => {
+            {schedulerService.sortTasksByAcademicPriority(subject.tasks).map((task) => {
               const linkedTopic = task.topicId
                 ? subject.topics.find((t) => t.id === task.topicId)
                 : undefined;
@@ -6707,6 +7836,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         >
                           {task.title}
                         </span>
+                        {task.manualPriorityOrder !== undefined && (
+                          <span className="text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.5 rounded font-mono-numbers">
+                            Orden #{task.manualPriorityOrder}
+                          </span>
+                        )}
                         {task.isGraded && (
                           <span className="text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded font-mono-numbers">
                             {task.score !== undefined ? `Nota: ${task.score}/${task.maxScore || 10}` : 'Evaluable (sin nota)'}
@@ -6721,6 +7855,17 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                           <span className="text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded">
                             {linkedTopic.title}
                             {task.subtopic ? ` · ${task.subtopic}` : ''}
+                          </span>
+                        )}
+                        {task.smartGoalTitle && (
+                          <span className="text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.5 rounded">
+                            SMART: {task.smartGoalTitle}
+                          </span>
+                        )}
+                        {task.scheduledTime && (
+                          <span className="text-[10px] font-mono-numbers bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded">
+                            Calendario {task.scheduledTime}
+                            {task.endTime ? `–${task.endTime}` : ''}
                           </span>
                         )}
                         {task.durationMinutes && (
@@ -6797,6 +7942,20 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           topic={
             subject.topics.find((t) => t.id === selectedNotesTopic.id) || selectedNotesTopic
           }
+          initialMindmap={
+            subject.mindmaps.find((m) => m.topicIds.includes(selectedNotesTopic.id)) || null
+          }
+          onSaveMindmap={(newMindmap) => {
+            onUpdateSubject({
+              ...subject,
+              mindmaps: [newMindmap, ...subject.mindmaps],
+            });
+            setActiveCornellMindmap(newMindmap);
+            setExpandedMindmapByTopic((prev) => ({
+              ...prev,
+              [selectedNotesTopic.id]: true,
+            }));
+          }}
           onAiError={(actionTitle, errorMessage) =>
             reportCentralizedAiError(`${actionTitle} (${selectedNotesTopic.title})`, errorMessage)
           }
@@ -6819,12 +7978,14 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               data.richGeneralNotes,
               data.generalImages,
               data.generalComments,
-              data.keyPoints
+              data.keyPoints,
+              data.difficulty
             );
             const currentBase =
               subject.topics.find((t) => t.id === topicId) || selectedNotesTopic;
             setSelectedNotesTopic({
               ...currentBase,
+              difficulty: data.difficulty || currentBase.difficulty,
               notes: data.notes,
               generalNotes: data.notes,
               richGeneralNotes: data.richGeneralNotes,
@@ -7152,20 +8313,20 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">Dificultad</label>
+                  <label className="block text-slate-700 font-semibold mb-1">Nivel de Dificultad</label>
                   <select
-                    value={editTopicDifficulty}
-                    onChange={(e) => setEditTopicDifficulty(e.target.value as any)}
+                    value={schedulerService.normalizeDifficultyToCanonical(editTopicDifficulty)}
+                    onChange={(e) => setEditTopicDifficulty(e.target.value as DifficultyLevel)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-blue-500 text-xs"
                   >
-                    <option value="Baja">
-                      Baja (~{schedulerService.getMinutesPerPage('Baja', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Básico">
+                      Básico (~{schedulerService.getMinutesPerPage('Básico', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
-                    <option value="Media">
-                      Media (~{schedulerService.getMinutesPerPage('Media', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Intermedio">
+                      Intermedio (~{schedulerService.getMinutesPerPage('Intermedio', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
-                    <option value="Alta">
-                      Alta (~{schedulerService.getMinutesPerPage('Alta', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
+                    <option value="Avanzado">
+                      Avanzado (~{schedulerService.getMinutesPerPage('Avanzado', preferences?.averageMinutesPerPage, preferences?.useDifficultyScalingForPages)} min/pág)
                     </option>
                   </select>
                 </div>
@@ -7594,6 +8755,58 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         subjectName={subject.name}
         subjectColor={subject.color}
         onSaveSchedule={handleSaveManualTopicReviewSchedule}
+      />
+
+      {/* Modal para Crear y Revisar Preguntas Propias (Test, Verdadero/Falso y Flashcards) por Tema */}
+      <CustomTopicQuestionsModal
+        isOpen={isCustomQuestionsModalOpen}
+        onClose={() => setIsCustomQuestionsModalOpen(false)}
+        subject={subject}
+        initialTopicId={customQuestionsModalTopicId}
+        onUpdateSubject={onUpdateSubject}
+        onOpenAIGeneratorForTopic={(topicId) => {
+          setIsCustomQuestionsModalOpen(false);
+          setFlashcardGenTopicId(topicId);
+          setFlashcardGenNoteId(undefined);
+          setIsFlashcardGeneratorOpen(true);
+        }}
+      />
+
+      {/* Modal Asistente Guiado de Metas SMART con mapeo a tareas en el calendario */}
+      <GoalAssistantModal
+        isOpen={isGoalAssistantOpen}
+        onClose={() => setIsGoalAssistantOpen(false)}
+        subjects={allSubjects && allSubjects.length > 0 ? allSubjects : [subject]}
+        initialSubjectId={subject.id}
+        preferences={preferences || storageService.getPreferences()}
+        blockedEvents={blockedEvents}
+        onSaveGoalToSubject={(targetSubjectId, subjectGoal) => {
+          const targetSub =
+            allSubjects?.find((s) => s.id === targetSubjectId) ||
+            (targetSubjectId === subject.id ? subject : undefined);
+          if (targetSub) {
+            const updatedSub = upsertGoalOnSubject(targetSub, subjectGoal, allSubjects);
+            onUpdateSubject(updatedSub);
+          }
+        }}
+        onSaveTasksToSubject={(targetSubjectId, newTasks) => {
+          if (onAddTaskToSubject) {
+            newTasks.forEach((tk) => onAddTaskToSubject(targetSubjectId, tk));
+          } else if (targetSubjectId === subject.id) {
+            onUpdateSubject({
+              ...subject,
+              tasks: [...subject.tasks, ...newTasks],
+            });
+          }
+        }}
+        onGoalCreated={(goal, createdTasks, targetSubject) => {
+          setAiSuccessBanner({
+            message:
+              createdTasks.length > 0
+                ? `Meta SMART "${goal.title}" creada para ${targetSubject.name} con ${createdTasks.length} tarea(s) sincronizada(s) con el calendario.`
+                : `Meta SMART "${goal.title}" guardada para ${targetSubject.name}.`,
+          });
+        }}
       />
     </div>
     </SubjectAiErrorBoundary>

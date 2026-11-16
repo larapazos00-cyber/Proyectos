@@ -136,8 +136,18 @@ export const BlockedHoursManagerModal: React.FC<BlockedHoursManagerModalProps> =
 
     onAddBlockedEvent(newEvent);
 
-    // Si también es recurrente semanal, podemos sincronizarlo con weeklyFixedObligations
+    // Si también es recurrente semanal, podemos sincronizarlo con weeklyFixedObligations sin duplicar
     if (isRecurringWeekly && selectedRecurringDays.length > 0) {
+      const normalizedTitle = finalTitle.trim().toLowerCase();
+      const existingObs = (preferences.weeklyFixedObligations || []).filter(
+        (ob) =>
+          !(
+            ob.title.trim().toLowerCase() === normalizedTitle &&
+            ob.startTime === startTime &&
+            ob.endTime === endTime &&
+            selectedRecurringDays.includes(ob.dayOfWeek)
+          )
+      );
       const newObligations: WeeklyObligation[] = selectedRecurringDays.map((dayNum) => ({
         id: `ob-${Date.now()}-${dayNum}`,
         title: finalTitle,
@@ -150,7 +160,6 @@ export const BlockedHoursManagerModal: React.FC<BlockedHoursManagerModalProps> =
         recurringDays: selectedRecurringDays,
       }));
 
-      const existingObs = preferences.weeklyFixedObligations || [];
       onUpdatePreferences({
         ...preferences,
         weeklyFixedObligations: [...existingObs, ...newObligations],

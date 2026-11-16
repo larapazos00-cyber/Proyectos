@@ -35,6 +35,11 @@ import { storageService } from '../services/storageService';
 import { schedulerService } from '../services/schedulerService';
 import { ExamReadinessPredictor } from './ExamReadinessPredictor';
 import { exportAcademicProgressPdf } from '../services/academicProgressPdfService';
+import { WeeklyStudyProgressAreaChart } from './WeeklyStudyProgressAreaChart';
+import { CompetencyRadarChart } from './CompetencyRadarChart';
+import { MoodTracker } from './MoodTracker';
+import { MoodYearlyCalendar } from './MoodYearlyCalendar';
+import { EstimatedRetentionCurveChart } from './EstimatedRetentionCurveChart';
 
 interface WeeklyStatsModalProps {
   subjects: Subject[];
@@ -59,6 +64,7 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
   weeklyTargetHours,
   blockedEvents,
   onSelectSubject,
+  onOpenActiveRecall,
   onOpenPreferences,
   onOpenProgramManager,
   onOpenExamsManager,
@@ -845,6 +851,16 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
         onSelectSubject={onSelectSubject}
       />
 
+      {/* 2A. CURVA DE RETENCIÓN ESTIMADA (CUESTIONARIOS + MÉTODO DE REPETICIÓN ESPACIADA) */}
+      <EstimatedRetentionCurveChart
+        subjects={subjects}
+        preferences={preferences}
+        pomodoroLogs={pomodoroLogs}
+        onOpenActiveRecall={onOpenActiveRecall}
+        onSelectSubject={onSelectSubject}
+        onOpenPreferences={onOpenPreferences}
+      />
+
       {/* 2B. GRÁFICO DE BARRAS RECHARTS: HORAS PLANIFICADAS VS. HORAS REALES REGISTRADAS POR ASIGNATURA */}
       <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
@@ -1148,6 +1164,23 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
         </div>
       </div>
 
+      {/* 2.5 GRÁFICO DE ÁREAS DE PROGRESO DE ESTUDIO SEMANAL (HORAS REALES VS. HORAS OBJETIVO) */}
+      <WeeklyStudyProgressAreaChart
+        subjects={subjects}
+        pomodoroLogs={pomodoroLogs}
+        preferences={preferences}
+        onOpenProgramManager={onOpenProgramManager}
+      />
+
+      {/* 2.6 GRÁFICO DE RADAR DE DOMINIO COMPETENCIAL DEL ESTUDIANTE */}
+      <CompetencyRadarChart
+        subjects={subjects}
+        pomodoroLogs={pomodoroLogs}
+        preferences={preferences}
+        onOpenActiveRecall={onOpenActiveRecall}
+        onOpenPreferences={onOpenPreferences}
+      />
+
       {/* 3. FILA DE ANÁLISIS ESENCIAL (2 COLUMNAS: RITMO SEMANAL + AVANCE POR ASIGNATURA) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Columna Izquierda (7 cols): Horas Realizadas vs. Objetivo (Semana Actual) */}
@@ -1376,6 +1409,18 @@ export const WeeklyStatsModal: React.FC<WeeklyStatsModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* 4. CALENDARIO DE CALOR ANUAL D3 (MOOD YEARLY HEATMAP) Y TABLA ANUAL 365 DÍAS */}
+      <MoodYearlyCalendar
+        preferences={preferences}
+        onUpdatePreferences={onUpdatePreferences}
+      />
+
+      <MoodTracker
+        variant="annual-card"
+        preferences={preferences}
+        onUpdatePreferences={onUpdatePreferences}
+      />
     </div>
   );
 };

@@ -33,10 +33,14 @@ import {
   SlidersHorizontal,
   Clock,
   ArrowUpRight,
+  Pencil,
+  Trash2,
+  Plus,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Subject, Topic, CornellNote, Quiz, QuizQuestion, ExamType, ErrorLogEntry, Flashcard } from '../types';
 import { CornellFlashcardExtractorModal } from './CornellFlashcardExtractorModal';
+import { CustomTopicQuestionsModal } from './CustomTopicQuestionsModal';
 import { getSubjectSpacedRepetitionAlert } from '../utils/courseAlerts';
 import { FlashcardQuickfireMode, getSubjectQuickfireDeck } from './FlashcardQuickfireMode';
 import { SpacedRepetitionQuizAccuracyChart } from './SpacedRepetitionQuizAccuracyChart';
@@ -79,9 +83,14 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
 
   // Quiz parameters
   const [examType, setExamType] = useState<ExamType>('test');
+  const [questionSourcePool, setQuestionSourcePool] = useState<'ai' | 'custom' | 'both'>('ai');
   const [difficulty, setDifficulty] = useState<'basico' | 'intermedio' | 'avanzado'>('intermedio');
   const [questionCount, setQuestionCount] = useState<number>(5);
   const [customInstructions, setCustomInstructions] = useState<string>('');
+
+  // Custom Topic Questions & Flashcards Creator/Reviewer Modal
+  const [isCustomQuestionsModalOpen, setIsCustomQuestionsModalOpen] = useState<boolean>(false);
+  const [customQuestionsModalTopicId, setCustomQuestionsModalTopicId] = useState<string | undefined>(undefined);
 
   // Active quiz session state
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
@@ -102,10 +111,33 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
     modelAnswer: string;
   } | null>(null);
 
+  // Inline editing state for current quiz question & answers during test runner
+  const [isEditingQuestion, setIsEditingQuestion] = useState<boolean>(false);
+  const [editPrompt, setEditPrompt] = useState<string>('');
+  const [editOptions, setEditOptions] = useState<string[]>([]);
+  const [editCorrectOptionIndex, setEditCorrectOptionIndex] = useState<number>(0);
+  const [editExplanation, setEditExplanation] = useState<string>('');
+  const [runnerActionNotice, setRunnerActionNotice] = useState<string | null>(null);
+
   // Active view navigation
-  const [activeView, setActiveView] = useState<'create' | 'runner' | 'history' | 'quickfire' | 'analytics'>('create');
+  const [activeView, setActiveView] = useState<
+    'create' | 'runner' | 'history' | 'quickfire' | 'analytics' | 'cornell_deck'
+  >('create');
   const [showActiveRecallModal, setShowActiveRecallModal] = useState<boolean>(false);
   const [activeRecallToast, setActiveRecallToast] = useState<string | null>(null);
+
+  // Estado para el Generador Automático de Mazo de Flashcards desde Conceptos Clave de Notas Cornell
+  const [selectedCornellSourceFilter, setSelectedCornellSourceFilter] = useState<string>('all');
+  const [selectedCornellConcepts, setSelectedCornellConcepts] = useState<string[]>([]);
+  const [customCornellConceptInput, setCustomCornellConceptInput] = useState<string>('');
+  const [extraCornellConcepts, setExtraCornellConcepts] = useState<string[]>([]);
+  const [cornellDeckTargetCount, setCornellDeckTargetCount] = useState<number>(6);
+  const [isGeneratingCornellDeck, setIsGeneratingCornellDeck] = useState<boolean>(false);
+  const [cornellDeckError, setCornellDeckError] = useState<string | null>(null);
+  const [generatedCornellDeck, setGeneratedCornellDeck] = useState<Flashcard[]>([]);
+  const [cornellDeckDisplayMode, setCornellDeckDisplayMode] = useState<'flip' | 'grid'>('flip');
+  const [cornellDeckActiveIdx, setCornellDeckActiveIdx] = useState<number>(0);
+  const [isCornellCardFlipped, setIsCornellCardFlipped] = useState<boolean>(false);
 
   const currentSubject = subjects.find((s) => s.id === selectedSubjectId) || subjects[0];
 
@@ -387,6 +419,65 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
       contentToEvaluate += `\n\nEnfoque solicitado: ${customInstructions.trim()}`;
     }
 
+    const allSubjectTopics = currentSubject.topics || [];
+    const targetCustomTopics =
+      sourceMode === 'topics' && selectedTopicIds.length > 0
+        ? allSubjectTopics.filter((t) => selectedTopicIds.includes(t.id))
+        : allSubjectTopics;
+
+    const matchingCustomQuestions: QuizQuestion[] = targetCustomTopics.flatMap((t) =>
+      (t.customQuestions || []).filter((q) => {
+        if (examType === 'verdadero_falso') return q.questionType === 'verdadero_falso';
+        if (examType === 'test') return q.questionType !== 'verdadero_falso';
+        return true;
+      })
+    );
+    const allCustomQuestionsForTopics: QuizQuestion[] = targetCustomTopics.flatMap(
+      (t) => t.customQuestions || []
+    );
+    const customQuestionsToUse =
+      matchingCustomQuestions.length > 0 ? matchingCustomQuestions : allCustomQuestionsForTopics;
+
+    // Si el usuario eligió revisar SOLO sus preguntas creadas
+    if (questionSourcePool === 'custom') {
+      if (customQuestionsToUse.length === 0) {
+        setQuizError(
+          'Aún no has creado preguntas propias (Test o Verdadero/Falso) en los temas seleccionados. Pulsa en "Crear / Gestionar Mis Preguntas" para añadir las tuyas o selecciona "IA de la Aplicación".'
+        );
+        return;
+      }
+
+      const effectiveExamType: ExamType =
+        examType === 'verdadero_falso' ||
+        customQuestionsToUse.every((q) => q.questionType === 'verdadero_falso')
+          ? 'verdadero_falso'
+          : 'test';
+
+      const customQuiz: Quiz = {
+        id: `quiz-custom-${Date.now()}`,
+        topicId: sourceMode === 'topics' && selectedTopicIds[0] ? selectedTopicIds[0] : undefined,
+        examTitle: `Repaso de Mis Preguntas Propias (${customQuestionsToUse.length}) · ${currentSubject.name}`,
+        examType: effectiveExamType,
+        difficulty,
+        questions: customQuestionsToUse.map((q, idx) => ({
+          ...q,
+          id: q.id || `custom-q-${idx}`,
+          userAnswer: undefined,
+          score: undefined,
+        })),
+      };
+
+      setQuizFinished(false);
+      setCurrentQIndex(0);
+      setIsAnswerRevealed(false);
+      setSelectedOption(null);
+      setWrittenAnswer('');
+      setOpenAnswerEvaluation(null);
+      setActiveQuiz(customQuiz);
+      setActiveView('runner');
+      return;
+    }
+
     setIsGenerating(true);
     setQuizFinished(false);
     setCurrentQIndex(0);
@@ -412,6 +503,30 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
       const payload = resData?.data || resData;
 
       if (response.ok && payload && Array.isArray(payload.questions) && payload.questions.length > 0) {
+        const aiQuestions: QuizQuestion[] = payload.questions.map((q: any, i: number) => ({
+          id: q.id || `q-${i}`,
+          prompt: q.prompt || `Pregunta ${i + 1} sobre ${examTitle}`,
+          options: Array.isArray(q.options) ? q.options : [],
+          correctOptionIndex: typeof q.correctOptionIndex === 'number' ? q.correctOptionIndex : 0,
+          explanation: q.explanation || '',
+          optionExplanations: Array.isArray(q.optionExplanations) ? q.optionExplanations : [],
+          keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints : [],
+          rubricCriteria: Array.isArray(q.rubricCriteria) ? q.rubricCriteria : [],
+          isCustom: false,
+        }));
+
+        const combinedQuestions =
+          questionSourcePool === 'both' && customQuestionsToUse.length > 0
+            ? [
+                ...customQuestionsToUse.map((cq) => ({
+                  ...cq,
+                  userAnswer: undefined,
+                  score: undefined,
+                })),
+                ...aiQuestions,
+              ]
+            : aiQuestions;
+
         const quiz: Quiz = {
           id: `quiz-${Date.now()}`,
           topicId: sourceMode === 'topics' && selectedTopicIds[0] ? selectedTopicIds[0] : undefined,
@@ -419,16 +534,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
           examTitle: payload.examTitle || examTitle,
           examType,
           difficulty,
-          questions: payload.questions.map((q: any, i: number) => ({
-            id: q.id || `q-${i}`,
-            prompt: q.prompt || `Pregunta ${i + 1} sobre ${examTitle}`,
-            options: Array.isArray(q.options) ? q.options : [],
-            correctOptionIndex: typeof q.correctOptionIndex === 'number' ? q.correctOptionIndex : 0,
-            explanation: q.explanation || '',
-            optionExplanations: Array.isArray(q.optionExplanations) ? q.optionExplanations : [],
-            keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints : [],
-            rubricCriteria: Array.isArray(q.rubricCriteria) ? q.rubricCriteria : [],
-          })),
+          questions: combinedQuestions,
         };
 
         setActiveQuiz(quiz);
@@ -555,7 +661,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
     if (!activeQuiz) return;
     const currentQ = activeQuiz.questions[currentQIndex];
 
-    if (activeQuiz.examType === 'test') {
+    if (activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso') {
       if (selectedOption === null) return;
       currentQ.userAnswer = selectedOption;
       const isCorrect = selectedOption === currentQ.correctOptionIndex;
@@ -630,6 +736,8 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
   // Advance to next question or complete quiz
   const handleNextQuestion = () => {
     if (!activeQuiz) return;
+    setIsEditingQuestion(false);
+    setRunnerActionNotice(null);
     if (currentQIndex < activeQuiz.questions.length - 1) {
       setCurrentQIndex(currentQIndex + 1);
       setSelectedOption(null);
@@ -639,7 +747,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
     } else {
       // Complete quiz
       const totalScore = activeQuiz.questions.reduce((acc, q) => acc + (q.score || 0), 0);
-      const overall = Math.round(totalScore / activeQuiz.questions.length);
+      const overall = Math.round(totalScore / Math.max(1, activeQuiz.questions.length));
       const finishedQuiz: Quiz = {
         ...activeQuiz,
         overallScore: overall,
@@ -655,6 +763,226 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
     }
   };
 
+  // Start inline editing of current question and answers during test
+  const handleStartEditQuestion = () => {
+    if (!activeQuiz) return;
+    const currentQ = activeQuiz.questions[currentQIndex];
+    if (!currentQ) return;
+    setEditPrompt(currentQ.prompt || '');
+    setEditOptions(
+      Array.isArray(currentQ.options) && currentQ.options.length > 0
+        ? [...currentQ.options]
+        : ['', '', '', '']
+    );
+    setEditCorrectOptionIndex(
+      typeof currentQ.correctOptionIndex === 'number' ? currentQ.correctOptionIndex : 0
+    );
+    setEditExplanation(currentQ.explanation || '');
+    setIsEditingQuestion(true);
+    setRunnerActionNotice(null);
+  };
+
+  // Save inline modifications to current question, answer options, and linked flashcard
+  const handleSaveEditQuestion = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!activeQuiz) return;
+    const currentQ = activeQuiz.questions[currentQIndex];
+    if (!currentQ) return;
+
+    const trimmedPrompt = editPrompt.trim();
+    if (!trimmedPrompt) return;
+
+    const oldPromptLower = (currentQ.prompt || '').trim().toLowerCase();
+    const isChoiceMode =
+      activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso';
+    const cleanedOptions = isChoiceMode
+      ? editOptions.map((o, idx) => o.trim() || `Opción ${String.fromCharCode(65 + idx)}`)
+      : currentQ.options;
+
+    const validCorrectIdx =
+      cleanedOptions && cleanedOptions.length > 0
+        ? Math.min(Math.max(0, editCorrectOptionIndex), cleanedOptions.length - 1)
+        : 0;
+
+    const updatedExplanation = editExplanation.trim() || currentQ.explanation || '';
+
+    const updatedQ: QuizQuestion = {
+      ...currentQ,
+      prompt: trimmedPrompt,
+      options: cleanedOptions,
+      correctOptionIndex: validCorrectIdx,
+      explanation: updatedExplanation,
+      score:
+        isAnswerRevealed && isChoiceMode && selectedOption !== null
+          ? selectedOption === validCorrectIdx
+            ? 100
+            : 0
+          : currentQ.score,
+    };
+
+    const nextQuestions = activeQuiz.questions.map((q, idx) =>
+      idx === currentQIndex ? updatedQ : q
+    );
+
+    setActiveQuiz({
+      ...activeQuiz,
+      questions: nextQuestions,
+    });
+
+    // Si existe una flashcard vinculada en la asignatura con ese enunciado, actualizarla también
+    if (onUpdateSubject && currentSubject && Array.isArray(currentSubject.flashcards)) {
+      const hasLinkedCard = currentSubject.flashcards.some(
+        (fc) =>
+          (fc.question || '').trim().toLowerCase() === oldPromptLower ||
+          (fc.concept || '').trim().toLowerCase() === oldPromptLower
+      );
+      if (hasLinkedCard) {
+        const newAnswerText =
+          activeQuiz.examType === 'test' && cleanedOptions && cleanedOptions[validCorrectIdx]
+            ? `${cleanedOptions[validCorrectIdx]}${updatedExplanation ? ` — ${updatedExplanation}` : ''}`
+            : updatedExplanation;
+
+        const updatedFlashcards = currentSubject.flashcards.map((fc) => {
+          const matches =
+            (fc.question || '').trim().toLowerCase() === oldPromptLower ||
+            (fc.concept || '').trim().toLowerCase() === oldPromptLower;
+          if (!matches) return fc;
+          return {
+            ...fc,
+            question: trimmedPrompt,
+            answer: newAnswerText || fc.answer,
+            concept: fc.concept ? trimmedPrompt : undefined,
+            definition: fc.definition ? newAnswerText || fc.definition : undefined,
+          };
+        });
+        onUpdateSubject({
+          ...currentSubject,
+          flashcards: updatedFlashcards,
+        });
+      }
+    }
+
+    setIsEditingQuestion(false);
+    setRunnerActionNotice('Pregunta y respuestas actualizadas correctamente.');
+  };
+
+  // Delete current question from active test (and remove matching flashcard if present)
+  const handleDeleteCurrentQuestion = () => {
+    if (!activeQuiz) return;
+    const currentQ = activeQuiz.questions[currentQIndex];
+    if (!currentQ) return;
+
+    const promptLower = (currentQ.prompt || '').trim().toLowerCase();
+
+    // Si existe una flashcard con el mismo enunciado en la materia, eliminarla también
+    if (onUpdateSubject && currentSubject && Array.isArray(currentSubject.flashcards)) {
+      const filteredCards = currentSubject.flashcards.filter(
+        (fc) =>
+          (fc.question || '').trim().toLowerCase() !== promptLower &&
+          (fc.concept || '').trim().toLowerCase() !== promptLower
+      );
+      if (filteredCards.length !== currentSubject.flashcards.length) {
+        onUpdateSubject({
+          ...currentSubject,
+          flashcards: filteredCards,
+        });
+      }
+    }
+
+    const remainingQuestions = activeQuiz.questions.filter((_, idx) => idx !== currentQIndex);
+    setIsEditingQuestion(false);
+    setSelectedOption(null);
+    setWrittenAnswer('');
+    setIsAnswerRevealed(false);
+    setOpenAnswerEvaluation(null);
+
+    if (remainingQuestions.length === 0) {
+      setActiveQuiz(null);
+      setActiveView('create');
+      return;
+    }
+
+    if (currentQIndex >= remainingQuestions.length) {
+      // Era la última pregunta: finalizar el test con las preguntas restantes ya respondidas
+      const totalScore = remainingQuestions.reduce((acc, q) => acc + (q.score || 0), 0);
+      const overall = Math.round(totalScore / remainingQuestions.length);
+      const finishedQuiz: Quiz = {
+        ...activeQuiz,
+        questions: remainingQuestions,
+        overallScore: overall,
+        takenAt: new Date().toISOString().split('T')[0],
+      };
+      setCurrentQIndex(remainingQuestions.length - 1);
+      setActiveQuiz(finishedQuiz);
+      onSaveQuizResult(currentSubject.id, finishedQuiz);
+      setQuizFinished(true);
+    } else {
+      setActiveQuiz({
+        ...activeQuiz,
+        questions: remainingQuestions,
+      });
+      setRunnerActionNotice('Pregunta descartada del test.');
+    }
+  };
+
+  // Save or update current test question as a Flashcard in the subject
+  const handleSaveCurrentQuestionAsFlashcard = () => {
+    if (!activeQuiz || !currentSubject) return;
+    const currentQ = activeQuiz.questions[currentQIndex];
+    if (!currentQ) return;
+
+    const questionText = currentQ.prompt.trim();
+    const correctOptionText =
+      activeQuiz.examType === 'test' &&
+      Array.isArray(currentQ.options) &&
+      typeof currentQ.correctOptionIndex === 'number'
+        ? currentQ.options[currentQ.correctOptionIndex] || ''
+        : '';
+
+    const answerText = correctOptionText
+      ? `${correctOptionText}${currentQ.explanation ? `\n\nExplicación: ${currentQ.explanation}` : ''}`
+      : currentQ.explanation || openAnswerEvaluation?.modelAnswer || 'Ver apuntes del tema.';
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const newCard: Flashcard = {
+      id: `fc-quiz-${Date.now()}`,
+      topicId: activeQuiz.topicId || currentSubject.topics?.[0]?.id || 'general',
+      question: questionText,
+      answer: answerText,
+      conceptTag: activeQuiz.examTitle || currentSubject.name,
+      interval: 1,
+      repetitions: 0,
+      easeFactor: 2.5,
+      nextReview: todayStr,
+    };
+
+    if (onUpdateSubject) {
+      const existing = currentSubject.flashcards || [];
+      const existingIdx = existing.findIndex(
+        (fc) => (fc.question || '').trim().toLowerCase() === questionText.toLowerCase()
+      );
+      const nextFlashcards =
+        existingIdx >= 0
+          ? existing.map((fc, i) =>
+              i === existingIdx ? { ...fc, question: questionText, answer: answerText } : fc
+            )
+          : [newCard, ...existing];
+
+      onUpdateSubject({
+        ...currentSubject,
+        flashcards: nextFlashcards,
+      });
+      setRunnerActionNotice(
+        existingIdx >= 0
+          ? 'Flashcard actualizada en el mazo de la asignatura.'
+          : 'Pregunta guardada como Flashcard en la asignatura.'
+      );
+    } else if (onSaveFlashcards) {
+      onSaveFlashcards(currentSubject.id, [newCard]);
+      setRunnerActionNotice('Pregunta guardada como Flashcard en la asignatura.');
+    }
+  };
+
   // Feedback de éxito al generar y guardar flashcards
   const [flashcardSuccessMsg, setFlashcardSuccessMsg] = useState<string | null>(null);
 
@@ -665,6 +993,335 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
       setSelectedNoteId(notes[0].id);
     }
     setIsCornellExtractorOpen(true);
+  };
+
+  // Extraer todos los "conceptos clave" disponibles en las notas Cornell y apuntes de la asignatura actual
+  const cornellKeyConceptsData = useMemo(() => {
+    if (!currentSubject) {
+      return {
+        sources: [] as Array<{
+          id: string;
+          title: string;
+          topicId?: string;
+          cornellNoteId?: string;
+          notesContent: string;
+          summary: string;
+          cues: string[];
+          keyPoints: Array<{ title: string; detail: string }>;
+        }>,
+        allConcepts: [] as Array<{
+          concept: string;
+          sourceId: string;
+          sourceTitle: string;
+          topicId?: string;
+        }>,
+      };
+    }
+
+    const sources: Array<{
+      id: string;
+      title: string;
+      topicId?: string;
+      cornellNoteId?: string;
+      notesContent: string;
+      summary: string;
+      cues: string[];
+      keyPoints: Array<{ title: string; detail: string }>;
+    }> = [];
+
+    const seenConcepts = new Set<string>();
+    const allConcepts: Array<{
+      concept: string;
+      sourceId: string;
+      sourceTitle: string;
+      topicId?: string;
+    }> = [];
+
+    const registerConcept = (
+      rawConcept: string,
+      sourceId: string,
+      sourceTitle: string,
+      topicId?: string
+    ) => {
+      const clean = (rawConcept || '').replace(/^[•\-*\d.)\s]+/, '').trim();
+      if (!clean || clean.length < 2) return;
+      const key = clean.toLowerCase();
+      if (seenConcepts.has(key)) return;
+      seenConcepts.add(key);
+      allConcepts.push({
+        concept: clean,
+        sourceId,
+        sourceTitle,
+        topicId,
+      });
+    };
+
+    // 1. Notas Cornell explícitas de la asignatura
+    (currentSubject.cornellNotes || []).forEach((note) => {
+      const srcId = `cn:${note.id}`;
+      const kps = (note.keyPoints || []).map((kp) => ({
+        title: kp.title,
+        detail: kp.detail,
+      }));
+      sources.push({
+        id: srcId,
+        title: note.title,
+        topicId: note.topicId,
+        cornellNoteId: note.id,
+        notesContent: note.notes || '',
+        summary: note.summary || '',
+        cues: note.cues || [],
+        keyPoints: kps,
+      });
+
+      (note.cues || []).forEach((cue) =>
+        registerConcept(cue, srcId, note.title, note.topicId)
+      );
+      kps.forEach((kp) =>
+        registerConcept(kp.title, srcId, note.title, note.topicId)
+      );
+    });
+
+    // 2. Conceptos clave, Cues y Puntos Clave guardados en los temas
+    (currentSubject.topics || []).forEach((topic) => {
+      const hasTopicCornell =
+        (topic.cues && topic.cues.length > 0) ||
+        (topic.keyPoints && topic.keyPoints.length > 0) ||
+        (topic.notes && topic.notes.trim().length > 0) ||
+        (topic.generalNotes && topic.generalNotes.trim().length > 0);
+
+      if (hasTopicCornell) {
+        const srcId = `tp:${topic.id}`;
+        const kps = (topic.keyPoints || []).map((kp) => ({
+          title: kp.title,
+          detail: kp.detail,
+        }));
+        sources.push({
+          id: srcId,
+          title: `Cornell Tema: ${topic.title}`,
+          topicId: topic.id,
+          notesContent: topic.notes || topic.generalNotes || topic.description || '',
+          summary: topic.summary || topic.description || '',
+          cues: topic.cues || [],
+          keyPoints: kps,
+        });
+
+        (topic.cues || []).forEach((cue) =>
+          registerConcept(cue, srcId, topic.title, topic.id)
+        );
+        kps.forEach((kp) =>
+          registerConcept(kp.title, srcId, topic.title, topic.id)
+        );
+        if (
+          (!topic.cues || topic.cues.length === 0) &&
+          kps.length === 0 &&
+          Array.isArray(topic.subtopics)
+        ) {
+          topic.subtopics.slice(0, 4).forEach((sub) =>
+            registerConcept(sub, srcId, topic.title, topic.id)
+          );
+        }
+      }
+    });
+
+    // 3. Si aún no hay conceptos explícitos pero hay temas, usar los subtemas/títulos como conceptos clave base
+    if (allConcepts.length === 0 && (currentSubject.topics || []).length > 0) {
+      (currentSubject.topics || []).forEach((topic) => {
+        const srcId = `tp:${topic.id}`;
+        if (!sources.some((s) => s.id === srcId)) {
+          sources.push({
+            id: srcId,
+            title: topic.title,
+            topicId: topic.id,
+            notesContent: topic.description || topic.title,
+            summary: topic.summary || topic.description || '',
+            cues: topic.subtopics || [],
+            keyPoints: [],
+          });
+        }
+        if (Array.isArray(topic.subtopics) && topic.subtopics.length > 0) {
+          topic.subtopics.forEach((sub) =>
+            registerConcept(sub, srcId, topic.title, topic.id)
+          );
+        } else {
+          registerConcept(topic.title, srcId, topic.title, topic.id);
+        }
+      });
+    }
+
+    // Añadir conceptos personalizados agregados por el usuario en la sesión
+    extraCornellConcepts.forEach((customConcept) => {
+      registerConcept(customConcept, 'custom', 'Concepto Añadido');
+    });
+
+    return { sources, allConcepts };
+  }, [currentSubject, extraCornellConcepts]);
+
+  // Conceptos filtrados según la nota Cornell / tema elegido
+  const filteredCornellConcepts = useMemo(() => {
+    if (selectedCornellSourceFilter === 'all') {
+      return cornellKeyConceptsData.allConcepts;
+    }
+    return cornellKeyConceptsData.allConcepts.filter(
+      (item) =>
+        item.sourceId === selectedCornellSourceFilter || item.sourceId === 'custom'
+    );
+  }, [cornellKeyConceptsData, selectedCornellSourceFilter]);
+
+  // Sincronizar selección por defecto de conceptos clave al cambiar de materia o filtro
+  React.useEffect(() => {
+    const conceptsList = filteredCornellConcepts.map((c) => c.concept);
+    setSelectedCornellConcepts(conceptsList.slice(0, 12));
+  }, [selectedSubjectId, selectedCornellSourceFilter, filteredCornellConcepts.length]);
+
+  const handleToggleCornellConcept = (concept: string) => {
+    setSelectedCornellConcepts((prev) =>
+      prev.includes(concept)
+        ? prev.filter((item) => item !== concept)
+        : [...prev, concept]
+    );
+  };
+
+  const handleAddCustomCornellConcept = () => {
+    const clean = customCornellConceptInput.trim();
+    if (!clean) return;
+    if (!extraCornellConcepts.includes(clean)) {
+      setExtraCornellConcepts((prev) => [...prev, clean]);
+    }
+    if (!selectedCornellConcepts.includes(clean)) {
+      setSelectedCornellConcepts((prev) => [...prev, clean]);
+    }
+    setCustomCornellConceptInput('');
+  };
+
+  // Generar automáticamente con IA el mazo de flashcards con definiciones, ejemplos prácticos y situaciones de uso real desde los conceptos clave Cornell
+  const handleGenerateCornellConceptDeck = async (overrideSourceId?: string) => {
+    if (!currentSubject || isGeneratingCornellDeck) return;
+    setIsGeneratingCornellDeck(true);
+    setCornellDeckError(null);
+
+    const activeFilter = overrideSourceId || selectedCornellSourceFilter;
+    const chosenSources =
+      activeFilter === 'all'
+        ? cornellKeyConceptsData.sources
+        : cornellKeyConceptsData.sources.filter((s) => s.id === activeFilter);
+
+    const primarySource = chosenSources[0] || cornellKeyConceptsData.sources[0];
+    const combinedNotesContent = chosenSources
+      .map((s) => `[${s.title}]\n${s.notesContent}`)
+      .join('\n\n')
+      .slice(0, 8000);
+    const combinedSummary = chosenSources
+      .map((s) => s.summary)
+      .filter(Boolean)
+      .join(' | ');
+    const combinedCues = chosenSources.flatMap((s) => s.cues);
+    const combinedKeyPoints = chosenSources.flatMap((s) => s.keyPoints);
+
+    const termsToGenerate =
+      selectedCornellConcepts.length > 0
+        ? selectedCornellConcepts
+        : filteredCornellConcepts.map((c) => c.concept).slice(0, cornellDeckTargetCount);
+
+    const effectiveCount =
+      termsToGenerate.length > 0
+        ? Math.min(12, Math.max(cornellDeckTargetCount, Math.min(termsToGenerate.length, 10)))
+        : cornellDeckTargetCount;
+
+    try {
+      const response = await fetch('/api/gemini/extract-cornell-flashcards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subjectName: currentSubject.name,
+          topicTitle:
+            chosenSources.length === 1
+              ? chosenSources[0].title
+              : `Notas Cornell de ${currentSubject.name}`,
+          notesContent: combinedNotesContent || currentSubject.name,
+          cues: combinedCues,
+          keyPoints: combinedKeyPoints,
+          summary: combinedSummary,
+          selectedTerms: termsToGenerate,
+          count: effectiveCount,
+        }),
+      });
+
+      const resData = await response.json();
+      if (!response.ok || !resData.success || !resData.data?.flashcards) {
+        throw new Error(
+          resData.error ||
+            'No se pudo generar el mazo de flashcards desde los conceptos clave Cornell.'
+        );
+      }
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      const rawCards: any[] = resData.data.flashcards || [];
+
+      const createdDeck: Flashcard[] = rawCards.map((c, idx) => {
+        const term = c.term || termsToGenerate[idx] || `Concepto Clave ${idx + 1}`;
+        const definition =
+          c.definition || `Definición académica de ${term} en ${currentSubject.name}.`;
+        const practicalExample =
+          c.practicalExample ||
+          c.practicalCase ||
+          `Ejemplo práctico aplicado sobre ${term}.`;
+        const realWorldScenario =
+          c.realWorldScenario ||
+          `Situación de uso real de ${term} en el ámbito profesional de ${currentSubject.name}.`;
+
+        const compositeAnswer = `📘 Definición:\n${definition}\n\n💡 Ejemplo Práctico:\n${practicalExample}\n\n🌍 Situación de Uso Real:\n${realWorldScenario}`;
+
+        return {
+          id: `fc-cornell-concept-${Date.now()}-${idx}`,
+          topicId: primarySource?.topicId || currentSubject.topics?.[0]?.id,
+          sourceCornellNoteId: primarySource?.cornellNoteId,
+          question: term,
+          answer: compositeAnswer,
+          concept: term,
+          definition,
+          practicalExample,
+          realWorldScenario,
+          hint: c.hint || `Recuerda su definición, ejemplo práctico y caso real.`,
+          conceptTag: c.conceptTag || primarySource?.title || currentSubject.name,
+          interval: 1,
+          repetitions: 0,
+          easeFactor: 2.5,
+          nextReview: todayStr,
+          isCustom: false,
+        };
+      });
+
+      setGeneratedCornellDeck(createdDeck);
+      setCornellDeckActiveIdx(0);
+      setIsCornellCardFlipped(false);
+      setActiveView('cornell_deck');
+
+      // Guardar automáticamente el mazo en la asignatura
+      if (onSaveFlashcards) {
+        onSaveFlashcards(currentSubject.id, createdDeck);
+      } else if (onUpdateSubject) {
+        onUpdateSubject({
+          ...currentSubject,
+          flashcards: [...createdDeck, ...(currentSubject.flashcards || [])],
+        });
+      }
+
+      setFlashcardSuccessMsg(
+        `¡Mazo de ${createdDeck.length} flashcards generado automáticamente con IA (Definición + Ejemplo Práctico + Situación Real) y guardado en ${currentSubject.name}!`
+      );
+      setTimeout(() => setFlashcardSuccessMsg(null), 6000);
+      try {
+        confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
+      } catch (_) {}
+    } catch (err: any) {
+      console.error('Error generating Cornell concept deck:', err);
+      setCornellDeckError(
+        err?.message || 'Error al generar el mazo automático desde conceptos Cornell.'
+      );
+    } finally {
+      setIsGeneratingCornellDeck(false);
+    }
   };
 
   // Filtered topics based on search
@@ -898,6 +1555,20 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
               )}
             </button>
 
+            {/* Custom Questions & Flashcards Creator Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setCustomQuestionsModalTopicId(selectedTopicIds[0] || currentSubject?.topics?.[0]?.id);
+                setIsCustomQuestionsModalOpen(true);
+              }}
+              className="flex items-center gap-2 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold transition-all cursor-pointer group"
+              title="Crear y revisar mis propias flashcards, preguntas de test y verdadero/falso por tema"
+            >
+              <Plus className="w-4 h-4 text-indigo-600 group-hover:scale-110 transition-transform shrink-0" />
+              <span>Mis Preguntas / V-F / Flashcards</span>
+            </button>
+
             {onOpenErrorAnalysis && (
               <button
                 onClick={onOpenErrorAnalysis}
@@ -911,7 +1582,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
         </div>
 
         {/* Tab View Switcher */}
-        <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl overflow-x-auto text-xs font-semibold">
+        <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100 rounded-xl text-xs font-semibold">
           <button
             onClick={() => setActiveView('create')}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all shrink-0 cursor-pointer ${
@@ -922,6 +1593,21 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
           >
             <Sparkles className="w-3.5 h-3.5" />
             <span>Configurar Simulacro</span>
+          </button>
+
+          <button
+            onClick={() => setActiveView('cornell_deck')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all shrink-0 cursor-pointer ${
+              activeView === 'cornell_deck'
+                ? 'bg-white text-emerald-700 font-bold shadow-2xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Mazo IA Conceptos Cornell</span>
+            <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-mono-numbers font-bold">
+              {cornellKeyConceptsData.allConcepts.length}
+            </span>
           </button>
 
           <button
@@ -949,6 +1635,509 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
           </button>
         </div>
       </div>
+
+      {/* VIEW: CORNELL KEY CONCEPTS -> AUTOMATIC AI FLASHCARD DECK GENERATOR */}
+      {activeView === 'cornell_deck' && currentSubject && (
+        <div className="space-y-6 animate-fadeIn">
+          {/* Top Generator Card */}
+          <div className="bg-white rounded-2xl border border-emerald-200 shadow-2xs overflow-hidden">
+            <div className="p-5 sm:p-6 bg-gradient-to-r from-emerald-50/90 via-teal-50/50 to-white border-b border-emerald-100 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <div className="p-3 rounded-2xl bg-emerald-600 text-white shadow-sm shrink-0">
+                  <Layers className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold uppercase tracking-wider mb-1">
+                    <Sparkles className="w-3 h-3" />
+                    <span>Notas Cornell → Active Recall Aplicado</span>
+                  </div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    Generador Automático de Mazo de Flashcards desde Conceptos Clave Cornell
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-0.5 max-w-2xl leading-relaxed">
+                    Toma los <strong>conceptos clave</strong> extraídos de tus notas Cornell de{' '}
+                    <strong>{currentSubject.name}</strong> y genera automáticamente con Gemini un mazo de flashcards enriquecido con{' '}
+                    <span className="text-emerald-800 font-semibold">📘 Definición rigurosa</span>,{' '}
+                    <span className="text-amber-700 font-semibold">💡 Ejemplo práctico</span> y{' '}
+                    <span className="text-sky-700 font-semibold">🌍 Situación de uso real</span>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isGeneratingCornellDeck}
+                  onClick={() => handleGenerateCornellConceptDeck()}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-extrabold shadow-sm transition-all cursor-pointer"
+                >
+                  {isGeneratingCornellDeck ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Generando Mazo con IA...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span>
+                        Generar Mazo IA ({selectedCornellConcepts.length > 0 ? selectedCornellConcepts.length : cornellDeckTargetCount} conceptos)
+                      </span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsCornellExtractorOpen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-white hover:bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Extractor Paso a Paso</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-5">
+              {cornellDeckError && (
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{cornellDeckError}</span>
+                </div>
+              )}
+
+              {/* Selector de Materia, Nota Cornell de origen y tamaño del mazo */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    1. Asignatura
+                  </label>
+                  <select
+                    value={selectedSubjectId}
+                    onChange={(e) => {
+                      setSelectedSubjectId(e.target.value);
+                      setSelectedCornellSourceFilter('all');
+                    }}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  >
+                    {subjects.map((sub) => (
+                      <option key={sub.id} value={sub.id}>
+                        {sub.name} ({sub.cornellNotes?.length || 0} notas Cornell)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    2. Fuente de Notas Cornell
+                  </label>
+                  <select
+                    value={selectedCornellSourceFilter}
+                    onChange={(e) => setSelectedCornellSourceFilter(e.target.value)}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-800 font-semibold focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  >
+                    <option value="all">
+                      Todas las notas Cornell de {currentSubject.name} ({cornellKeyConceptsData.sources.length})
+                    </option>
+                    {cornellKeyConceptsData.sources.map((src) => (
+                      <option key={src.id} value={src.id}>
+                        {src.title} ({src.cues.length + src.keyPoints.length} conceptos)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    3. Nº de Flashcards del Mazo
+                  </label>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {[4, 6, 8, 10].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setCornellDeckTargetCount(num)}
+                        className={`py-2 rounded-xl border text-xs font-mono-numbers font-bold transition-all cursor-pointer ${
+                          cornellDeckTargetCount === num
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                            : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Panel de Conceptos Clave Extraídos de las Notas Cornell */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                      <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                      <span>
+                        Conceptos Clave Extraídos de tus Notas Cornell ({selectedCornellConcepts.length} seleccionados)
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Haz clic en los conceptos clave detectados en la columna de Cues y puntos clave Cornell para incluirlos en el mazo:
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedCornellConcepts(
+                          filteredCornellConcepts.map((c) => c.concept)
+                        )
+                      }
+                      className="font-bold text-emerald-700 hover:underline cursor-pointer"
+                    >
+                      Seleccionar todos
+                    </button>
+                    <span className="text-slate-300">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCornellConcepts([])}
+                      className="font-semibold text-slate-500 hover:text-slate-800 cursor-pointer"
+                    >
+                      Limpiar
+                    </button>
+                  </div>
+                </div>
+
+                {filteredCornellConcepts.length === 0 ? (
+                  <div className="p-4 bg-white rounded-xl border border-slate-200 text-xs text-slate-500 text-center">
+                    No se encontraron conceptos clave previos. Añade un concepto abajo o pulsa &ldquo;Generar Mazo IA&rdquo; para que Gemini los extraiga automáticamente del temario.
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-2 max-h-44 overflow-y-auto p-1">
+                    {filteredCornellConcepts.map((item, idx) => {
+                      const isSelected = selectedCornellConcepts.includes(item.concept);
+                      return (
+                        <button
+                          key={`${item.sourceId}-${idx}`}
+                          type="button"
+                          onClick={() => handleToggleCornellConcept(item.concept)}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer border ${
+                            isSelected
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                              : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300'
+                          }`}
+                          title={`Fuente: ${item.sourceTitle}`}
+                        >
+                          {isSelected ? (
+                            <Check className="w-3.5 h-3.5 shrink-0" />
+                          ) : (
+                            <Plus className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          )}
+                          <span>{item.concept}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Añadir concepto clave adicional manualmente */}
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={customCornellConceptInput}
+                    onChange={(e) => setCustomCornellConceptInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddCustomCornellConcept();
+                      }
+                    }}
+                    placeholder="Añadir otro concepto clave específico para generar su definición, ejemplo práctico y caso real..."
+                    className="flex-1 text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomCornellConcept}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors cursor-pointer shrink-0"
+                  >
+                    + Añadir Concepto
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Mazo de Flashcards Generado (o Flashcards Cornell ya guardadas en la materia) */}
+          {(() => {
+            const existingCornellCards = (currentSubject.flashcards || []).filter(
+              (fc) =>
+                Boolean(fc.practicalExample) ||
+                Boolean(fc.realWorldScenario) ||
+                Boolean(fc.sourceCornellNoteId) ||
+                fc.id.startsWith('fc-cornell')
+            );
+            const activeDeck =
+              generatedCornellDeck.length > 0
+                ? generatedCornellDeck
+                : existingCornellCards;
+            const safeIdx =
+              activeDeck.length > 0
+                ? Math.min(cornellDeckActiveIdx, activeDeck.length - 1)
+                : 0;
+            const activeCard = activeDeck[safeIdx];
+
+            if (activeDeck.length === 0) {
+              return null;
+            }
+
+            return (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-5 sm:p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-emerald-600" />
+                      <span>
+                        Mazo de Flashcards de Conceptos Clave Cornell ({activeDeck.length} tarjetas)
+                      </span>
+                    </h4>
+                    <p className="text-xs text-slate-500">
+                      Cada tarjeta incluye definición académica, ejemplo práctico y situación de uso real.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="inline-flex items-center bg-slate-100 p-0.5 rounded-xl text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setCornellDeckDisplayMode('flip')}
+                        className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                          cornellDeckDisplayMode === 'flip'
+                            ? 'bg-white text-emerald-700 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Entrenador Flip 3D
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCornellDeckDisplayMode('grid')}
+                        className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                          cornellDeckDisplayMode === 'grid'
+                            ? 'bg-white text-emerald-700 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Vista Completa ({activeDeck.length})
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('quickfire')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Practicar en Quickfire</span>
+                    </button>
+                  </div>
+                </div>
+
+                {cornellDeckDisplayMode === 'flip' && activeCard ? (
+                  <div className="max-w-2xl mx-auto space-y-4">
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span className="font-bold text-slate-800 font-mono-numbers">
+                        Tarjeta {safeIdx + 1} de {activeDeck.length}
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-semibold">
+                        {activeCard.conceptTag}
+                      </span>
+                    </div>
+
+                    <div
+                      onClick={() => setIsCornellCardFlipped((prev) => !prev)}
+                      className={`min-h-[300px] p-6 sm:p-8 rounded-3xl border transition-all duration-300 cursor-pointer shadow-sm flex flex-col justify-between ${
+                        isCornellCardFlipped
+                          ? 'bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 text-white border-slate-700'
+                          : 'bg-gradient-to-br from-white via-emerald-50/30 to-teal-50/40 text-slate-900 border-emerald-200 hover:border-emerald-400'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider mb-4 opacity-75">
+                          <span>
+                            {isCornellCardFlipped
+                              ? 'Reverso · Definición, Ejemplo Práctico y Uso Real'
+                              : 'Anverso · Concepto Clave Cornell'}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>
+                              {isCornellCardFlipped ? 'Volver al concepto' : 'Haz clic para voltear'}
+                            </span>
+                          </span>
+                        </div>
+
+                        {!isCornellCardFlipped ? (
+                          <div className="py-10 text-center space-y-3">
+                            <span className="text-xs font-bold uppercase tracking-wider text-emerald-600 block">
+                              Concepto Clave Extraído de Notas Cornell
+                            </span>
+                            <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+                              {activeCard.concept || activeCard.question}
+                            </h3>
+                            {activeCard.hint && (
+                              <p className="text-xs text-slate-500 italic mt-3 inline-flex items-center gap-1.5 bg-white/80 border border-emerald-100 px-3.5 py-1.5 rounded-full">
+                                <Lightbulb className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                <span>Pista: {activeCard.hint}</span>
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="space-y-4 text-left animate-fadeIn">
+                            <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10">
+                              <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block mb-1">
+                                📘 1. Definición Académica
+                              </span>
+                              <p className="text-sm text-slate-100 leading-relaxed">
+                                {activeCard.definition || activeCard.answer}
+                              </p>
+                            </div>
+
+                            {activeCard.practicalExample && (
+                              <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-400/20">
+                                <span className="text-[11px] font-bold text-amber-300 uppercase tracking-wider block mb-1">
+                                  💡 2. Ejemplo Práctico
+                                </span>
+                                <p className="text-xs text-slate-100 leading-relaxed">
+                                  {activeCard.practicalExample}
+                                </p>
+                              </div>
+                            )}
+
+                            {activeCard.realWorldScenario && (
+                              <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-400/20">
+                                <span className="text-[11px] font-bold text-sky-300 uppercase tracking-wider block mb-1">
+                                  🌍 3. Situación de Uso Real
+                                </span>
+                                <p className="text-xs text-slate-100 leading-relaxed">
+                                  {activeCard.realWorldScenario}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="pt-3 mt-4 border-t border-current/10 text-center text-[11px] opacity-65">
+                        {isCornellCardFlipped
+                          ? 'Haz clic en la tarjeta para regresar al concepto clave'
+                          : 'Intenta recordar la definición, un ejemplo práctico y su uso real antes de voltear'}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <button
+                        type="button"
+                        disabled={safeIdx === 0}
+                        onClick={() => {
+                          setCornellDeckActiveIdx(Math.max(0, safeIdx - 1));
+                          setIsCornellCardFlipped(false);
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold disabled:opacity-40 cursor-pointer"
+                      >
+                        ← Anterior
+                      </button>
+
+                      <div className="flex items-center gap-1.5">
+                        {activeDeck.map((_, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              setCornellDeckActiveIdx(idx);
+                              setIsCornellCardFlipped(false);
+                            }}
+                            className={`h-2 rounded-full transition-all cursor-pointer ${
+                              safeIdx === idx
+                                ? 'w-6 bg-emerald-600'
+                                : 'w-2 bg-slate-200 hover:bg-slate-300'
+                            }`}
+                          />
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={safeIdx >= activeDeck.length - 1}
+                        onClick={() => {
+                          setCornellDeckActiveIdx(Math.min(activeDeck.length - 1, safeIdx + 1));
+                          setIsCornellCardFlipped(false);
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold disabled:opacity-40 cursor-pointer"
+                      >
+                        Siguiente →
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* Vista en Cuadrícula de todas las Flashcards generadas */
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {activeDeck.map((card, idx) => (
+                      <div
+                        key={card.id || idx}
+                        className="p-4 rounded-2xl border border-slate-200 bg-slate-50/50 hover:bg-white transition-all space-y-3 shadow-2xs"
+                      >
+                        <div className="flex items-start justify-between gap-2 border-b border-slate-200/80 pb-2.5">
+                          <div>
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                              Concepto #{idx + 1} · {card.conceptTag}
+                            </span>
+                            <h5 className="text-sm font-extrabold text-slate-900 mt-1.5">
+                              {card.concept || card.question}
+                            </h5>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2.5 text-xs">
+                          <div className="p-2.5 rounded-xl bg-white border border-slate-200/80">
+                            <span className="font-bold text-emerald-800 block text-[11px] mb-0.5">
+                              📘 Definición:
+                            </span>
+                            <p className="text-slate-700 leading-relaxed">
+                              {card.definition || card.answer}
+                            </p>
+                          </div>
+
+                          {card.practicalExample && (
+                            <div className="p-2.5 rounded-xl bg-amber-50/60 border border-amber-200/80">
+                              <span className="font-bold text-amber-900 block text-[11px] mb-0.5">
+                                💡 Ejemplo Práctico:
+                              </span>
+                              <p className="text-slate-700 leading-relaxed">
+                                {card.practicalExample}
+                              </p>
+                            </div>
+                          )}
+
+                          {card.realWorldScenario && (
+                            <div className="p-2.5 rounded-xl bg-sky-50/60 border border-sky-200/80">
+                              <span className="font-bold text-sky-900 block text-[11px] mb-0.5">
+                                🌍 Situación de Uso Real:
+                              </span>
+                              <p className="text-slate-700 leading-relaxed">
+                                {card.realWorldScenario}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* VIEW: ANALYTICS & ACCURACY CHART */}
       {activeView === 'analytics' && (
@@ -1325,12 +2514,30 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                                 {topic.description || topic.subtopics.join(', ')}
                               </div>
                             </div>
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                              {(topic.customQuestions?.length || 0) > 0 && (
+                                <span className="text-[10px] font-mono-numbers font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded shrink-0">
+                                  {topic.customQuestions?.length} propias
+                                </span>
+                              )}
                               {topic.pageCount && (
                                 <span className="text-[10px] font-mono-numbers text-slate-400 bg-slate-100 px-2 py-0.5 rounded shrink-0">
                                   {topic.pageCount} págs
                                 </span>
                               )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setCustomQuestionsModalTopicId(topic.id);
+                                  setIsCustomQuestionsModalOpen(true);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 text-[10px] font-bold transition-colors cursor-pointer inline-flex items-center gap-1"
+                                title={`Crear o revisar tus propias preguntas Test, Verdadero/Falso y Flashcards en "${topic.title}"`}
+                              >
+                                <Plus className="w-3 h-3 text-indigo-600" />
+                                <span>Crear Propias</span>
+                              </button>
                               <button
                                 type="button"
                                 disabled={isGenerating}
@@ -1342,7 +2549,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                                 title={`Crear test rápido de 5 preguntas sobre "${topic.title}" en 1 clic`}
                               >
                                 <Zap className="w-3 h-3 text-amber-300 fill-amber-300" />
-                                <span>Test 1-Clic</span>
+                                <span>Test IA</span>
                               </button>
                             </div>
                           </div>
@@ -1372,17 +2579,20 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                             : 'Seleccionar todos'}
                         </button>
                       )}
-                      {selectedNoteId && (
-                        <button
-                          type="button"
-                          onClick={() => setIsCornellExtractorOpen(true)}
-                          className="text-xs font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 cursor-pointer transition-colors"
-                          title="Extraer flashcards de la nota seleccionada"
-                        >
-                          <Layers className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Extraer flashcards</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        disabled={isGeneratingCornellDeck}
+                        onClick={() => handleGenerateCornellConceptDeck()}
+                        className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs disabled:opacity-50"
+                        title="Generar automáticamente un mazo de flashcards con definiciones, ejemplos prácticos y situaciones de uso real a partir de los conceptos clave Cornell"
+                      >
+                        {isGeneratingCornellDeck ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5" />
+                        )}
+                        <span>Generar Mazo Flashcards IA (Conceptos Clave)</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1449,6 +2659,72 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                   </p>
                 </div>
 
+                {/* Selector de Fuente de Preguntas: IA vs Mis Preguntas Creadas vs Mixto */}
+                <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs font-bold text-slate-800">
+                      Origen de las Preguntas a Revisar
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomQuestionsModalTopicId(
+                          selectedTopicIds[0] || currentSubject?.topics?.[0]?.id
+                        );
+                        setIsCustomQuestionsModalOpen(true);
+                      }}
+                      className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900 underline cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Crear preguntas propias</span>
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      {
+                        id: 'ai' as const,
+                        label: 'Generar con IA',
+                        desc: 'Automático Gemini',
+                      },
+                      {
+                        id: 'custom' as const,
+                        label: 'Mis Preguntas',
+                        desc: `${(currentSubject?.topics || []).reduce(
+                          (acc, t) =>
+                            selectedTopicIds.length === 0 || selectedTopicIds.includes(t.id)
+                              ? acc + (t.customQuestions?.length || 0)
+                              : acc,
+                          0
+                        )} creadas`,
+                      },
+                      {
+                        id: 'both' as const,
+                        label: 'Mixto (Mías + IA)',
+                        desc: 'Combinar ambas',
+                      },
+                    ].map((src) => {
+                      const active = questionSourcePool === src.id;
+                      return (
+                        <button
+                          key={src.id}
+                          type="button"
+                          onClick={() => setQuestionSourcePool(src.id)}
+                          className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
+                            active
+                              ? 'border-indigo-600 bg-indigo-50/90 text-indigo-950 font-bold shadow-2xs'
+                              : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <div className="text-[11px] font-bold leading-tight">{src.label}</div>
+                          <div className="text-[10px] text-slate-500 font-normal mt-0.5">
+                            {src.desc}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Exam Type Selector Cards */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-2">
@@ -1462,6 +2738,13 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                         desc: '4 opciones + justificación',
                         icon: CheckSquare,
                         colorClass: 'text-blue-600',
+                      },
+                      {
+                        type: 'verdadero_falso' as ExamType,
+                        label: 'Verdadero / Falso',
+                        desc: 'Afirmación V/F + justificación',
+                        icon: CheckCircle2,
+                        colorClass: 'text-indigo-600',
                       },
                       {
                         type: 'desarrollo' as ExamType,
@@ -1656,9 +2939,9 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
         <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs p-6 sm:p-8 max-w-3xl mx-auto space-y-6">
           {!quizFinished ? (
             <>
-              {/* Question progress header */}
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3 text-xs text-slate-500">
-                <div className="flex items-center gap-2">
+              {/* Question progress header & Edit/Delete question controls */}
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3 text-xs text-slate-500 flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-extrabold text-slate-900 font-mono-numbers">
                     Pregunta {currentQIndex + 1} de {activeQuiz.questions.length}
                   </span>
@@ -1672,13 +2955,61 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                   </span>
                 </div>
 
-                <button
-                  onClick={() => setActiveView('create')}
-                  className="text-xs text-slate-400 hover:text-slate-700 font-semibold cursor-pointer"
-                >
-                  Salir
-                </button>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleStartEditQuestion}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 border border-slate-200 hover:border-blue-300 text-[11px] font-semibold transition-colors cursor-pointer"
+                    title="Modificar el enunciado de la pregunta o las opciones de respuesta"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Editar pregunta / respuestas</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveCurrentQuestionAsFlashcard}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                    title="Guardar o actualizar esta pregunta y su respuesta como Flashcard de la materia"
+                  >
+                    <Layers className="w-3 h-3" />
+                    <span>Guardar Flashcard</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDeleteCurrentQuestion}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                    title="Eliminar esta pregunta del test (y su flashcard asociada si no encaja)"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Eliminar</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsEditingQuestion(false);
+                      setActiveView('create');
+                    }}
+                    className="text-xs text-slate-400 hover:text-slate-700 font-semibold cursor-pointer ml-1"
+                  >
+                    Salir
+                  </button>
+                </div>
               </div>
+
+              {runnerActionNotice && (
+                <div className="px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center justify-between">
+                  <span className="font-semibold">{runnerActionNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRunnerActionNotice(null)}
+                    className="text-emerald-600 hover:text-emerald-900 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
 
               {/* Progress bar */}
               <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
@@ -1690,15 +3021,147 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                 />
               </div>
 
-              {/* Question Prompt */}
-              <div className="p-4 bg-slate-50/70 border border-slate-100 rounded-2xl">
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-relaxed">
-                  {activeQuiz.questions[currentQIndex].prompt}
-                </h3>
-              </div>
+              {isEditingQuestion ? (
+                /* Inline Editor for Current Question & Answer Options */
+                <form
+                  onSubmit={handleSaveEditQuestion}
+                  className="p-5 bg-blue-50/40 border-2 border-blue-400 rounded-2xl space-y-4"
+                >
+                  <div className="flex items-center justify-between border-b border-blue-200/70 pb-2.5">
+                    <span className="text-xs font-bold uppercase tracking-wider text-blue-800 flex items-center gap-1.5">
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>Modificar Pregunta y Respuestas</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingQuestion(false)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-white transition-colors cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
 
-              {/* FORMAT 1: TEST (Multiple Choice) */}
-              {activeQuiz.examType === 'test' && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 mb-1">
+                      Enunciado de la pregunta:
+                    </label>
+                    <textarea
+                      value={editPrompt}
+                      onChange={(e) => setEditPrompt(e.target.value)}
+                      rows={2}
+                      required
+                      className="w-full text-xs p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-slate-900"
+                      placeholder="Escribe el enunciado de la pregunta..."
+                    />
+                  </div>
+
+                  {(activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso') && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="block text-xs font-bold text-slate-800">
+                          Opciones de respuesta (haz clic en la letra para marcar cuál es la correcta):
+                        </label>
+                      </div>
+                      <div className="space-y-2">
+                        {editOptions.map((optVal, optIdx) => {
+                          const isMarkedCorrect = editCorrectOptionIndex === optIdx;
+                          return (
+                            <div
+                              key={optIdx}
+                              className={`flex items-center gap-2 p-2 rounded-xl border transition-colors ${
+                                isMarkedCorrect
+                                  ? 'bg-emerald-50/80 border-emerald-400'
+                                  : 'bg-white border-slate-200'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setEditCorrectOptionIndex(optIdx)}
+                                className={`px-2.5 py-1.5 rounded-lg font-mono-numbers text-xs font-bold shrink-0 cursor-pointer transition-colors flex items-center gap-1 ${
+                                  isMarkedCorrect
+                                    ? 'bg-emerald-600 text-white shadow-2xs'
+                                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                }`}
+                                title="Haz clic para marcar esta opción como la respuesta correcta"
+                              >
+                                <span>{String.fromCharCode(65 + optIdx)}</span>
+                                {isMarkedCorrect && <Check className="w-3 h-3" />}
+                              </button>
+                              <input
+                                type="text"
+                                value={optVal}
+                                onChange={(e) => {
+                                  const next = [...editOptions];
+                                  next[optIdx] = e.target.value;
+                                  setEditOptions(next);
+                                }}
+                                className="flex-1 text-xs px-3 py-1.5 bg-transparent border-0 focus:outline-none text-slate-900"
+                                placeholder={`Texto de la opción ${String.fromCharCode(65 + optIdx)}...`}
+                              />
+                              {isMarkedCorrect && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-md shrink-0">
+                                  Correcta
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 mb-1">
+                      Explicación / Respuesta oficial:
+                    </label>
+                    <textarea
+                      value={editExplanation}
+                      onChange={(e) => setEditExplanation(e.target.value)}
+                      rows={2}
+                      className="w-full text-xs p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-slate-900"
+                      placeholder="Explicación o respuesta modelo..."
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-blue-200/60">
+                    <button
+                      type="button"
+                      onClick={handleDeleteCurrentQuestion}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Eliminar esta pregunta</span>
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingQuestion(false)}
+                        className="px-3.5 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Guardar cambios</span>
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              ) : (
+                /* Question Prompt */
+                <div className="p-4 bg-slate-50/70 border border-slate-100 rounded-2xl">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-relaxed">
+                    {activeQuiz.questions[currentQIndex].prompt}
+                  </h3>
+                </div>
+              )}
+
+              {/* FORMAT 1: TEST (Multiple Choice) OR VERDADERO / FALSO */}
+              {(activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso') && (
                 <div className="space-y-3">
                   {activeQuiz.questions[currentQIndex].options?.map((opt, idx) => {
                     const isSelected = selectedOption === idx;
@@ -1755,7 +3218,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
               )}
 
               {/* FORMAT 2, 3, 4, 5, 6: DESARROLLO, ORAL, PREGUNTAS CORTAS, CALCULO, PRACTICO */}
-              {activeQuiz.examType !== 'test' && (
+              {activeQuiz.examType !== 'test' && activeQuiz.examType !== 'verdadero_falso' && (
                 <div className="space-y-4">
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1.5">
@@ -1873,8 +3336,8 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
                 </div>
               )}
 
-              {/* Revealed Explanation & Per-Option Feedback for Test */}
-              {isAnswerRevealed && activeQuiz.examType === 'test' && (() => {
+              {/* Revealed Explanation & Per-Option Feedback for Test & Verdadero/Falso */}
+              {isAnswerRevealed && (activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso') && (() => {
                 const currentQ = activeQuiz.questions[currentQIndex];
                 const isUserWrong =
                   selectedOption !== null && selectedOption !== currentQ.correctOptionIndex;
@@ -1954,7 +3417,7 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
 
               {/* Bottom navigation buttons */}
               <div className="flex justify-end pt-3">
-                {!isAnswerRevealed && activeQuiz.examType === 'test' ? (
+                {!isAnswerRevealed && (activeQuiz.examType === 'test' || activeQuiz.examType === 'verdadero_falso') ? (
                   <button
                     onClick={handleConfirmAnswer}
                     disabled={selectedOption === null}
@@ -2352,6 +3815,39 @@ export const PracticeQuizModule: React.FC<PracticeQuizModuleProps> = ({
           setTimeout(() => setFlashcardSuccessMsg(null), 6000);
         }}
       />
+
+      {/* Modal para Crear y Revisar Preguntas Propias (Test, Verdadero/Falso y Flashcards) por Tema */}
+      {currentSubject && (
+        <CustomTopicQuestionsModal
+          isOpen={isCustomQuestionsModalOpen}
+          onClose={() => setIsCustomQuestionsModalOpen(false)}
+          subject={currentSubject}
+          initialTopicId={customQuestionsModalTopicId}
+          onUpdateSubject={(updatedSub) => {
+            if (onUpdateSubject) {
+              onUpdateSubject(updatedSub);
+            }
+          }}
+          onStartExternalQuiz={(quiz) => {
+            setIsCustomQuestionsModalOpen(false);
+            setQuizFinished(false);
+            setCurrentQIndex(0);
+            setIsAnswerRevealed(false);
+            setSelectedOption(null);
+            setWrittenAnswer('');
+            setOpenAnswerEvaluation(null);
+            setActiveQuiz(quiz);
+            setActiveView('runner');
+          }}
+          onOpenAIGeneratorForTopic={(topicId) => {
+            setIsCustomQuestionsModalOpen(false);
+            setSelectedTopicIds([topicId]);
+            setSourceMode('topics');
+            setQuestionSourcePool('ai');
+            handleQuickExpressQuiz({ topicId, count: 5, type: examType });
+          }}
+        />
+      )}
     </div>
   );
 };

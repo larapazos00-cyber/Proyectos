@@ -1,22 +1,580 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
+  GitBranch,
   Sparkles,
-  Network,
-  ChevronRight,
-  ChevronDown,
   ZoomIn,
   ZoomOut,
   RotateCcw,
+  Download,
   Copy,
   Check,
+  Code2,
+  Maximize2,
+  Minimize2,
   Loader2,
-  GitBranch,
+  Save,
+  Eye,
+  Move,
+  Network,
+  ChevronRight,
+  ChevronDown,
   FileText,
 } from 'lucide-react';
+import mermaid from 'mermaid';
 import { CornellNote, Mindmap, MindmapNode, Topic } from '../types';
 import { D3MindMapCanvas } from './D3MindMapCanvas';
 
-interface MindmapViewerProps {
+export interface MindMapViewerProps {
+  mermaidCode?: string;
+  topicTitle: string;
+  subjectName?: string;
+  summary?: string;
+  isGenerating?: boolean;
+  onGenerate?: () => void;
+  onRegenerate?: () => void;
+  onSaveCode?: (updatedMermaidCode: string) => void;
+  height?: number;
+}
+
+let mermaidInitialized = false;
+
+function sanitizeMermaidMindMapCode(rawCode: string, directionOverride?: 'LR' | 'TD'): string {
+  let cleaned = (rawCode || '')
+    .replace(/^```(mermaid)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (!cleaned) return '';
+
+  if (directionOverride) {
+    if (/^(flowchart|graph)\s+(TD|TB|LR|RL|BT)/i.test(cleaned)) {
+      cleaned = cleaned.replace(
+        /^(flowchart|graph)\s+(TD|TB|LR|RL|BT)/i,
+        `flowchart ${directionOverride}`
+      );
+    }
+  }
+
+  return cleaned;
+}
+
+export const MindMapViewer: React.FC<MindMapViewerProps> = ({
+  mermaidCode = '',
+  topicTitle,
+  subjectName,
+  summary,
+  isGenerating = false,
+  onGenerate,
+  onRegenerate,
+  onSaveCode,
+  height = 420,
+}) => {
+  const triggerGenerate = onRegenerate || onGenerate;
+  const [renderedSvg, setRenderedSvg] = useState<string>('');
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const [activeMode, setActiveMode] = useState<'interactive' | 'code'>('interactive');
+  const [direction, setDirection] = useState<'LR' | 'TD'>('LR');
+  const [zoomScale, setZoomScale] = useState<number>(1);
+  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [editableCode, setEditableCode] = useState<string>(mermaidCode);
+  const [selectedNodeText, setSelectedNodeText] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<boolean>(false);
+
+  const svgContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!mermaidInitialized) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'neutral',
+        securityLevel: 'loose',
+        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+        flowchart: {
+          useMaxWidth: true,
+          htmlLabels: true,
+          curve: 'basis',
+        },
+      });
+      mermaidInitialized = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    setEditableCode(mermaidCode || '');
+    if (mermaidCode) {
+      if (/^(flowchart|graph)\s+(TD|TB)/i.test(mermaidCode.trim())) {
+        setDirection('TD');
+      } else {
+        setDirection('LR');
+      }
+    }
+  }, [mermaidCode]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const renderDiagram = async () => {
+      if (!mermaidCode || !mermaidCode.trim()) {
+        setRenderedSvg('');
+        setRenderError(null);
+        return;
+      }
+
+      const codeToRender = sanitizeMermaidMindMapCode(mermaidCode, direction);
+      if (!codeToRender) return;
+
+      try {
+        setRenderError(null);
+        const renderId = `mermaid-mm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const { svg } = await mermaid.render(renderId, codeToRender);
+        if (isMounted) {
+          setRenderedSvg(svg);
+        }
+      } catch (err: any) {
+        console.warn('[MindMapViewer] Mermaid render warning, trying fallback:', err);
+        try {
+          // Fallback basic sanitization if a label had unescaped characters
+          const fallbackTitle = topicTitle.replace(/["[\]()]/g, '');
+          const fallbackCode = `flowchart ${direction}\n  root(["🧠 ${fallbackTitle}"])`;
+          const renderId2 = `mermaid-mm-fb-${Date.now()}`;
+          const { svg } = await mermaid.render(renderId2, fallbackCode);
+          if (isMounted) {
+            setRenderedSvg(svg);
+            setRenderError(
+              'El código Mermaid contenía algún carácter especial; puedes revisarlo o ajustarlo en la pestaña Código Mermaid.'
+            );
+          }
+        } catch {
+          if (isMounted) {
+            setRenderError('No se pudo renderizar la vista gráfica. Revisa el código Mermaid.');
+          }
+        }
+      }
+    };
+
+    renderDiagram();
+    return () => {
+      isMounted = false;
+    };
+  }, [mermaidCode, direction, topicTitle]);
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (activeMode !== 'interactive') return;
+    // Detect if user clicked on a Mermaid node to inspect it
+    const target = e.target as HTMLElement;
+    const nodeGroup = target.closest('.node');
+    if (nodeGroup) {
+      const labelText = nodeGroup.textContent?.trim();
+      if (labelText) {
+        setSelectedNodeText(labelText);
+      }
+    }
+    setIsDragging(true);
+    dragStartRef.current = {
+      x: e.clientX - panOffset.x,
+      y: e.clientY - panOffset.y,
+    };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDragging) return;
+    setPanOffset({
+      x: e.clientX - dragStartRef.current.x,
+      y: e.clientY - dragStartRef.current.y,
+    });
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleResetView = () => {
+    setZoomScale(1);
+    setPanOffset({ x: 0, y: 0 });
+    setSelectedNodeText(null);
+  };
+
+  const handleCopyCode = () => {
+    if (!mermaidCode) return;
+    navigator.clipboard.writeText(mermaidCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleDownloadSvg = () => {
+    if (!renderedSvg) return;
+    const blob = new Blob([renderedSvg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const slug = (topicTitle || 'mapa_mental').replace(/\s+/g, '_').toLowerCase();
+    a.download = `${slug}_mermaid_mindmap.svg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleSaveManualCode = () => {
+    if (!onSaveCode) return;
+    onSaveCode(editableCode.trim());
+    setSavedNotice(true);
+    setActiveMode('interactive');
+    setTimeout(() => setSavedNotice(false), 2000);
+  };
+
+  const isFlowchart = /^(flowchart|graph)\s+/i.test((mermaidCode || '').trim());
+
+  const viewerContent = (
+    <div
+      className={`bg-white rounded-2xl border border-violet-200/90 shadow-2xs overflow-hidden flex flex-col ${
+        isFullScreen ? 'fixed inset-3 z-50 shadow-2xl' : ''
+      }`}
+    >
+      {/* Top Toolbar */}
+      <div className="px-4 py-2.5 bg-gradient-to-r from-violet-50/90 via-indigo-50/50 to-white border-b border-violet-100 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-violet-600 text-white flex items-center justify-center shrink-0">
+            <GitBranch className="w-3.5 h-3.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-bold text-slate-900 truncate">
+                Mapa Mental Mermaid.js · {topicTitle}
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-100 text-violet-800">
+                IA + Mermaid
+              </span>
+            </div>
+            {subjectName && (
+              <p className="text-[10px] text-slate-500 truncate">
+                {subjectName} · Arrastra el lienzo para moverte y haz clic en los nodos
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {/* View Mode Toggle */}
+          <div className="flex items-center bg-slate-100 p-0.5 rounded-lg text-[11px]">
+            <button
+              type="button"
+              onClick={() => setActiveMode('interactive')}
+              className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer inline-flex items-center gap-1 ${
+                activeMode === 'interactive'
+                  ? 'bg-white text-violet-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Eye className="w-3 h-3" />
+              <span>Mapa Interactivo</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveMode('code')}
+              className={`px-2.5 py-1 rounded-md font-bold transition-colors cursor-pointer inline-flex items-center gap-1 ${
+                activeMode === 'code'
+                  ? 'bg-white text-violet-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Code2 className="w-3 h-3" />
+              <span>Código Mermaid</span>
+            </button>
+          </div>
+
+          {/* Direction toggle (LR vs TD) */}
+          {activeMode === 'interactive' && isFlowchart && (
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-lg text-[11px]">
+              <button
+                type="button"
+                onClick={() => setDirection('LR')}
+                className={`px-2 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                  direction === 'LR'
+                    ? 'bg-white text-violet-700 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="Disposición Horizontal (Izquierda a Derecha)"
+              >
+                Horizontal
+              </button>
+              <button
+                type="button"
+                onClick={() => setDirection('TD')}
+                className={`px-2 py-1 rounded-md font-bold transition-colors cursor-pointer ${
+                  direction === 'TD'
+                    ? 'bg-white text-violet-700 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="Disposición Vertical (Arriba a Abajo)"
+              >
+                Vertical
+              </button>
+            </div>
+          )}
+
+          {/* Zoom Controls */}
+          {activeMode === 'interactive' && mermaidCode && (
+            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 text-slate-600">
+              <button
+                type="button"
+                onClick={() => setZoomScale((z) => Math.max(0.4, +(z - 0.15).toFixed(2)))}
+                className="p-1 hover:text-slate-900 cursor-pointer"
+                title="Alejar"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <span className="text-[10px] font-mono-numbers font-bold px-1.5">
+                {Math.round(zoomScale * 100)}%
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoomScale((z) => Math.min(2.5, +(z + 0.15).toFixed(2)))}
+                className="p-1 hover:text-slate-900 cursor-pointer"
+                title="Acercar"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleResetView}
+                className="p-1 hover:text-slate-900 border-l border-slate-200 ml-0.5 cursor-pointer"
+                title="Restablecer vista y zoom"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {mermaidCode && (
+            <>
+              <button
+                type="button"
+                onClick={handleDownloadSvg}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                title="Descargar mapa mental como imagen vectorial SVG"
+              >
+                <Download className="w-3 h-3 text-violet-600" />
+                <span>SVG</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopyCode}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-700 cursor-pointer"
+                title="Copiar código Mermaid.js"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-3 h-3 text-emerald-600" />
+                    <span>¡Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3 text-slate-500" />
+                    <span>Copiar</span>
+                  </>
+                )}
+              </button>
+            </>
+          )}
+
+          {triggerGenerate && (
+            <button
+              type="button"
+              disabled={isGenerating}
+              onClick={triggerGenerate}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-[11px] font-bold transition-colors cursor-pointer shadow-2xs"
+            >
+              {isGenerating ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>Generando...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3" />
+                  <span>{mermaidCode ? 'Regenerar Mermaid IA' : 'Generar Mapa Mermaid IA'}</span>
+                </>
+              )}
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setIsFullScreen((prev) => !prev)}
+            className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+            title={isFullScreen ? 'Salir de pantalla completa' : 'Ver a pantalla completa'}
+          >
+            {isFullScreen ? (
+              <Minimize2 className="w-3.5 h-3.5" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Summary bar if available */}
+      {summary && activeMode === 'interactive' && (
+        <div className="px-4 py-2 bg-violet-50/40 border-b border-violet-100 text-[11px] text-slate-700 leading-relaxed">
+          <strong className="text-violet-900">Síntesis del Mapa Mental:</strong> {summary}
+        </div>
+      )}
+
+      {/* Main Content Area */}
+      <div
+        className="flex-1 relative overflow-hidden bg-slate-50/40 flex flex-col"
+        style={{ minHeight: isFullScreen ? undefined : `${height}px` }}
+      >
+        {isGenerating ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-2.5">
+            <Loader2 className="w-7 h-7 text-violet-600 animate-spin" />
+            <div className="text-xs font-bold text-slate-900">
+              Generando estructura de mapa mental Mermaid.js con Gemini...
+            </div>
+            <p className="text-[11px] text-slate-500 max-w-md">
+              Analizando los apuntes de &ldquo;{topicTitle}&rdquo; para construir los nodos y conexiones jerárquicas.
+            </p>
+          </div>
+        ) : !mermaidCode ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-violet-100 text-violet-700 flex items-center justify-center">
+              <GitBranch className="w-6 h-6" />
+            </div>
+            <div className="space-y-1 max-w-md">
+              <h4 className="text-xs font-bold text-slate-900">
+                Aún no hay un mapa mental Mermaid.js guardado en este tema
+              </h4>
+              <p className="text-[11px] text-slate-500">
+                Pulsa el botón para que Gemini analice los apuntes de &ldquo;{topicTitle}&rdquo; y guarde el mapa mental interactivo en el tema.
+              </p>
+            </div>
+            {triggerGenerate && (
+              <button
+                type="button"
+                onClick={triggerGenerate}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Generar Mapa Mental Mermaid con IA</span>
+              </button>
+            )}
+          </div>
+        ) : activeMode === 'interactive' ? (
+          <>
+            {renderError && (
+              <div className="px-4 py-2 bg-amber-50 border-b border-amber-200 text-[11px] text-amber-800 flex items-center justify-between">
+                <span>{renderError}</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveMode('code')}
+                  className="font-bold underline ml-2 cursor-pointer"
+                >
+                  Editar código
+                </button>
+              </div>
+            )}
+
+            <div
+              ref={svgContainerRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              className={`flex-1 flex items-center justify-center overflow-auto p-4 select-none ${
+                isDragging ? 'cursor-grabbing' : 'cursor-grab'
+              }`}
+            >
+              {renderedSvg ? (
+                <div
+                  className="transition-transform duration-75 ease-out flex items-center justify-center"
+                  style={{
+                    transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomScale})`,
+                    transformOrigin: 'center center',
+                  }}
+                  dangerouslySetInnerHTML={{ __html: renderedSvg }}
+                />
+              ) : (
+                <div className="text-xs text-slate-400">Renderizando diagrama Mermaid.js...</div>
+              )}
+            </div>
+
+            {/* Interactive Footer Badge */}
+            <div className="px-4 py-2 bg-white border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+              <div className="flex items-center gap-1.5">
+                <Move className="w-3.5 h-3.5 text-violet-500" />
+                {selectedNodeText ? (
+                  <span>
+                    Nodo seleccionado:{' '}
+                    <strong className="text-violet-900 bg-violet-50 px-2 py-0.5 rounded border border-violet-200">
+                      {selectedNodeText}
+                    </strong>
+                  </span>
+                ) : (
+                  <span>
+                    Arrastra el mapa para desplazarte o haz clic en cualquier nodo para resaltarlo.
+                  </span>
+                )}
+              </div>
+              <span className="font-mono-numbers text-[10px] text-slate-400">
+                Guardado en topic.mindMap
+              </span>
+            </div>
+          </>
+        ) : (
+          /* Code Editor Mode */
+          <div className="flex-1 p-4 bg-slate-900 flex flex-col gap-3">
+            <div className="flex items-center justify-between text-xs text-slate-300">
+              <span className="font-mono text-[11px] text-emerald-400">
+                Código fuente Mermaid.js (topic.mindMap)
+              </span>
+              <div className="flex items-center gap-2">
+                {savedNotice && (
+                  <span className="text-emerald-400 text-[11px] font-bold">
+                    ✓ Guardado en el tema
+                  </span>
+                )}
+                {onSaveCode && (
+                  <button
+                    type="button"
+                    onClick={handleSaveManualCode}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Guardar y Renderizar</span>
+                  </button>
+                )}
+              </div>
+            </div>
+            <textarea
+              value={editableCode}
+              onChange={(e) => setEditableCode(e.target.value)}
+              rows={12}
+              className="w-full flex-1 bg-slate-950 text-emerald-300 font-mono text-xs p-3 rounded-xl border border-slate-800 focus:outline-none focus:border-violet-500 leading-relaxed resize-y"
+              placeholder="flowchart LR..."
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  if (isFullScreen) {
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+        {viewerContent}
+      </div>
+    );
+  }
+
+  return viewerContent;
+};
+
+export interface MindmapViewerProps {
   mindmaps: Mindmap[];
   topics: Topic[];
   cornellNotes?: CornellNote[];
@@ -81,7 +639,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
       return;
     }
 
-    // Fallback direct call if prop not provided
     const targetTopic = topics.find((t) => t.id === selectedCornellTopicId);
     if (!targetTopic) return;
     setIsGeneratingCornell(true);
@@ -213,7 +770,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
-      {/* Top Generator / Topic Selector Bar */}
       <div className="p-5 border-b border-slate-200 bg-slate-50/60 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -261,7 +817,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
           </div>
         </div>
 
-        {/* Dedicated Cornell Notes -> D3.js Mindmap Generator Bar */}
         {topics.length > 0 && (
           <div className="p-3.5 bg-indigo-50/70 border border-indigo-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
@@ -319,7 +874,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
           </div>
         )}
 
-        {/* Topic selection chips for multi-topic synthesis */}
         <div className="flex items-center gap-2 flex-wrap pt-1">
           <span className="text-xs font-semibold text-slate-600 mr-1">Temas para síntesis global:</span>
           {topics.map((t) => {
@@ -343,10 +897,8 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
         </div>
       </div>
 
-      {/* Main View Area */}
       {activeMindmap ? (
         <div className="flex-1 flex flex-col min-h-[540px]">
-          {/* Subheader Controls */}
           <div className="px-5 py-2.5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs bg-white">
             <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
               <button
@@ -418,7 +970,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
             </div>
           </div>
 
-          {/* Canvas or Outline */}
           <div className="flex-1 p-4 sm:p-6 bg-slate-50/50 overflow-auto">
             {viewMode === 'd3' ? (
               <D3MindMapCanvas
@@ -433,7 +984,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
                 style={{ transform: `scale(${zoomLevel})` }}
               >
                 <div className="max-w-4xl mx-auto space-y-6">
-                  {/* Root Node */}
                   <div className="text-center">
                     <div className="inline-block p-4 bg-slate-900 text-white rounded-2xl shadow-md border border-slate-800 max-w-md">
                       <h4 className="text-sm font-bold tracking-tight">
@@ -445,7 +995,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
                     </div>
                   </div>
 
-                  {/* Branches */}
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pt-4">
                     {activeMindmap.rootNode.children?.map((branch) => {
                       const isCollapsed = collapsedNodes[branch.id];
@@ -454,7 +1003,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
                           key={branch.id}
                           className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden flex flex-col"
                         >
-                          {/* Branch Header */}
                           <div
                             onClick={() => toggleCollapse(branch.id)}
                             className="p-3.5 bg-blue-50/40 border-b border-slate-100 flex items-center justify-between cursor-pointer hover:bg-blue-50/80 transition-colors"
@@ -472,7 +1020,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
                             </span>
                           </div>
 
-                          {/* Branch Leaves */}
                           {!isCollapsed && branch.children && (
                             <div className="p-3 space-y-2 bg-white flex-1">
                               {branch.children.map((leaf) => (
@@ -507,7 +1054,6 @@ export const MindmapViewer: React.FC<MindmapViewerProps> = ({
                 </div>
               </div>
             ) : (
-              /* Outline View */
               <div className="max-w-3xl mx-auto bg-white p-6 rounded-xl border border-slate-200 shadow-2xs font-sans text-xs space-y-4">
                 <div className="pb-3 border-b border-slate-100">
                   <h4 className="text-sm font-bold text-slate-900">{activeMindmap.title}</h4>

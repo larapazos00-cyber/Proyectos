@@ -55,6 +55,25 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
   topics,
   cornellNotes = [],
 }) => {
+  const buildTopicFullNotes = (t?: Topic | null) => {
+    if (!t) return '';
+    const noteForTopic = cornellNotes.find((cn) => cn.topicId === t.id);
+    const parts: string[] = [];
+    if (t.generalNotes?.trim()) parts.push(t.generalNotes.trim());
+    if (t.notes?.trim() && t.notes.trim() !== t.generalNotes?.trim()) parts.push(t.notes.trim());
+    if (noteForTopic?.notes?.trim() && !parts.includes(noteForTopic.notes.trim())) {
+      parts.push(noteForTopic.notes.trim());
+    }
+    if (t.attachedFiles && t.attachedFiles.length > 0) {
+      t.attachedFiles.forEach((f) => {
+        const txt = f.content?.trim() || f.rawExtractedText?.trim() || '';
+        if (txt) parts.push(`[${f.name}]: ${txt}`);
+      });
+    }
+    if (parts.length > 0) return parts.join('\n\n');
+    return t.description || t.subtopics.join(', ');
+  };
+
   const [selectedTopicId, setSelectedTopicId] = useState<string>(
     initialTopic ? initialTopic.id : topics[0]?.id || ''
   );
@@ -62,7 +81,7 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
     initialTopic ? initialTopic.title : ''
   );
   const [customTopicContext, setCustomTopicContext] = useState<string>(
-    initialTopic ? (initialTopic.notes || initialTopic.description || initialTopic.subtopics.join(', ')) : ''
+    initialTopic ? buildTopicFullNotes(initialTopic) : ''
   );
 
   const [activeTab, setActiveTab] = useState<'mermaid' | 'svg' | 'nodes' | 'code'>('mermaid');
@@ -101,9 +120,7 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
     if (initialTopic) {
       setSelectedTopicId(initialTopic.id);
       setCustomTopicTitle(initialTopic.title);
-      const noteForTopic = cornellNotes.find((cn) => cn.topicId === initialTopic.id);
-      const notesText = initialTopic.notes || noteForTopic?.notes || initialTopic.description || initialTopic.subtopics.join(', ');
-      setCustomTopicContext(notesText);
+      setCustomTopicContext(buildTopicFullNotes(initialTopic));
     }
   }, [initialTopic, cornellNotes]);
 
@@ -113,6 +130,8 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
   const matchingNote = cornellNotes.find((cn) => cn.topicId === selectedTopicId);
   const hasLoadedNotes = Boolean(
     (currentSelectedTopic?.notes && currentSelectedTopic.notes.trim().length > 0) ||
+    (currentSelectedTopic?.generalNotes && currentSelectedTopic.generalNotes.trim().length > 0) ||
+    (currentSelectedTopic?.attachedFiles && currentSelectedTopic.attachedFiles.length > 0) ||
     (matchingNote?.notes && matchingNote.notes.trim().length > 0)
   );
 
@@ -121,9 +140,7 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
     const found = topics.find((t) => t.id === topicId);
     if (found) {
       setCustomTopicTitle(found.title);
-      const note = cornellNotes.find((cn) => cn.topicId === topicId);
-      const notesText = found.notes || note?.notes || found.description || found.subtopics.join(', ');
-      setCustomTopicContext(notesText);
+      setCustomTopicContext(buildTopicFullNotes(found));
     }
   };
 
@@ -169,7 +186,7 @@ export const ConceptDiagramModal: React.FC<ConceptDiagramModalProps> = ({
     setZoomScale(1);
     setSelectedNodeDetails(null);
 
-    const notesContent = currentSelectedTopic?.notes || matchingNote?.notes || '';
+    const notesContent = customTopicContext.trim() || buildTopicFullNotes(currentSelectedTopic);
     const cues = currentSelectedTopic?.cues || matchingNote?.cues || [];
     const summary = currentSelectedTopic?.summary || matchingNote?.summary || '';
 

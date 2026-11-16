@@ -25,9 +25,15 @@ interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess?: () => void;
+  onFirstTimeRegister?: (userId: string) => void;
 }
 
-export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
+export const AuthModal: React.FC<AuthModalProps> = ({
+  isOpen,
+  onClose,
+  onSuccess,
+  onFirstTimeRegister,
+}) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -37,6 +43,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const triggerFirstTimeOnboardingOnce = (uid: string) => {
+    try {
+      const userKey = `studyflow_onboarding_first_register_done_${uid}`;
+      const alreadyDoneForUser = localStorage.getItem(userKey) === 'true';
+      if (!alreadyDoneForUser) {
+        localStorage.setItem(userKey, 'true');
+        localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+        onFirstTimeRegister?.(uid);
+      }
+    } catch {
+      onFirstTimeRegister?.(uid);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,8 +73,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
 
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         await syncUserProfile(cred.user);
+        triggerFirstTimeOnboardingOnce(cred.user.uid);
       } else {
         await signInWithEmailAndPassword(auth, email.trim(), password);
+        try {
+          localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+        } catch {
+          // ignore
+        }
       }
 
       onSuccess?.();
@@ -90,6 +116,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       await syncUserProfile(cred.user);
+      const isNewGoogleAccount =
+        Boolean(cred.user.metadata.creationTime) &&
+        cred.user.metadata.creationTime === cred.user.metadata.lastSignInTime;
+      if (mode === 'register' || isNewGoogleAccount) {
+        triggerFirstTimeOnboardingOnce(cred.user.uid);
+      } else {
+        try {
+          localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+          localStorage.setItem(`studyflow_onboarding_first_register_done_${cred.user.uid}`, 'true');
+        } catch {
+          // ignore
+        }
+      }
       onSuccess?.();
       onClose();
     } catch (err: any) {

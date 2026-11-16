@@ -21,6 +21,8 @@ import { Subject, CornellNote, Flashcard } from '../types';
 interface GeneratedCornellCard {
   term: string;
   definition: string;
+  practicalExample: string;
+  realWorldScenario: string;
   practicalCase: string;
   hint: string;
   conceptTag: string;
@@ -113,14 +115,22 @@ export const CornellFlashcardExtractorModal: React.FC<CornellFlashcardExtractorM
       setExtractedTerms(terms);
       setSelectedTerms(terms);
 
-      const formattedCards: GeneratedCornellCard[] = cards.map((c) => ({
-        term: c.term || 'Concepto',
-        definition: c.definition || '',
-        practicalCase: c.practicalCase || '',
-        hint: c.hint || '',
-        conceptTag: c.conceptTag || 'Concepto Clave',
-        selected: true,
-      }));
+      const formattedCards: GeneratedCornellCard[] = cards.map((c) => {
+        const practicalExample =
+          c.practicalExample || c.practicalCase || 'Ejemplo práctico aplicado al tema.';
+        const realWorldScenario =
+          c.realWorldScenario || 'Situación real de aplicación en el ámbito profesional.';
+        return {
+          term: c.term || 'Concepto Clave',
+          definition: c.definition || '',
+          practicalExample,
+          realWorldScenario,
+          practicalCase: c.practicalCase || `${practicalExample}\n\n${realWorldScenario}`,
+          hint: c.hint || '',
+          conceptTag: c.conceptTag || 'Concepto Clave',
+          selected: true,
+        };
+      });
 
       setGeneratedCards(formattedCards);
       setPreviewIndex(0);
@@ -166,14 +176,19 @@ export const CornellFlashcardExtractorModal: React.FC<CornellFlashcardExtractorM
 
     const todayStr = new Date().toISOString().split('T')[0];
     const newFlashcards: Flashcard[] = selectedToSave.map((c, i) => {
-      // Build composite answer combining exact definition and practical application
-      const fullAnswer = `${c.definition}\n\n📌 Caso de aplicación práctica:\n${c.practicalCase}`;
+      // Build composite answer combining exact definition, practical example, and real-world use case
+      const fullAnswer = `📘 Definición:\n${c.definition}\n\n💡 Ejemplo Práctico:\n${c.practicalExample}\n\n🌍 Situación de Uso Real:\n${c.realWorldScenario}`;
 
       return {
         id: `fc-cornell-${Date.now()}-${i}`,
         topicId: currentNote?.topicId,
+        sourceCornellNoteId: currentNote?.id,
         question: c.term,
         answer: fullAnswer,
+        concept: c.term,
+        definition: c.definition,
+        practicalExample: c.practicalExample,
+        realWorldScenario: c.realWorldScenario,
         hint: c.hint,
         conceptTag: c.conceptTag,
         interval: 1,
@@ -513,24 +528,35 @@ export const CornellFlashcardExtractorModal: React.FC<CornellFlashcardExtractorM
                       )}
                     </div>
                   ) : (
-                    /* Reverso: Definición precisa + Caso de aplicación */
-                    <div className="space-y-4 animate-in fade-in duration-150">
+                    /* Reverso: Definición precisa + Ejemplo Práctico + Situación de Uso Real */
+                    <div className="space-y-3.5 animate-in fade-in duration-150">
                       <div>
                         <span className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block mb-1">
-                          Definición Precisa
+                          📘 Definición Académica
                         </span>
                         <p className="text-sm text-slate-100 leading-relaxed">
                           {currentPreviewCard.definition}
                         </p>
                       </div>
 
-                      {currentPreviewCard.practicalCase && (
+                      {currentPreviewCard.practicalExample && (
                         <div className="pt-2 border-t border-slate-700/60">
                           <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block mb-1">
-                            Caso de Aplicación Práctica
+                            💡 Ejemplo Práctico
                           </span>
                           <p className="text-xs text-slate-200 leading-relaxed bg-white/5 p-2.5 rounded-xl border border-white/10">
-                            {currentPreviewCard.practicalCase}
+                            {currentPreviewCard.practicalExample}
+                          </p>
+                        </div>
+                      )}
+
+                      {currentPreviewCard.realWorldScenario && (
+                        <div className="pt-2 border-t border-slate-700/60">
+                          <span className="text-[11px] font-bold text-sky-400 uppercase tracking-wider block mb-1">
+                            🌍 Situación de Uso Real
+                          </span>
+                          <p className="text-xs text-slate-200 leading-relaxed bg-white/5 p-2.5 rounded-xl border border-white/10">
+                            {currentPreviewCard.realWorldScenario}
                           </p>
                         </div>
                       )}

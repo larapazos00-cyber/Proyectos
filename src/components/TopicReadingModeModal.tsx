@@ -372,13 +372,13 @@ export const TopicReadingModeModal: React.FC<TopicReadingModeModalProps> = ({
     },
   }[theme];
 
-  // Font size classes
+  // Font size classes with generous line-height for sustained long reading
   const fontSizes = {
-    sm: 'text-sm leading-relaxed',
-    base: 'text-base leading-relaxed',
-    lg: 'text-lg leading-relaxed',
-    xl: 'text-xl leading-loose',
-    '2xl': 'text-2xl leading-loose',
+    sm: 'text-[15px] leading-[1.85]',
+    base: 'text-[17px] leading-[1.9]',
+    lg: 'text-[18.5px] leading-[1.95]',
+    xl: 'text-[20px] leading-[2.0]',
+    '2xl': 'text-[22px] leading-[2.05]',
   }[fontSize];
 
   return (
@@ -724,7 +724,7 @@ export const TopicReadingModeModal: React.FC<TopicReadingModeModalProps> = ({
                 </div>
               ) : currentDisplayedText && currentDisplayedText.trim().length > 0 ? (
                 <article
-                  className={`prose prose-slate max-w-none font-serif ${fontSizes} select-text space-y-4 leading-relaxed`}
+                  className={`prose prose-slate max-w-[68ch] mx-auto font-sans ${fontSizes} select-text space-y-5`}
                   onMouseUp={() => {
                     const sel = window.getSelection()?.toString().trim();
                     if (sel && sel.length > 3 && sel.length < 80) {
@@ -790,9 +790,9 @@ export const TopicReadingModeModal: React.FC<TopicReadingModeModalProps> = ({
                     const lines = trimmed.split('\n');
                     if (lines.every((l) => /^(\s*[-*•]|\s*\d+\.)\s+/.test(l))) {
                       return (
-                        <ul key={idx} className="list-disc pl-6 space-y-1.5">
+                        <ul key={idx} className="list-disc pl-6 space-y-2.5">
                           {lines.map((item, lIdx) => (
-                            <li key={lIdx} className="leading-relaxed">
+                            <li key={lIdx} className="leading-[1.95]">
                               {item.replace(/^(\s*[-*•]|\s*\d+\.)\s+/, '')}
                             </li>
                           ))}
@@ -805,7 +805,7 @@ export const TopicReadingModeModal: React.FC<TopicReadingModeModalProps> = ({
                       return (
                         <blockquote
                           key={idx}
-                          className="border-l-4 border-purple-500/60 pl-4 italic opacity-90 my-3"
+                          className="border border-purple-500/30 bg-purple-500/5 rounded-xl px-5 py-3.5 italic opacity-90 my-4 leading-[1.9]"
                         >
                           {trimmed.replace(/^>\s+/gm, '')}
                         </blockquote>
@@ -813,7 +813,7 @@ export const TopicReadingModeModal: React.FC<TopicReadingModeModalProps> = ({
                     }
 
                     return (
-                      <p key={idx} className="whitespace-pre-wrap leading-relaxed">
+                      <p key={idx} className="whitespace-pre-wrap leading-[1.95]">
                         {trimmed}
                       </p>
                     );

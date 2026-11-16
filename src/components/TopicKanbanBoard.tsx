@@ -45,6 +45,7 @@ interface TopicKanbanBoardProps {
   onStartPomodoro?: (topicId: string) => void;
   onEditTopic?: (topic: Topic) => void;
   onDeleteTopic?: (topicId: string) => void;
+  onUpdateTopicDifficulty?: (topicId: string, newDifficulty: DifficultyLevel) => void;
 }
 
 interface ColumnConfig {
@@ -129,6 +130,7 @@ export const TopicKanbanBoard: React.FC<TopicKanbanBoardProps> = ({
   onStartPomodoro,
   onEditTopic,
   onDeleteTopic,
+  onUpdateTopicDifficulty,
 }) => {
   const [draggedTopicId, setDraggedTopicId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<TopicStatus | null>(null);
@@ -179,12 +181,13 @@ export const TopicKanbanBoard: React.FC<TopicKanbanBoardProps> = ({
   };
 
   const getDifficultyBadge = (diff: DifficultyLevel) => {
-    switch (diff) {
-      case 'Alta':
+    const canonical = schedulerService.normalizeDifficultyToCanonical(diff);
+    switch (canonical) {
+      case 'Avanzado':
         return 'bg-rose-50 text-rose-700 border-rose-200';
-      case 'Media':
+      case 'Intermedio':
         return 'bg-amber-50 text-amber-700 border-amber-200';
-      case 'Baja':
+      case 'Básico':
       default:
         return 'bg-emerald-50 text-emerald-700 border-emerald-200';
     }
@@ -352,13 +355,37 @@ export const TopicKanbanBoard: React.FC<TopicKanbanBoardProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1">
-                            <span
-                              className={`text-[10px] px-1.5 py-0.2 rounded border font-semibold ${getDifficultyBadge(
-                                topic.difficulty
-                              )}`}
-                            >
-                              {topic.difficulty}
-                            </span>
+                            {onUpdateTopicDifficulty ? (
+                              <select
+                                value={schedulerService.normalizeDifficultyToCanonical(
+                                  topic.difficulty
+                                )}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  onUpdateTopicDifficulty(
+                                    topic.id,
+                                    e.target.value as DifficultyLevel
+                                  );
+                                }}
+                                className={`text-[10px] px-1.5 py-0.5 rounded border font-bold cursor-pointer focus:outline-none ${getDifficultyBadge(
+                                  topic.difficulty
+                                )}`}
+                                title="Cambiar nivel de dificultad del tema"
+                              >
+                                <option value="Básico">Básico</option>
+                                <option value="Intermedio">Intermedio</option>
+                                <option value="Avanzado">Avanzado</option>
+                              </select>
+                            ) : (
+                              <span
+                                className={`text-[10px] px-1.5 py-0.2 rounded border font-semibold ${getDifficultyBadge(
+                                  topic.difficulty
+                                )}`}
+                              >
+                                {schedulerService.normalizeDifficultyToCanonical(topic.difficulty)}
+                              </span>
+                            )}
                           </div>
                         </div>
 

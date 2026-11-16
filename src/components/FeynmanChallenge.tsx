@@ -126,18 +126,23 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
   const [lastGeneratedFlashcards, setLastGeneratedFlashcards] = useState<Flashcard[]>([]);
   const [flashcardBannerMsg, setFlashcardBannerMsg] = useState<string | null>(null);
 
-  // Audio recording states
+  // Audio recording & Speech-to-Text states
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingDuration, setRecordingDuration] = useState<number>(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBase64, setAudioBase64] = useState<string | null>(null);
   const [audioMimeType, setAudioMimeType] = useState<string>('audio/webm');
   const [liveTranscript, setLiveTranscript] = useState<string>('');
+  const [isTranscribingSTT, setIsTranscribingSTT] = useState<boolean>(false);
+  const [sttStatusMessage, setSttStatusMessage] = useState<string | null>(null);
+  const [autoAnalyzeAfterSpeech, setAutoAnalyzeAfterSpeech] = useState<boolean>(true);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<any>(null);
   const speechRecognitionRef = useRef<any>(null);
+  const liveTranscriptRef = useRef<string>('');
+  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Sync when subject changes
   useEffect(() => {
@@ -441,15 +446,315 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
     setExplanationText((prev) => `${prev}${snippet}`);
   };
 
+  // Speech-to-Text API conversion + automatic Gemini analysis of misunderstood concepts
+  const evaluateOralExplanationWithGemini = async (
+    overrideAudioBase64?: string | null,
+    overrideMimeType?: string,
+    overrideTranscript?: string
+  ) => {
+    if (!effectiveConceptTitle) {
+      setError('Selecciona un tema del temario o escribe el concepto que vas a explicar.');
+      return;
+    }
+
+    const activeBase64 = overrideAudioBase64 !== undefined ? overrideAudioBase64 : audioBase64;
+    const activeMime = overrideMimeType || audioMimeType;
+    const activeTranscript = (
+      overrideTranscript !== undefined ? overrideTranscript : liveTranscript
+    ).trim();
+
+    if (!activeBase64 && !activeTranscript) {
+      setError('Graba o dicta primero tu explicación oral antes de analizarla.');
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setError(null);
+    setLoggedCorrectionIndices([]);
+    setAppliedCorrectionIndices([]);
+
+    const referenceContent = getTopicReferenceContent();
+    const initialSylComparison = evaluateAgainstOriginalSyllabus(activeTranscript);
+    setSyllabusComparison(initialSylComparison.items);
+
+    try {
+      if (activeBase64) {
+        const response = await fetch('/api/gemini/evaluate-audio-feynman', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            concept: effectiveConceptTitle,
+            subtopics: selectedSubtopic
+              ? [selectedSubtopic]
+              : activeTopic?.subtopics || [],
+            subjectName: subject.name,
+            audioBase64: activeBase64,
+            mimeType: activeMime,
+            liveTranscript: activeTranscript,
+            targetAudience,
+            referenceContent,
+          }),
+        });
+
+        const resData = await response.json();
+        if (!response.ok || !resData.success || !resData.data) {
+          throw new Error(resData.error || 'Error al analizar la explicación oral con Gemini.');
+        }
+
+        const data = resData.data;
+        const transcribedText =
+          (data.transcription || activeTranscript || 'Explicación oral transcrita').trim();
+        setLiveTranscript(transcribedText);
+        liveTranscriptRef.current = transcribedText;
+        setExplanationText(transcribedText);
+
+        const audioSylResult = evaluateAgainstOriginalSyllabus(transcribedText);
+        setSyllabusComparison(audioSylResult.items);
+
+        const simplicity = data.simplicityScore ?? data.clarityScore ?? 78;
+        const accuracy = data.accuracyScore ?? audioSylResult.coveragePct ?? 78;
+        const overall = data.overallScore ?? Math.round((simplicity + accuracy) / 2);
+
+        const combinedGaps = Array.from(
+          new Set([
+            ...(Array.isArray(data.conceptualGaps) ? data.conceptualGaps : []),
+            ...audioSylResult.detectedGaps,
+          ])
+        );
+
+        const session: FeynmanSession = {
+          id: `feyn-chal-${Date.now()}`,
+          topicId: activeTopic?.id,
+          subtopic: selectedSubtopic || undefined,
+          concept: effectiveConceptTitle,
+          explanation: transcribedText,
+          clarityScore: simplicity,
+          simplicityScore: simplicity,
+          accuracyScore: accuracy,
+          overallScore: overall,
+          corrections: Array.isArray(data.corrections) ? data.corrections : [],
+          deepDiveSuggestions: Array.isArray(data.deepDiveSuggestions)
+            ? data.deepDiveSuggestions
+            : [],
+          strengths: Array.isArray(data.strengths)
+            ? data.strengths
+            : audioSylResult.coveredStrengths,
+          identifiedJargon: Array.isArray(data.identifiedJargon) ? data.identifiedJargon : [],
+          conceptualGaps: combinedGaps,
+          intuitiveAnalogies: Array.isArray(data.intuitiveAnalogies) ? data.intuitiveAnalogies : [],
+          improvedDraft: data.improvedDraft || '',
+          followUpQuestions: Array.isArray(data.followUpQuestions) ? data.followUpQuestions : [],
+          feedback: data.feedback || '',
+          createdAt: new Date().toISOString(),
+          inputMode: 'audio',
+          transcription: transcribedText,
+          oralDeliveryFeedback: data.oralDeliveryFeedback || undefined,
+        };
+
+        setCurrentEvaluation(session);
+        let autoCards: Flashcard[] | undefined = undefined;
+        if (autoConvertFlashcards && overall >= 65) {
+          const built = buildFlashcardsFromSession(session, audioSylResult.items);
+          if (built.length > 0) {
+            autoCards = built;
+            setLastGeneratedFlashcards(built);
+            setConvertedSessionIds((prev) => [...prev, session.id]);
+            setFlashcardBannerMsg(
+              `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
+            );
+            setTimeout(() => setFlashcardBannerMsg(null), 6000);
+          }
+        }
+        onSaveSession(session, autoCards);
+        if (activeTopic && onMarkTopicReviewed) {
+          onMarkTopicReviewed(activeTopic.id, overall);
+        }
+      } else {
+        // Evaluate transcribed text directly with Gemini when only browser SpeechRecognition text is present
+        const response = await fetch('/api/gemini/feynman-challenge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            concept: effectiveConceptTitle,
+            subtopics: selectedSubtopic
+              ? [selectedSubtopic]
+              : activeTopic?.subtopics || [],
+            subjectName: subject.name,
+            explanation: activeTranscript,
+            targetAudience,
+            referenceContent,
+          }),
+        });
+
+        const resData = await response.json();
+        if (!response.ok || !resData.success || !resData.data) {
+          throw new Error(resData.error || 'No se pudo analizar la explicación oral con Gemini.');
+        }
+
+        const data = resData.data;
+        const simplicity = data.simplicityScore ?? data.clarityScore ?? 75;
+        const accuracy = data.accuracyScore ?? initialSylComparison.coveragePct ?? 75;
+        const overall = data.overallScore ?? Math.round((simplicity + accuracy) / 2);
+
+        const combinedGaps = Array.from(
+          new Set([
+            ...(Array.isArray(data.conceptualGaps) ? data.conceptualGaps : []),
+            ...initialSylComparison.detectedGaps,
+          ])
+        );
+
+        const session: FeynmanSession = {
+          id: `feyn-chal-${Date.now()}`,
+          topicId: activeTopic?.id,
+          subtopic: selectedSubtopic || undefined,
+          concept: effectiveConceptTitle,
+          explanation: activeTranscript,
+          clarityScore: simplicity,
+          simplicityScore: simplicity,
+          accuracyScore: accuracy,
+          overallScore: overall,
+          corrections: Array.isArray(data.corrections) ? data.corrections : [],
+          deepDiveSuggestions: Array.isArray(data.deepDiveSuggestions)
+            ? data.deepDiveSuggestions
+            : [],
+          strengths: Array.isArray(data.strengths)
+            ? data.strengths
+            : initialSylComparison.coveredStrengths,
+          identifiedJargon: Array.isArray(data.identifiedJargon) ? data.identifiedJargon : [],
+          conceptualGaps: combinedGaps,
+          intuitiveAnalogies: Array.isArray(data.intuitiveAnalogies) ? data.intuitiveAnalogies : [],
+          improvedDraft: data.improvedDraft || '',
+          followUpQuestions: Array.isArray(data.followUpQuestions) ? data.followUpQuestions : [],
+          feedback: data.feedback || '',
+          createdAt: new Date().toISOString(),
+          inputMode: 'audio',
+          transcription: activeTranscript,
+        };
+
+        setCurrentEvaluation(session);
+        let autoCards: Flashcard[] | undefined = undefined;
+        if (autoConvertFlashcards && overall >= 65) {
+          const built = buildFlashcardsFromSession(session, initialSylComparison.items);
+          if (built.length > 0) {
+            autoCards = built;
+            setLastGeneratedFlashcards(built);
+            setConvertedSessionIds((prev) => [...prev, session.id]);
+            setFlashcardBannerMsg(
+              `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
+            );
+            setTimeout(() => setFlashcardBannerMsg(null), 6000);
+          }
+        }
+        onSaveSession(session, autoCards);
+        if (activeTopic && onMarkTopicReviewed) {
+          onMarkTopicReviewed(activeTopic.id, overall);
+        }
+      }
+    } catch (err: any) {
+      console.error('Error evaluating oral Feynman explanation:', err);
+      if (activeTranscript.length >= 10) {
+        handleCompareWithOriginalSyllabus();
+      } else {
+        setError(err.message || 'Error al analizar la explicación oral con Gemini.');
+      }
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const transcribeAudioWithSTT = async (
+    base64Data: string,
+    mime: string,
+    browserTranscript: string,
+    triggerAutoEvaluation: boolean
+  ) => {
+    setIsTranscribingSTT(true);
+    setSttStatusMessage('Convirtiendo explicación oral en texto mediante Speech-to-Text...');
+    setError(null);
+
+    let finalTranscript = browserTranscript.trim();
+
+    try {
+      const response = await fetch('/api/gemini/speech-to-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64: base64Data,
+          mimeType: mime,
+          concept: effectiveConceptTitle,
+          subjectName: subject.name,
+        }),
+      });
+
+      const resData = await response.json();
+      if (response.ok && resData.success && resData.data?.transcription) {
+        finalTranscript = resData.data.transcription.trim();
+      }
+    } catch (err) {
+      console.warn('Speech-to-Text fallback to browser transcript:', err);
+    } finally {
+      setIsTranscribingSTT(false);
+    }
+
+    if (finalTranscript) {
+      setLiveTranscript(finalTranscript);
+      liveTranscriptRef.current = finalTranscript;
+      setExplanationText(finalTranscript);
+      setSttStatusMessage(
+        '✓ Explicación oral convertida a texto con Speech-to-Text. Lista para detectar conceptos mal entendidos.'
+      );
+    } else {
+      setSttStatusMessage(
+        'Audio capturado. Pulsa "Evaluar con Gemini" para transcribir y detectar conceptos mal entendidos.'
+      );
+    }
+
+    if (triggerAutoEvaluation && effectiveConceptTitle) {
+      await evaluateOralExplanationWithGemini(base64Data, mime, finalTranscript);
+    }
+  };
+
+  const handleUploadAudioFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setError(null);
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl);
+    }
+    const url = URL.createObjectURL(file);
+    setAudioUrl(url);
+    const detectedMime = file.type || 'audio/webm';
+    setAudioMimeType(detectedMime);
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const base64String = (reader.result as string)?.split(',')[1];
+      if (base64String) {
+        setAudioBase64(base64String);
+        await transcribeAudioWithSTT(
+          base64String,
+          detectedMime,
+          liveTranscriptRef.current,
+          autoAnalyzeAfterSpeech
+        );
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
   // Audio recording functions
   const startRecording = async () => {
     setError(null);
+    setSttStatusMessage(null);
     if (audioUrl) {
       URL.revokeObjectURL(audioUrl);
       setAudioUrl(null);
     }
     setAudioBase64(null);
     setLiveTranscript('');
+    liveTranscriptRef.current = '';
     audioChunksRef.current = [];
 
     try {
@@ -461,9 +766,10 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
         mimeType = 'audio/mp4';
       }
 
+      const cleanMime = mimeType.split(';')[0];
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
-      setAudioMimeType(mimeType.split(';')[0]);
+      setAudioMimeType(cleanMime);
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -477,9 +783,17 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
         setAudioUrl(url);
 
         const reader = new FileReader();
-        reader.onloadend = () => {
+        reader.onloadend = async () => {
           const base64String = (reader.result as string)?.split(',')[1];
           setAudioBase64(base64String);
+          if (base64String) {
+            await transcribeAudioWithSTT(
+              base64String,
+              cleanMime,
+              liveTranscriptRef.current,
+              autoAnalyzeAfterSpeech
+            );
+          }
         };
         reader.readAsDataURL(finalBlob);
         stream.getTracks().forEach((track) => track.stop());
@@ -506,7 +820,9 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
             for (let i = 0; i < event.results.length; i++) {
               transcript += event.results[i][0].transcript + ' ';
             }
-            setLiveTranscript(transcript.trim());
+            const trimmed = transcript.trim();
+            liveTranscriptRef.current = trimmed;
+            setLiveTranscript(trimmed);
           };
           recognition.start();
           speechRecognitionRef.current = recognition;
@@ -514,7 +830,7 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
       }
     } catch (err) {
       setError(
-        'No se pudo acceder al micrófono. Revisa los permisos del navegador o usa la explicación por escrito.'
+        'No se pudo acceder al micrófono. Revisa los permisos del navegador, sube un archivo de audio o usa la explicación por escrito.'
       );
     }
   };
@@ -677,81 +993,9 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
     setSyllabusComparison(sylComparisonResult.items);
 
     try {
-      if (inputMode === 'audio' && audioBase64) {
-        const response = await fetch('/api/gemini/evaluate-audio-feynman', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            concept: effectiveConceptTitle,
-            audioBase64,
-            mimeType: audioMimeType,
-            targetAudience,
-            referenceContent,
-          }),
-        });
-
-        const resData = await response.json();
-        if (!response.ok || !resData.success || !resData.data) {
-          throw new Error(resData.error || 'Error al analizar el audio con IA.');
-        }
-
-        const data = resData.data;
-        const transcribedText = data.transcription || liveTranscript || 'Explicación por voz';
-        const audioSylResult = evaluateAgainstOriginalSyllabus(transcribedText);
-        setSyllabusComparison(audioSylResult.items);
-
-        const simplicity = data.simplicityScore ?? data.clarityScore ?? 78;
-        const accuracy = data.accuracyScore ?? audioSylResult.coveragePct ?? 78;
-        const overall = data.overallScore ?? Math.round((simplicity + accuracy) / 2);
-
-        const combinedGaps = Array.from(
-          new Set([
-            ...(Array.isArray(data.conceptualGaps) ? data.conceptualGaps : []),
-            ...audioSylResult.detectedGaps,
-          ])
-        );
-
-        const session: FeynmanSession = {
-          id: `feyn-chal-${Date.now()}`,
-          topicId: activeTopic?.id,
-          subtopic: selectedSubtopic || undefined,
-          concept: effectiveConceptTitle,
-          explanation: transcribedText,
-          clarityScore: simplicity,
-          simplicityScore: simplicity,
-          accuracyScore: accuracy,
-          overallScore: overall,
-          corrections: Array.isArray(data.corrections) ? data.corrections : [],
-          strengths: Array.isArray(data.strengths) ? data.strengths : audioSylResult.coveredStrengths,
-          identifiedJargon: Array.isArray(data.identifiedJargon) ? data.identifiedJargon : [],
-          conceptualGaps: combinedGaps,
-          intuitiveAnalogies: Array.isArray(data.intuitiveAnalogies) ? data.intuitiveAnalogies : [],
-          improvedDraft: data.improvedDraft || '',
-          followUpQuestions: Array.isArray(data.followUpQuestions) ? data.followUpQuestions : [],
-          feedback: data.feedback || '',
-          createdAt: new Date().toISOString(),
-          inputMode: 'audio',
-          transcription: transcribedText,
-        };
-
-        setCurrentEvaluation(session);
-        let autoCards: Flashcard[] | undefined = undefined;
-        if (autoConvertFlashcards && overall >= 65) {
-          const built = buildFlashcardsFromSession(session, audioSylResult.items);
-          if (built.length > 0) {
-            autoCards = built;
-            setLastGeneratedFlashcards(built);
-            setConvertedSessionIds((prev) => [...prev, session.id]);
-            setFlashcardBannerMsg(
-              `🃏 Se han convertido automáticamente ${built.length} puntos clave de tu sesión Feynman en flashcards de "${subject.name}".`
-            );
-            setTimeout(() => setFlashcardBannerMsg(null), 6000);
-          }
-        }
-        onSaveSession(session, autoCards);
-        if (activeTopic && onMarkTopicReviewed) {
-          onMarkTopicReviewed(activeTopic.id, overall);
-        }
+      if (inputMode === 'audio') {
+        await evaluateOralExplanationWithGemini(audioBase64, audioMimeType, liveTranscript);
+        return;
       } else {
         const textToEvaluate =
           inputMode === 'written' ? explanationText.trim() : liveTranscript.trim();
@@ -1886,38 +2130,53 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     }`}
                   >
                     <Mic className="w-3.5 h-3.5 text-purple-600" />
-                    <span>Explicar en Voz Alta</span>
+                    <span>Explicación Oral (Speech-to-Text + IA)</span>
                   </button>
                 </div>
               </div>
 
               {inputMode === 'written' ? (
                 <div className="space-y-3">
-                  {/* Helper Starter Chips */}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] text-slate-400 font-medium mr-1">
-                      Guías de redacción Feynman:
-                    </span>
+                  {/* Helper Starter Chips + Quick Speech-to-Text Dictation trigger */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] text-slate-400 font-medium mr-1">
+                        Guías de redacción Feynman:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertStarterPrompt('que_es')}
+                        className="text-[11px] px-2.5 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 font-medium transition-colors cursor-pointer"
+                      >
+                        + "1. ¿Qué es y para qué sirve?"
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertStarterPrompt('analogia')}
+                        className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-medium transition-colors cursor-pointer"
+                      >
+                        + "2. Poner una analogía cotidiana"
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleInsertStarterPrompt('paso_a_paso')}
+                        className="text-[11px] px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-medium transition-colors cursor-pointer"
+                      >
+                        + "3. Explicar cómo funciona paso a paso"
+                      </button>
+                    </div>
+
                     <button
                       type="button"
-                      onClick={() => handleInsertStarterPrompt('que_es')}
-                      className="text-[11px] px-2.5 py-1 rounded-lg bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 font-medium transition-colors cursor-pointer"
+                      onClick={() => {
+                        setInputMode('audio');
+                        startRecording();
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold shadow-2xs transition-colors cursor-pointer"
+                      title="Graba tu explicación oral con Speech-to-Text y analiza conceptos mal entendidos con Gemini"
                     >
-                      + "1. ¿Qué es y para qué sirve?"
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleInsertStarterPrompt('analogia')}
-                      className="text-[11px] px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-medium transition-colors cursor-pointer"
-                    >
-                      + "2. Poner una analogía cotidiana"
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleInsertStarterPrompt('paso_a_paso')}
-                      className="text-[11px] px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-medium transition-colors cursor-pointer"
-                    >
-                      + "3. Explicar cómo funciona paso a paso"
+                      <Mic className="w-3.5 h-3.5" />
+                      <span>Dictar con Speech-to-Text</span>
                     </button>
                   </div>
 
@@ -1959,69 +2218,187 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                 </div>
               ) : (
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 flex flex-col items-center justify-center space-y-4">
-                  <div className="text-center max-w-md space-y-1">
-                    <h5 className="text-xs font-bold text-slate-800">
-                      Explica "{effectiveConceptTitle}" en voz alta
+                  <div className="text-center max-w-xl space-y-1">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-purple-100 text-purple-800 text-[10px] font-bold uppercase tracking-wider mb-1">
+                      <Volume2 className="w-3.5 h-3.5" />
+                      <span>Speech-to-Text API + Diagnóstico Conceptual Gemini</span>
+                    </div>
+                    <h5 className="text-xs sm:text-sm font-bold text-slate-800">
+                      Explica "{effectiveConceptTitle}" en voz alta con tus propias palabras
                     </h5>
                     <p className="text-[11px] text-slate-500">
-                      Habla con naturalidad como si le dieras una clase particular a un compañero.
-                      La IA transcribirá tu voz y analizará si tu explicación es simple y precisa.
+                      Habla con naturalidad como si dieras clase a un compañero. Al terminar, la API de{' '}
+                      <strong>Speech-to-Text</strong> convertirá tu voz en texto y <strong>Gemini</strong>{' '}
+                      identificará automáticamente cualquier concepto mal entendido o confuso.
                     </p>
                   </div>
 
-                  <div className="font-mono-numbers text-sm font-bold px-3 py-1 bg-white border border-slate-200 rounded-xl text-slate-800">
+                  {/* Auto-analyze toggle */}
+                  <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-[11px] font-medium text-slate-700 cursor-pointer select-none shadow-2xs">
+                    <input
+                      type="checkbox"
+                      checked={autoAnalyzeAfterSpeech}
+                      onChange={(e) => setAutoAnalyzeAfterSpeech(e.target.checked)}
+                      className="rounded border-slate-300 text-purple-600 focus:ring-purple-500"
+                    />
+                    <span>
+                      Analizar automáticamente con Gemini e identificar conceptos mal entendidos al terminar de hablar
+                    </span>
+                  </label>
+
+                  <div className="font-mono-numbers text-sm font-bold px-3.5 py-1 bg-white border border-slate-200 rounded-xl text-slate-800">
                     {formatDuration(recordingDuration)}
                   </div>
 
-                  {isRecording ? (
-                    <div className="flex flex-col items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-center gap-4">
+                    {isRecording ? (
+                      <div className="flex flex-col items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={stopRecording}
+                          className="w-16 h-16 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center shadow-lg animate-pulse cursor-pointer"
+                        >
+                          <Square className="w-6 h-6 fill-current" />
+                        </button>
+                        <span className="text-xs font-bold text-rose-600">
+                          Grabando explicación oral... Pulsa para detener y transcribir
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={startRecording}
+                          disabled={isTranscribingSTT || isAnalyzing}
+                          className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white flex items-center justify-center shadow-md cursor-pointer transition-transform active:scale-95"
+                        >
+                          <Mic className="w-7 h-7" />
+                        </button>
+                        <span className="text-xs font-semibold text-slate-700">
+                          {audioUrl ? 'Volver a grabar explicación oral' : 'Pulsar para empezar a hablar'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Secondary option: Upload audio file */}
+                  {!isRecording && (
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      <input
+                        ref={audioFileInputRef}
+                        type="file"
+                        accept="audio/*"
+                        onChange={handleUploadAudioFile}
+                        className="hidden"
+                      />
                       <button
                         type="button"
-                        onClick={stopRecording}
-                        className="w-16 h-16 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center shadow-lg animate-pulse cursor-pointer"
+                        onClick={() => audioFileInputRef.current?.click()}
+                        disabled={isTranscribingSTT || isAnalyzing}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-semibold transition-colors cursor-pointer"
                       >
-                        <Square className="w-6 h-6 fill-current" />
+                        <Volume2 className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Subir grabación de voz (.mp3, .wav, .m4a, .webm)</span>
                       </button>
-                      <span className="text-xs font-bold text-rose-600">
-                        Grabando... Pulsa para terminar
-                      </span>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={startRecording}
-                        className="w-16 h-16 rounded-full bg-purple-600 hover:bg-purple-700 text-white flex items-center justify-center shadow-md cursor-pointer transition-transform active:scale-95"
-                      >
-                        <Mic className="w-7 h-7" />
-                      </button>
-                      <span className="text-xs font-semibold text-slate-700">
-                        {audioUrl ? 'Volver a grabar explicación' : 'Pulsar para empezar a hablar'}
-                      </span>
+
+                      {audioBase64 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            transcribeAudioWithSTT(
+                              audioBase64,
+                              audioMimeType,
+                              liveTranscript,
+                              false
+                            )
+                          }
+                          disabled={isTranscribingSTT || isAnalyzing}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 text-[11px] font-bold transition-colors cursor-pointer"
+                        >
+                          {isTranscribingSTT ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-700" />
+                              <span>Transcribiendo con Speech-to-Text...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-3.5 h-3.5 text-purple-700" />
+                              <span>Re-transcribir audio con Speech-to-Text</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   )}
 
                   {audioUrl && !isRecording && (
-                    <div className="w-full max-w-md pt-2 flex flex-col items-center gap-2">
+                    <div className="w-full max-w-md pt-1 flex flex-col items-center gap-2">
                       <audio src={audioUrl} controls className="w-full h-9" />
                     </div>
                   )}
 
-                  {(liveTranscript || isRecording) && (
-                    <div className="w-full max-w-xl bg-white border border-slate-200 rounded-xl p-3 text-xs text-slate-700 italic">
-                      <span className="font-bold not-italic text-slate-500 block mb-1 text-[10px] uppercase">
-                        Transcripción detectada:
+                  {(isTranscribingSTT || sttStatusMessage) && (
+                    <div
+                      className={`w-full max-w-2xl rounded-xl px-3.5 py-2.5 text-xs flex items-center gap-2 border ${
+                        isTranscribingSTT
+                          ? 'bg-purple-50 border-purple-200 text-purple-900'
+                          : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      }`}
+                    >
+                      {isTranscribingSTT ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-purple-600 shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      )}
+                      <span className="font-medium">
+                        {sttStatusMessage || 'Procesando Speech-to-Text...'}
                       </span>
-                      {liveTranscript || 'Escuchando tu explicación...'}
                     </div>
                   )}
+
+                  {/* Editable Speech-to-Text Transcription Box */}
+                  <div className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl p-4 space-y-2 shadow-2xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-slate-700 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Transcripción Speech-to-Text de tu explicación oral (editable):</span>
+                      </span>
+                      {liveTranscript && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExplanationText(liveTranscript);
+                            setInputMode('written');
+                          }}
+                          className="text-[11px] font-semibold text-purple-700 hover:text-purple-900 cursor-pointer"
+                        >
+                          Pasar a editor de texto →
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      value={liveTranscript}
+                      onChange={(e) => {
+                        setLiveTranscript(e.target.value);
+                        liveTranscriptRef.current = e.target.value;
+                        setExplanationText(e.target.value);
+                      }}
+                      rows={4}
+                      placeholder={
+                        isRecording
+                          ? 'Escuchando y transcribiendo tu explicación oral en tiempo real...'
+                          : 'Aquí aparecerá el texto convertido por Speech-to-Text cuando hables por el micrófono o subas un audio. También puedes editarlo antes de analizarlo con Gemini.'
+                      }
+                      className="w-full text-xs sm:text-sm bg-slate-50 focus:bg-white border border-slate-200 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-purple-500 leading-relaxed resize-y"
+                    />
+                  </div>
                 </div>
               )}
 
               {/* Submit Buttons: Instant Syllabus Comparison + Full AI Evaluation */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
                 <p className="text-[11px] text-slate-500">
-                  La evaluación contrasta tu texto con los epígrafes, apuntes y PDFs del temario original.
+                  La evaluación contrasta tu explicación oral o escrita con los epígrafes, apuntes y PDFs del temario original.
                 </p>
 
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -2030,9 +2407,11 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     onClick={handleCompareWithOriginalSyllabus}
                     disabled={
                       isAnalyzing ||
+                      isTranscribingSTT ||
                       isRecording ||
                       !effectiveConceptTitle ||
-                      (inputMode === 'written' && !explanationText.trim())
+                      (inputMode === 'written' && !explanationText.trim()) ||
+                      (inputMode === 'audio' && !liveTranscript.trim())
                     }
                     className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-900 border border-indigo-200 text-xs font-bold rounded-xl transition-all cursor-pointer"
                     title="Compara al instante tu explicación con los epígrafes del temario original para detectar qué conceptos has omitido"
@@ -2046,6 +2425,7 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     onClick={handleAnalyzeExplanation}
                     disabled={
                       isAnalyzing ||
+                      isTranscribingSTT ||
                       isRecording ||
                       !effectiveConceptTitle ||
                       (inputMode === 'written' && !explanationText.trim()) ||
@@ -2056,12 +2436,20 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     {isAnalyzing ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Comparando con temario original y evaluando con IA...</span>
+                        <span>
+                          {inputMode === 'audio'
+                            ? 'Transcribiendo voz y detectando conceptos mal entendidos con Gemini...'
+                            : 'Comparando con temario original y evaluando con IA...'}
+                        </span>
                       </>
                     ) : (
                       <>
                         <Wand2 className="w-4 h-4" />
-                        <span>Evaluar Explicación y Detectar Lagunas con IA</span>
+                        <span>
+                          {inputMode === 'audio'
+                            ? 'Analizar Explicación Oral e Identificar Conceptos Mal Entendidos (Gemini)'
+                            : 'Evaluar Explicación y Detectar Conceptos Mal Entendidos con IA'}
+                        </span>
                       </>
                     )}
                   </button>
@@ -2204,10 +2592,47 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                         <Brain className="w-5 h-5 text-purple-600 shrink-0 mt-0.5" />
                         <div>
                           <span className="font-bold text-slate-900 block mb-0.5">
-                            Diagnóstico de la Evaluación:
+                            Diagnóstico de la Evaluación (Gemini AI):
                           </span>
                           {currentEvaluation.feedback}
                         </div>
+                      </div>
+                    )}
+
+                    {/* Speech-to-Text Transcription & Oral Delivery Assessment */}
+                    {(currentEvaluation.inputMode === 'audio' ||
+                      currentEvaluation.transcription ||
+                      currentEvaluation.oralDeliveryFeedback) && (
+                      <div className="p-4 rounded-2xl bg-purple-50/70 border border-purple-200 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Mic className="w-4 h-4 text-purple-700" />
+                            <span className="text-xs font-bold text-purple-950 uppercase tracking-wider">
+                              Transcripción Speech-to-Text de tu Explicación Oral
+                            </span>
+                          </div>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-white text-purple-800 border border-purple-200">
+                            Voz convertida a texto + Analizada con Gemini
+                          </span>
+                        </div>
+
+                        {currentEvaluation.transcription && (
+                          <div className="p-3 rounded-xl bg-white border border-purple-100 text-xs text-slate-800 italic leading-relaxed">
+                            "{currentEvaluation.transcription}"
+                          </div>
+                        )}
+
+                        {currentEvaluation.oralDeliveryFeedback && (
+                          <div className="flex items-start gap-2 text-xs text-purple-900 bg-white/80 rounded-xl p-3 border border-purple-200/70">
+                            <Volume2 className="w-4 h-4 text-purple-700 shrink-0 mt-0.5" />
+                            <div>
+                              <span className="font-bold block mb-0.5">
+                                Evaluación de Claridad y Exposición Oral:
+                              </span>
+                              {currentEvaluation.oralDeliveryFeedback}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2310,7 +2735,7 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                 </div>
               )}
 
-              {/* CORRECTIONS MODULE: Conceptos mal explicados detectados y sus correcciones */}
+              {/* CORRECTIONS MODULE: Conceptos mal entendidos detectados automáticamente por Gemini */}
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5">
@@ -2319,12 +2744,12 @@ export const FeynmanChallenge: React.FC<FeynmanChallengeProps> = ({
                     </div>
                     <div>
                       <h4 className="text-sm font-bold text-slate-900">
-                        Correcciones de Conceptos Mal Explicados o Confusos (
+                        Conceptos Mal Entendidos o Confusos Identificados por Gemini (
                         {currentEvaluation.corrections?.length || 0})
                       </h4>
                       <p className="text-xs text-slate-500">
-                        Análisis específico de errores conceptuales, imprecisiones o explicaciones
-                        demasiado enrevesadas detectadas en tu texto.
+                        Diagnóstico automático de conceptos mal entendidos, imprecisiones o explicaciones
+                        confusas detectadas al analizar tu explicación.
                       </p>
                     </div>
                   </div>

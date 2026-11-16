@@ -29,6 +29,7 @@ import {
 import {
   AcademicYear,
   Subject,
+  SubjectSmartGoal,
   Task,
   Exam,
   ExamType,
@@ -37,12 +38,16 @@ import {
   PomodoroLog,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
+import { storageService } from '../services/storageService';
 import { getSubjectSpacedRepetitionAlert } from '../utils/courseAlerts';
+import { upsertGoalOnSubject } from '../utils/smartGoalsUtils';
 import { StreakModal } from './StreakModal';
 import { StreakHeatmapPanel } from './StreakHeatmapPanel';
 import { DashboardStudyStreakCard } from './DashboardStudyStreakCard';
 import { SubjectStudyHoursChart } from './SubjectStudyHoursChart';
 import { SubjectQuickReviewOverlay } from './SubjectQuickReviewOverlay';
+import { SmartGoalsDashboardCard } from './SmartGoalsDashboardCard';
+import { GoalAssistantModal } from './GoalAssistantModal';
 
 interface CourseGeneralViewProps {
   programName: string;
@@ -62,6 +67,7 @@ interface CourseGeneralViewProps {
   onAddBlockedEvent?: (event: BlockedTimeEvent) => void;
   onDeleteBlockedEvent?: (id: string) => void;
   onSelectSubject: (subjectId: string) => void;
+  onSelectSubjectSmartGoals?: (subjectId: string) => void;
   onOpenNewSubject: () => void;
   onToggleTask: (subjectId: string, taskId: string, completed: boolean) => void;
   onSelectForPomodoro: (subjectId: string, topicId?: string) => void;
@@ -92,6 +98,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
   onAddBlockedEvent,
   onDeleteBlockedEvent,
   onSelectSubject,
+  onSelectSubjectSmartGoals,
   onOpenNewSubject,
   onToggleTask,
   onSelectForPomodoro,
@@ -116,6 +123,19 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
 
   const today = new Date().toISOString().split('T')[0];
   const [quickReviewSubjectId, setQuickReviewSubjectId] = useState<string | null>(null);
+  const [isSmartGoalAssistantOpen, setIsSmartGoalAssistantOpen] = useState<boolean>(false);
+  const [goalAssistantSubjectId, setGoalAssistantSubjectId] = useState<string | undefined>(undefined);
+
+  const handleOpenSmartGoalAssistant = (subId?: string) => {
+    setGoalAssistantSubjectId(subId || allSubjects[0]?.id);
+    setIsSmartGoalAssistantOpen(true);
+  };
+
+  const handleSaveSmartGoalFromDashboard = (targetSubId: string, subjectGoal: SubjectSmartGoal) => {
+    const targetSub = allSubjects.find((s) => s.id === targetSubId);
+    if (!targetSub || !onUpdateSubject) return;
+    onUpdateSubject(upsertGoalOnSubject(targetSub, subjectGoal, allSubjects));
+  };
 
   // Avance académico global
   const globalAcademicProgress = useMemo(
@@ -159,6 +179,36 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
       return sumSub + Math.max(0, fallbackGoal - subLoggedHours);
     }, 0);
   }, [allSubjects, preferences, pomodoroLogs]);
+
+  // Horas completadas (temario estudiado + sesiones Pomodoro registradas)
+  const totalCompletedSyllabusHours = useMemo(() => {
+    return allSubjects.reduce((sumSub, sub) => {
+      if (sub.topics && sub.topics.length > 0) {
+        const sp = schedulerService.calculateSubjectAcademicProgress(sub.topics, preferences);
+        return sumSub + Math.max(0, sp.totalHours - sp.remainingHours);
+      }
+      return sumSub;
+    }, 0);
+  }, [allSubjects, preferences]);
+
+  const totalPomodoroLoggedHours = useMemo(() => {
+    const totalMins = pomodoroLogs.reduce((acc, l) => acc + (l.durationMinutes || 0), 0);
+    return Math.round((totalMins / 60) * 10) / 10;
+  }, [pomodoroLogs]);
+
+  const totalCompletedHours = useMemo(() => {
+    const fromDiff = Math.max(0, totalEstimatedHours - totalRemainingHours);
+    return Math.round(Math.max(fromDiff, totalCompletedSyllabusHours, totalPomodoroLoggedHours) * 10) / 10;
+  }, [totalEstimatedHours, totalRemainingHours, totalCompletedSyllabusHours, totalPomodoroLoggedHours]);
+
+  const totalUploadedDocsCount = useMemo(() => {
+    return allSubjects.reduce(
+      (sumSub, sub) =>
+        sumSub +
+        (sub.topics || []).reduce((sumTop, t) => sumTop + (t.attachedFiles?.length || 0), 0),
+      0
+    );
+  }, [allSubjects]);
 
   // Recopilación de todas las tareas
   const allTasks = useMemo(() => {
@@ -308,6 +358,52 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
     100,
     Math.round((todayHours / Math.max(0.5, dailyGoalHours)) * 100)
   );
+
+  // Previsión de horas por horizonte temporal (1 semana, 1 mes, tiempo para terminar temarios subidos)
+  const studyHorizonForecast = useMemo(() => {
+    const activeStudyDaysCount =
+      preferences?.availableDays && preferences.availableDays.length > 0
+        ? preferences.availableDays.length
+        : 6;
+    const weeklyPlannedHours = Math.round(dailyGoalHours * activeStudyDaysCount * 10) / 10;
+    const monthlyPlannedHours = Math.round(weeklyPlannedHours * 4.3 * 10) / 10;
+    const roundedTotalHours = Math.round(totalEstimatedHours * 10) / 10;
+    const roundedRemainingHours = Math.round(totalRemainingHours * 10) / 10;
+    const roundedCompletedHours = totalCompletedHours;
+    const completedHoursPct =
+      roundedTotalHours > 0
+        ? Math.min(
+            100,
+            Math.round(
+              ((Math.max(0, roundedTotalHours - roundedRemainingHours)) / roundedTotalHours) * 100
+            )
+          )
+        : 0;
+    const weeksNeededToFinish =
+      weeklyPlannedHours > 0
+        ? Math.round((roundedRemainingHours / weeklyPlannedHours) * 10) / 10
+        : 0;
+    const studyDaysNeededToFinish =
+      dailyGoalHours > 0 ? Math.ceil(roundedRemainingHours / dailyGoalHours) : 0;
+
+    return {
+      activeStudyDaysCount,
+      weeklyPlannedHours,
+      monthlyPlannedHours,
+      roundedTotalHours,
+      roundedRemainingHours,
+      roundedCompletedHours,
+      completedHoursPct,
+      weeksNeededToFinish,
+      studyDaysNeededToFinish,
+    };
+  }, [
+    preferences?.availableDays,
+    dailyGoalHours,
+    totalEstimatedHours,
+    totalRemainingHours,
+    totalCompletedHours,
+  ]);
 
   // Temas completados o repasados hoy
   const topicsCompletedTodayList = useMemo(() => {
@@ -604,6 +700,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
     };
 
     (blockedEvents || []).forEach((ev) => {
+      if (ev.excludedDates && ev.excludedDates.includes(selectedFreeSlotDate)) return;
       const matchesDate =
         ev.date === selectedFreeSlotDate ||
         (!ev.date && ev.recurringDays && ev.recurringDays.includes(dayOfWeek));
@@ -617,6 +714,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
     });
 
     (preferences?.weeklyFixedObligations || []).forEach((ob) => {
+      if (ob.excludedDates && ob.excludedDates.includes(selectedFreeSlotDate)) return;
       const matchesDay =
         ob.dayOfWeek === dayOfWeek ||
         (ob.recurringDays && ob.recurringDays.includes(dayOfWeek));
@@ -765,6 +863,385 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
     setShowAddExamModal(false);
   };
 
+  const designMode = preferences?.interfaceDesignMode || 'complete';
+
+  // Spaced Repetition topics across all active subjects for Minimalist mode
+  const spacedRepetitionDueItems = useMemo(() => {
+    const items: Array<{
+      subject: Subject;
+      topic: Subject['topics'][number];
+      isOverdue: boolean;
+      isDueToday: boolean;
+      docsCount: number;
+    }> = [];
+
+    allSubjects.forEach((sub) => {
+      (sub.topics || []).forEach((t) => {
+        const docsCount =
+          (t.attachedFiles?.length || 0) +
+          (t.generalNotes && t.generalNotes.trim().length > 0 ? 1 : 0);
+        if (t.nextReviewDate && t.nextReviewDate <= today) {
+          items.push({
+            subject: sub,
+            topic: t,
+            isOverdue: t.nextReviewDate < today,
+            isDueToday: t.nextReviewDate === today,
+            docsCount,
+          });
+        }
+      });
+    });
+
+    items.sort((a, b) =>
+      (a.topic.nextReviewDate || '').localeCompare(b.topic.nextReviewDate || '')
+    );
+    return items;
+  }, [allSubjects, today]);
+
+  const handleMarkTopicReviewedQuick = (sub: Subject, topicId: string) => {
+    if (!onUpdateSubject) return;
+    const intervals = preferences?.spacedRepetitionConfig?.intervals || [1, 3, 7, 15, 30];
+    const updatedTopics = (sub.topics || []).map((t) => {
+      if (t.id !== topicId) return t;
+      const nextLevel = Math.min(intervals.length - 1, (t.reviewLevel ?? 0) + 1);
+      const daysToAdd = intervals[nextLevel] || 7;
+      const nextDateObj = new Date();
+      nextDateObj.setDate(nextDateObj.getDate() + daysToAdd);
+      const nextDateIso = nextDateObj.toISOString().split('T')[0];
+      return {
+        ...t,
+        status: 'repasado' as const,
+        lastStudied: today,
+        reviewLevel: nextLevel,
+        nextReviewDate: nextDateIso,
+        vueltasCount: Math.max(1, (t.vueltasCount || 0) + 1),
+      };
+    });
+    onUpdateSubject({
+      ...sub,
+      topics: updatedTopics,
+    });
+  };
+
+  if (designMode === 'minimal') {
+    return (
+      <div className="space-y-6 animate-fadeIn">
+        {/* 1. CABECERA MINIMALISTA */}
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
+              <span className="px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold text-[11px]">
+                Diseño Minimalista · Esencial
+              </span>
+              <span>·</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300">{year.name}</span>
+              <span>·</span>
+              <span className="font-mono-numbers">
+                {studiedTopics}/{totalTopics} temas ({overallProgress}%)
+              </span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white truncate">
+              {programName}
+            </h2>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
+            <button
+              type="button"
+              onClick={onOpenScheduler}
+              className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Calendario de Repaso Espaciado</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectForPomodoro(allSubjects[0]?.id || '')}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Pomodoro</span>
+            </button>
+            {onOpenPreferences && (
+              <button
+                type="button"
+                onClick={onOpenPreferences}
+                className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold cursor-pointer"
+                title="Cambiar el modelo de diseño de la interfaz (Completo, Intermedio o Minimalista)"
+              >
+                Cambiar Diseño
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* 2. FOCO PRINCIPAL: REPASO ESPACIADO DE HOY (CURVA DEL OLVIDO) */}
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3.5">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                <RotateCcw className="w-4 h-4" />
+              </div>
+              <div>
+                <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  Repaso Espaciado de Hoy ({spacedRepetitionDueItems.length})
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Temas programados por la Curva del Olvido para consolidar en memoria a largo plazo.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs font-mono-numbers">
+              <span className="px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold">
+                Hoy: {todayMinutes} min · {todayTopicsCount} temas
+              </span>
+            </div>
+          </div>
+
+          {spacedRepetitionDueItems.length === 0 ? (
+            <div className="p-5 rounded-xl bg-slate-50/70 dark:bg-slate-800/40 border border-slate-200/70 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>¡Repasos espaciados al día! No tienes temas vencidos hoy.</span>
+                </div>
+                {activeSuggestion && (
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
+                    Siguiente tema recomendado: <strong>{activeSuggestion.subjectName}</strong> — {activeSuggestion.topicTitle}
+                  </p>
+                )}
+              </div>
+              {activeSuggestion && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onSelectSubject(activeSuggestion.subjectId)}
+                    className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold hover:border-blue-400 cursor-pointer"
+                  >
+                    Abrir Apuntes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onSelectForPomodoro(activeSuggestion.subjectId, activeSuggestion.topicId)
+                    }
+                    className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1.5"
+                  >
+                    <Play className="w-3 h-3 fill-current" />
+                    <span>Estudiar (25m)</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {spacedRepetitionDueItems.map(({ subject: sub, topic, isOverdue, docsCount }) => (
+                <div
+                  key={`${sub.id}-${topic.id}`}
+                  className="py-3 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: sub.color || '#3b82f6' }}
+                      />
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                        {sub.name}
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono-numbers font-bold px-2 py-0.5 rounded-full ${
+                          isOverdue
+                            ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                            : 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300'
+                        }`}
+                      >
+                        {isOverdue ? `Atrasado (${topic.nextReviewDate})` : 'Toca repasar hoy'}
+                      </span>
+                      {docsCount > 0 && (
+                        <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full font-mono-numbers">
+                          {docsCount} doc/apuntes
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      onClick={() => onSelectSubject(sub.id)}
+                      className="text-sm font-bold text-slate-900 dark:text-white hover:text-blue-600 cursor-pointer truncate"
+                    >
+                      {topic.title}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => onSelectSubject(sub.id)}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold cursor-pointer"
+                    >
+                      Apuntes y PDFs
+                    </button>
+                    {onOpenQuizzesForSubject && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenQuizzesForSubject(sub.id, [topic.id])}
+                        className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 text-xs font-bold cursor-pointer"
+                      >
+                        Flashcards / Test
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleMarkTopicReviewedQuick(sub, topic.id)}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1"
+                      title="Marcar repaso completado y programar siguiente intervalo de la Curva del Olvido"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Repasado</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 3. MIS MATERIAS Y DOCUMENTOS SUBIDOS */}
+        <div className="p-5 sm:p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xs space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                Mis Materias y Documentos ({allSubjects.length})
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Todos tus cursos, apuntes, PDFs y temas están intactos. Haz clic en una materia para abrirla.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenNewSubject}
+              className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Materia</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {allSubjects.map((sub) => {
+              const subAcademicProg = schedulerService.calculateSubjectAcademicProgress(
+                sub.topics || [],
+                preferences
+              );
+              const subProg = subAcademicProg.progressPct;
+              const subStudiedTopics = (sub.topics || []).filter(
+                (t) => t.status === 'estudiado' || t.status === 'repasado'
+              ).length;
+              const srAlert = getSubjectSpacedRepetitionAlert(sub, true);
+              const totalAttachedDocs = (sub.topics || []).reduce(
+                (acc, t) => acc + (t.attachedFiles?.length || 0),
+                0
+              );
+              const totalNotes =
+                (sub.cornellNotes?.length || 0) +
+                (sub.topics || []).filter((t) => t.generalNotes && t.generalNotes.trim().length > 0)
+                  .length;
+
+              return (
+                <div
+                  key={sub.id}
+                  onClick={() => onSelectSubject(sub.id)}
+                  className="p-4 rounded-2xl border border-slate-200/90 dark:border-slate-800 hover:border-blue-400 transition-all cursor-pointer bg-slate-50/40 dark:bg-slate-800/40 hover:bg-white dark:hover:bg-slate-800 flex flex-col justify-between space-y-3 group"
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: sub.color || '#3b82f6' }}
+                        />
+                        <span className="text-[10px] font-mono-numbers font-bold text-slate-500 bg-white dark:bg-slate-900 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700">
+                          {sub.code}
+                        </span>
+                      </div>
+                      <span className="text-xs font-mono-numbers font-bold text-slate-900 dark:text-white">
+                        {subProg}%
+                      </span>
+                    </div>
+
+                    <h4 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors line-clamp-1">
+                      {sub.name}
+                    </h4>
+
+                    <div className="w-full bg-slate-200/80 dark:bg-slate-700 h-1.5 rounded-full overflow-hidden mt-2.5">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${subProg}%`,
+                          backgroundColor: sub.color || '#3b82f6',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-slate-500 font-mono-numbers">
+                      {sub.currentVuelta || 1}ªV · {subStudiedTopics}/{sub.topics?.length || 0} temas · {totalAttachedDocs} PDFs · {totalNotes} apuntes
+                    </span>
+                    {srAlert.hasPendingToday && (
+                      <span className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full">
+                        <RotateCcw className="w-2.5 h-2.5 text-indigo-600" />
+                        <span>{srAlert.totalPendingToday} SR</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 4. OBJETIVOS SMART POR ASIGNATURA */}
+        <SmartGoalsDashboardCard
+          subjects={allSubjects}
+          onUpdateSubject={onUpdateSubject}
+          onSelectSubjectSmartGoals={(subId) =>
+            onSelectSubjectSmartGoals ? onSelectSubjectSmartGoals(subId) : onSelectSubject(subId)
+          }
+          onOpenCreateGoal={handleOpenSmartGoalAssistant}
+        />
+
+        {/* Revisión Rápida Overlay */}
+        <SubjectQuickReviewOverlay
+          subject={allSubjects.find((s) => s.id === quickReviewSubjectId) || null}
+          isOpen={Boolean(quickReviewSubjectId)}
+          onClose={() => setQuickReviewSubjectId(null)}
+          onStartPomodoro={(subId) => onSelectForPomodoro(subId)}
+          onOpenSubjectDetail={(subId) => onSelectSubject(subId)}
+          onOpenQuizzes={(subId, topIds) => {
+            if (onOpenQuizzesForSubject) {
+              onOpenQuizzesForSubject(subId, topIds);
+            }
+          }}
+        />
+
+        {/* Asistente de Objetivos SMART */}
+        <GoalAssistantModal
+          isOpen={isSmartGoalAssistantOpen}
+          onClose={() => setIsSmartGoalAssistantOpen(false)}
+          subjects={allSubjects}
+          initialSubjectId={goalAssistantSubjectId || allSubjects[0]?.id}
+          preferences={preferences || storageService.getPreferences()}
+          blockedEvents={blockedEvents}
+          onSaveGoalToSubject={handleSaveSmartGoalFromDashboard}
+          onSaveTasksToSubject={(targetSubId, newTasks) => {
+            newTasks.forEach((tk) => onAddTaskToSubject?.(targetSubId, tk));
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 animate-fadeIn">
       {/* 1. HERO ACADEMIC COMMAND BAR */}
@@ -903,23 +1380,45 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           </div>
         </div>
 
-        {/* KPI 2: Horas Restantes */}
+        {/* KPI 2: Horas Restantes, Totales y Previstas */}
         <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold tracking-wider uppercase text-slate-400">
-              Horas Restantes
+              Horas Restantes en el Plan
             </span>
             <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
               <Clock className="w-4 h-4" />
             </div>
           </div>
-          <div className="mt-3">
-            <div className="text-2xl sm:text-3xl font-black font-mono-numbers text-indigo-600">
-              {Math.round(totalRemainingHours * 10) / 10}h
+          <div className="mt-2.5 space-y-2">
+            <div className="flex items-baseline justify-between gap-2">
+              <div className="text-2xl sm:text-3xl font-black font-mono-numbers text-indigo-600">
+                {studyHorizonForecast.roundedRemainingHours}h
+              </div>
+              <span className="text-[10px] font-bold font-mono-numbers px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/80">
+                Llevas {studyHorizonForecast.roundedCompletedHours}h ({studyHorizonForecast.completedHoursPct}%)
+              </span>
             </div>
-            <p className="text-[11px] text-slate-500 mt-2 font-mono-numbers">
-              de {Math.round(totalEstimatedHours * 10) / 10}h estimadas en el plan
-            </p>
+
+            <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+              <div
+                className="bg-indigo-600 h-full rounded-full transition-all duration-500"
+                style={{ width: `${studyHorizonForecast.completedHoursPct}%` }}
+              />
+            </div>
+
+            <div className="pt-1 space-y-1 text-[11px] text-slate-600 font-mono-numbers">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Total temarios subidos:</span>
+                <strong className="text-slate-900">{studyHorizonForecast.roundedTotalHours}h</strong>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Previsto (1 sem / 1 mes):</span>
+                <strong className="text-indigo-700">
+                  {studyHorizonForecast.weeklyPlannedHours}h / {studyHorizonForecast.monthlyPlannedHours}h
+                </strong>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -975,7 +1474,17 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
         </div>
       </div>
 
-      {/* 3. META DE ESTUDIO DIARIA (HORAS Y TEMAS COMPLETADOS) + FOCO PROACTIVO */}
+      {/* 3. TARJETA VISUAL DE PROGRESO: OBJETIVOS SMART POR ASIGNATURA */}
+      <SmartGoalsDashboardCard
+        subjects={allSubjects}
+        onUpdateSubject={onUpdateSubject}
+        onSelectSubjectSmartGoals={(subId) =>
+          onSelectSubjectSmartGoals ? onSelectSubjectSmartGoals(subId) : onSelectSubject(subId)
+        }
+        onOpenCreateGoal={handleOpenSmartGoalAssistant}
+      />
+
+      {/* 4. META DE ESTUDIO DIARIA (HORAS Y TEMAS COMPLETADOS) + FOCO PROACTIVO */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Left: Interactive Daily Study Goal Card (7 cols) */}
         <div className="lg:col-span-7 bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs flex flex-col justify-between space-y-4">
@@ -1352,6 +1861,78 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
               </div>
             )}
           </div>
+
+          {/* Desglose claro: Horas Totales Previstas (Temarios Subidos) · Horas que Llevas · Horas Restantes · Previsto 1 Semana y 1 Mes (Solo diseño Completo) */}
+          {designMode === 'complete' && (
+            <div className="p-3.5 rounded-2xl bg-indigo-50/50 dark:bg-slate-800/60 border border-indigo-200/70 dark:border-slate-700/80 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span className="text-xs font-extrabold text-slate-800 dark:text-slate-100">
+                    Previsión de Horas según Temarios Subidos
+                  </span>
+                </div>
+                <span className="text-[11px] font-mono-numbers text-slate-500 dark:text-slate-400">
+                  {totalTopics} temas · {totalPagesGlobal} págs.{totalUploadedDocsCount > 0 ? ` · ${totalUploadedDocsCount} PDFs/docs` : ''}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                    Total Necesario
+                  </span>
+                  <div className="text-base font-black font-mono-numbers text-slate-900 dark:text-white mt-0.5">
+                    {studyHorizonForecast.roundedTotalHours}h
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono-numbers block">
+                    Con temarios subidos
+                  </span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200/80 dark:border-emerald-800/70">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 block">
+                    Horas que Llevas
+                  </span>
+                  <div className="text-base font-black font-mono-numbers text-emerald-600 dark:text-emerald-400 mt-0.5">
+                    {studyHorizonForecast.roundedCompletedHours}h{' '}
+                    <span className="text-[10px] font-bold text-slate-400">
+                      ({studyHorizonForecast.completedHoursPct}%)
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono-numbers block">
+                    Restan {studyHorizonForecast.roundedRemainingHours}h
+                  </span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-blue-200/80 dark:border-blue-800/70">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400 block">
+                    Previsto 1 Semana
+                  </span>
+                  <div className="text-base font-black font-mono-numbers text-blue-600 dark:text-blue-400 mt-0.5">
+                    {studyHorizonForecast.weeklyPlannedHours}h
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono-numbers block">
+                    {dailyGoalHours}h/día × {studyHorizonForecast.activeStudyDaysCount}d
+                  </span>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-purple-200/80 dark:border-purple-800/70">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 dark:text-purple-400 block">
+                    Previsto 1 Mes
+                  </span>
+                  <div className="text-base font-black font-mono-numbers text-purple-600 dark:text-purple-400 mt-0.5">
+                    {studyHorizonForecast.monthlyPlannedHours}h
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono-numbers block">
+                    {studyHorizonForecast.roundedRemainingHours <= 0
+                      ? '¡Temario al 100%!'
+                      : `Fin en ~${studyHorizonForecast.weeksNeededToFinish} sem (${studyHorizonForecast.studyDaysNeededToFinish}d)`}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right: Smart Proactive Recommendation (5 cols) */}
@@ -1424,8 +2005,10 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
         </div>
       </div>
 
-      {/* 3.5. HUECOS LIBRES EN TU HORARIO: INSERTAR BLOQUE DE ESTUDIO PERSONALIZADO (60 MIN EN BLOCKEDEVENTS) */}
-      <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs space-y-4">
+      {/* 3.5. HUECOS LIBRES EN TU HORARIO: INSERTAR BLOQUE DE ESTUDIO PERSONALIZADO (60 MIN EN BLOCKEDEVENTS) - Solo en diseño Completo */}
+      {designMode === 'complete' && (
+        <>
+          <div className="bg-white dark:bg-slate-900 p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3.5">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
@@ -1682,6 +2265,8 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
         onSelectForPomodoro={(subId) => onSelectForPomodoro(subId || allSubjects[0]?.id || '')}
         onOpenStreakModal={() => setShowStreakModal(true)}
       />
+        </>
+      )}
 
       {/* 5. ASIGNATURAS ACTIVAS (PANORAMA VISUAL EN CUADRÍCULA) */}
       <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-2xs space-y-4">
@@ -1752,7 +2337,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                 <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between gap-2 text-[11px]">
                   <div className="flex items-center gap-1.5">
                     <span className="text-slate-500 font-mono-numbers">
-                      {subStudiedTopics}/{sub.topics?.length || 0} temas
+                      {sub.currentVuelta || 1}ªV · {subStudiedTopics}/{sub.topics?.length || 0} temas
                     </span>
                     <button
                       type="button"
@@ -2175,6 +2760,19 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           if (onOpenQuizzesForSubject) {
             onOpenQuizzesForSubject(subId, topIds);
           }
+        }}
+      />
+      {/* Asistente de Objetivos SMART */}
+      <GoalAssistantModal
+        isOpen={isSmartGoalAssistantOpen}
+        onClose={() => setIsSmartGoalAssistantOpen(false)}
+        subjects={allSubjects}
+        initialSubjectId={goalAssistantSubjectId || allSubjects[0]?.id}
+        preferences={preferences || storageService.getPreferences()}
+        blockedEvents={blockedEvents}
+        onSaveGoalToSubject={handleSaveSmartGoalFromDashboard}
+        onSaveTasksToSubject={(targetSubId, newTasks) => {
+          newTasks.forEach((tk) => onAddTaskToSubject?.(targetSubId, tk));
         }}
       />
     </div>

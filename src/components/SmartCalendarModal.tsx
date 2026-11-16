@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Calendar as CalendarIcon,
   Clock,
@@ -32,6 +32,12 @@ import {
   Briefcase,
   Coffee,
   Download,
+  Target,
+  ArrowUp,
+  ArrowDown,
+  ChevronDown,
+  ChevronUp,
+  Palette,
 } from 'lucide-react';
 import {
   Subject,
@@ -46,11 +52,21 @@ import {
   PomodoroLog,
   ReviewQuality,
   SpacedReviewRecord,
+  SchedulingPriorityLevel,
+  TopicSchedulingPriorityInfo,
+  SubjectSchedulingPriorityInfo,
+  PartialSessionCompletionRecord,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
 import { WeeklyAvailabilityPlanner } from './WeeklyAvailabilityPlanner';
 import { HabitsAndMoodTrackerBar } from './HabitsAndMoodTrackerBar';
+import { SmartGoalsCollapsibleSection } from './SmartGoalsCollapsibleSection';
 import { IcsCalendarExportModal } from './IcsCalendarExportModal';
+import {
+  collectCalendarEventsForExport,
+  generateIcsFileContent,
+  downloadIcsFile,
+} from '../services/icsExportService';
 import {
   ProjectedReviewMilestone,
   TopicReviewAnalysis,
@@ -147,6 +163,87 @@ const BASE_INTERVALS = [
   { cycle: 5, days: 30, name: '5º repaso · Al mes (30 días)' },
 ];
 
+const SUBJECT_COLOR_PRESETS = [
+  '#2563eb', // Azul
+  '#4f46e5', // Índigo
+  '#7c3aed', // Violeta
+  '#db2777', // Rosa
+  '#e11d48', // Carmesí
+  '#ea580c', // Naranja
+  '#d97706', // Ámbar
+  '#059669', // Esmeralda
+  '#0d9488', // Turquesa
+  '#0891b2', // Cian
+  '#475569', // Pizarra
+];
+
+function hexToRgba(hex: string, alpha: number): string {
+  const fallback = `rgba(37, 99, 235, ${alpha})`;
+  if (!hex || typeof hex !== 'string') return fallback;
+  let clean = hex.trim().replace('#', '');
+  if (clean.length === 3) {
+    clean = clean
+      .split('')
+      .map((c) => c + c)
+      .join('');
+  }
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return fallback;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function getSubjectBlockStyle(
+  hexColor?: string,
+  variant: 'session' | 'review' | 'task' | 'exam' | 'pill' = 'session'
+): React.CSSProperties {
+  const color = hexColor || '#3b82f6';
+  const bgAlpha =
+    variant === 'pill'
+      ? 0.14
+      : variant === 'review'
+      ? 0.12
+      : variant === 'task'
+      ? 0.1
+      : variant === 'exam'
+      ? 0.15
+      : 0.14;
+  const borderAlpha = variant === 'pill' ? 0.38 : 0.42;
+  return {
+    backgroundColor: hexToRgba(color, bgAlpha),
+    borderColor: hexToRgba(color, borderAlpha),
+    borderLeftColor: color,
+    borderLeftWidth: variant === 'pill' ? '3px' : '4px',
+  };
+}
+
+const CALENDAR_VIEW_STATE_STORAGE_KEY = 'studyflow_calendar_view_state_v1';
+
+interface PersistedCalendarViewState {
+  calendarView?: CalendarViewType;
+  monthlyVariant?: 'grid' | 'weeks';
+  timeBlockMode?: boolean;
+  currentDateStr?: string;
+  selectedDayStr?: string;
+  selectedSubjectId?: string;
+  selectedProgramFilter?: string;
+  calendarLayerFilter?: 'all' | 'estudio' | 'repaso' | 'examenes_tareas';
+  showDraggableTray?: boolean;
+  includeUnstartedProjections?: boolean;
+}
+
+function loadSavedCalendarViewState(): PersistedCalendarViewState {
+  try {
+    const raw = localStorage.getItem(CALENDAR_VIEW_STATE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   subjects,
   preferences,
@@ -167,19 +264,71 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   onOpenPreferences,
 }) => {
   const todayStr = useMemo(() => getTodayLocalDateStr(), []);
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('all');
-  const [selectedProgramFilter, setSelectedProgramFilter] = useState<string>('all');
-  const [calendarView, setCalendarView] = useState<CalendarViewType>('weekly');
-  const [timeBlockMode, setTimeBlockMode] = useState<boolean>(true);
-  const [currentDate, setCurrentDate] = useState<Date>(new Date());
-  const [selectedDayStr, setSelectedDayStr] = useState<string>(todayStr);
+  const initialSavedViewState = useMemo(() => loadSavedCalendarViewState(), []);
+
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
+    () => initialSavedViewState.selectedSubjectId || 'all'
+  );
+  const [selectedProgramFilter, setSelectedProgramFilter] = useState<string>(
+    () => initialSavedViewState.selectedProgramFilter || 'all'
+  );
+  const [calendarView, setCalendarView] = useState<CalendarViewType>(
+    () => initialSavedViewState.calendarView || 'weekly'
+  );
+  const [monthlyVariant, setMonthlyVariant] = useState<'grid' | 'weeks'>(
+    () => initialSavedViewState.monthlyVariant || 'grid'
+  );
+  const [timeBlockMode, setTimeBlockMode] = useState<boolean>(
+    () => initialSavedViewState.timeBlockMode ?? true
+  );
+  const [currentDate, setCurrentDate] = useState<Date>(() =>
+    initialSavedViewState.currentDateStr
+      ? parseLocalDate(initialSavedViewState.currentDateStr)
+      : new Date()
+  );
+  const [selectedDayStr, setSelectedDayStr] = useState<string>(
+    () => initialSavedViewState.selectedDayStr || todayStr
+  );
   const [rescheduledNotice, setRescheduledNotice] = useState<string | null>(null);
   const [showAvailabilityPlanner, setShowAvailabilityPlanner] = useState<boolean>(false);
   const [showRetentionRoadmap, setShowRetentionRoadmap] = useState<boolean>(false);
   const [isRecalculatingAll, setIsRecalculatingAll] = useState<boolean>(false);
   const [showQuickBlockBar, setShowQuickBlockBar] = useState<boolean>(false);
-  const [showDraggableTray, setShowDraggableTray] = useState<boolean>(false);
+  const [showDraggableTray, setShowDraggableTray] = useState<boolean>(
+    () => initialSavedViewState.showDraggableTray ?? false
+  );
   const [showIcsExportModal, setShowIcsExportModal] = useState<boolean>(false);
+  const [icsExportPreset, setIcsExportPreset] = useState<{
+    horizonDays: number;
+    weekRange?: { startDate: string; endDate: string; label?: string } | null;
+  }>({
+    horizonDays: 7,
+    weekRange: null,
+  });
+
+  // Estado para Reajuste Dinámico durante las Horas del Día (Intradía: Día · Semana · Mes) - Plegado por defecto
+  const [showIntradaySection, setShowIntradaySection] = useState<boolean>(false);
+  const [autoIntradayReschedule, setAutoIntradayReschedule] = useState<boolean>(
+    () => preferences.autoIntradayReschedule ?? true
+  );
+  const [intradaySimulatedTime, setIntradaySimulatedTime] = useState<string>(
+    () => preferences.intradaySimulatedTime || ''
+  );
+
+  // Estado para el Modal de "Marcar como Hecho Parcialmente y Reubicar lo que Falte"
+  const [partialModalSession, setPartialModalSession] = useState<ScheduledStudySession | null>(null);
+  const [partialCompletedPct, setPartialCompletedPct] = useState<number>(50);
+  const [partialCompletedHours, setPartialCompletedHours] = useState<number>(1);
+  const [partialCompletedPages, setPartialCompletedPages] = useState<number>(3);
+  const [partialTotalSessionPages, setPartialTotalSessionPages] = useState<number>(6);
+  const [partialRelocateDate, setPartialRelocateDate] = useState<string>(todayStr);
+  const [partialRelocateStartTime, setPartialRelocateStartTime] = useState<string>('16:00');
+
+  // Confirmación antes de eliminar un bloque automatizado (para poder quitar solo un día por imprevisto o toda la serie)
+  const [pendingDeleteAutomatedBlock, setPendingDeleteAutomatedBlock] =
+    useState<EffectiveBlockedCalendarItem | null>(null);
+  // Selector rápido de colores por asignatura en el calendario
+  const [showSubjectColorBar, setShowSubjectColorBar] = useState<boolean>(false);
 
   // Universal Drag-and-Drop state for Tasks, Study Topics, Spaced Reviews, and Blocked Events across Days & Hours
   const [draggedItem, setDraggedItem] = useState<DraggedCalendarItem | null>(null);
@@ -200,20 +349,107 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   // Unified calendar layer filter: show everything together or filter specific layers
   const [calendarLayerFilter, setCalendarLayerFilter] = useState<
     'all' | 'estudio' | 'repaso' | 'examenes_tareas'
-  >('all');
-  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(false);
+  >(() => initialSavedViewState.calendarLayerFilter || 'all');
+  const [includeUnstartedProjections, setIncludeUnstartedProjections] = useState<boolean>(
+    () => initialSavedViewState.includeUnstartedProjections ?? false
+  );
   const [urgencyFilter, setUrgencyFilter] = useState<
     'all' | 'actionable' | 'upcoming' | 'stable' | 'unstarted'
   >('all');
 
-  // Estado para la sección de Vueltas al Temario (1ª, 2ª, 3ª+ Vuelta) y Tareas Semanales
-  const [showVueltasSection, setShowVueltasSection] = useState<boolean>(true);
+  // Persist calendar view state cleanly so Semanal/Mensual switches & tab transitions never lose view state
+  useEffect(() => {
+    try {
+      const payload: PersistedCalendarViewState = {
+        calendarView,
+        monthlyVariant,
+        timeBlockMode,
+        currentDateStr: toLocalDateStr(currentDate),
+        selectedDayStr,
+        selectedSubjectId,
+        selectedProgramFilter,
+        calendarLayerFilter,
+        showDraggableTray,
+        includeUnstartedProjections,
+      };
+      localStorage.setItem(CALENDAR_VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [
+    calendarView,
+    monthlyVariant,
+    timeBlockMode,
+    currentDate,
+    selectedDayStr,
+    selectedSubjectId,
+    selectedProgramFilter,
+    calendarLayerFilter,
+    showDraggableTray,
+    includeUnstartedProjections,
+  ]);
+
+  // Helper: switch between Semanal / Mensual / Diaria / Anual while preserving anchored date & filters
+  const handleSwitchCalendarView = (nextView: CalendarViewType) => {
+    if (selectedDayStr) {
+      setCurrentDate(parseLocalDate(selectedDayStr));
+    }
+    setCalendarView(nextView);
+  };
+
+  // Helper: start HTML5 Drag & Drop with both React state and dataTransfer JSON fallback
+  const startDraggingCalendarItem = (e: React.DragEvent, payload: DraggedCalendarItem) => {
+    e.dataTransfer.effectAllowed = 'move';
+    try {
+      e.dataTransfer.setData('application/studyflow-drag', JSON.stringify(payload));
+      e.dataTransfer.setData(
+        'text/plain',
+        payload.title ||
+          ('topicTitle' in payload && payload.topicTitle) ||
+          ('subjectName' in payload && payload.subjectName) ||
+          'Bloque'
+      );
+    } catch {
+      // ignore restricted dataTransfer environments
+    }
+    setDraggedItem(payload);
+    if (payload.kind === 'spaced_review') {
+      setDraggedReview(payload);
+    }
+  };
+
+  // Estado para la sección de Vueltas al Temario (1ª, 2ª, 3ª+ Vuelta) y Tareas Semanales - Plegado por defecto
+  const [showVueltasSection, setShowVueltasSection] = useState<boolean>(false);
   const [vueltasFilter, setVueltasFilter] = useState<
     'all' | 'vuelta_0' | 'vuelta_1' | 'vuelta_2' | 'vuelta_3plus' | 'weekly_task'
   >('all');
 
+  // Estado para la sección desplegable de Objetivos SMART en Plan y Repasos
+  const [showSmartGoalsSection, setShowSmartGoalsSection] = useState<boolean>(false);
+  const [smartGoalsRevision, setSmartGoalsRevision] = useState<number>(0);
+
+  useEffect(() => {
+    const bumpRevision = () => setSmartGoalsRevision((prev) => prev + 1);
+    window.addEventListener('studyflow-smart-goals-updated', bumpRevision);
+    window.addEventListener('studyflow-smart-milestones-updated', bumpRevision);
+    window.addEventListener('storage', bumpRevision);
+    return () => {
+      window.removeEventListener('studyflow-smart-goals-updated', bumpRevision);
+      window.removeEventListener('studyflow-smart-milestones-updated', bumpRevision);
+      window.removeEventListener('storage', bumpRevision);
+    };
+  }, []);
+
+  const designMode = preferences.interfaceDesignMode || 'complete';
+
+  // Estado para la sección de Orden de Prioridad al Agendar Temas (% Nota Final de Proyectos, Tareas y Exámenes + Manual) - Plegado por defecto
+  const [showSchedulingPrioritySection, setShowSchedulingPrioritySection] = useState<boolean>(false);
+  const [priorityTabMode, setPriorityTabMode] = useState<'temas' | 'asignaturas'>('temas');
+
   // Estado para la sección de Meta Diaria y Disponibilidad de Estudio (Cálculo directo de horas libres del calendario)
-  const [showDailyGoalAvailabilitySection, setShowDailyGoalAvailabilitySection] = useState<boolean>(true);
+  const [showDailyGoalAvailabilitySection, setShowDailyGoalAvailabilitySection] = useState<boolean>(
+    () => (preferences.interfaceDesignMode || 'complete') === 'complete'
+  );
   const [showCustomDaysGoal, setShowCustomDaysGoal] = useState<boolean>(false);
   const [localDailyGoalHours, setLocalDailyGoalHours] = useState<number>(() => preferences.dailyGoalHours ?? 4.0);
   const [localHoursPerDay, setLocalHoursPerDay] = useState<Record<number, number>>(() => ({
@@ -243,17 +479,43 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [subjects]);
 
-  // 1. Compute Smart Study Plan sessions across subjects (avoiding time collisions across subjects)
+  // Preferencias efectivas con el estado en vivo del Reajuste Dinámico Intradía
+  const effectiveSchedulerPreferences = useMemo<StudyPreferences>(
+    () => ({
+      ...preferences,
+      autoIntradayReschedule,
+      intradaySimulatedTime: intradaySimulatedTime || undefined,
+    }),
+    [preferences, autoIntradayReschedule, intradaySimulatedTime]
+  );
+
+  // 1. Compute Smart Study Plan sessions across subjects (ordered by Subject & Topic Priority based on % of Final Grade & Manual overrides)
   const allGeneratedSessions: ScheduledStudySession[] = [];
   let latestProjectedDate = todayStr;
   let isAnyAheadWarning = false;
 
-  const relevantSubjects = subjects.filter((s) => {
+  const filteredRelevantSubjects = subjects.filter((s) => {
     if (selectedSubjectId !== 'all' && s.id !== selectedSubjectId) return false;
     if (selectedProgramFilter !== 'all' && s.programId && s.programId !== selectedProgramFilter)
       return false;
     return true;
   });
+
+  const relevantSubjects = useMemo(
+    () => schedulerService.sortSubjectsBySchedulingPriority(filteredRelevantSubjects, todayStr),
+    [filteredRelevantSubjects, todayStr, smartGoalsRevision]
+  );
+
+  const subjectColorById = useMemo(() => {
+    const map: Record<string, string> = {};
+    subjects.forEach((s) => {
+      if (s.color) map[s.id] = s.color;
+    });
+    return map;
+  }, [subjects]);
+
+  const getSubjectColor = (subjectId?: string, fallback?: string): string =>
+    (subjectId && subjectColorById[subjectId]) || fallback || '#3b82f6';
 
   const cumulativeScheduleBlocks: BlockedTimeEvent[] = [...blockedEvents];
   relevantSubjects.forEach((sub) => {
@@ -263,10 +525,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       sub.name,
       sub.color,
       sub.exams,
-      preferences,
+      effectiveSchedulerPreferences,
       undefined,
       cumulativeScheduleBlocks,
-      sub.tasks
+      sub.tasks,
+      sub.projects,
+      sub.gradingConfig
     );
 
     result.sessions.forEach((sess) => {
@@ -323,7 +587,10 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   const getEffectiveBlockedForDate = (dateStr: string): EffectiveBlockedCalendarItem[] => {
     const dayOfWeek = getDayOfWeekFromDateStr(dateStr);
     const list: EffectiveBlockedCalendarItem[] = [];
-    const seenKeys = new Set<string>();
+    const seenIds = new Set<string>();
+    const seenSemanticKeys = new Set<string>();
+    const makeSemanticKey = (title: string, start: string, end: string) =>
+      `${title.trim().toLowerCase()}|${start}|${end}`;
     const dayTopicIds = new Set((sessionsByDate[dateStr] || []).map((s) => s.topicId));
 
     // 1. Specific date blocked events (Planes sobre la marcha / citas puntuales / bloques de estudio personalizados)
@@ -334,19 +601,22 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         ev.linkedTopicId &&
         dayTopicIds.has(ev.linkedTopicId);
       if (isAlreadyRenderedTopicSession) return;
-      const key = `${ev.id || ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
-      if (!seenKeys.has(key)) {
-        seenKeys.add(key);
+      const semKey = makeSemanticKey(ev.title, ev.startTime, ev.endTime);
+      if (!seenIds.has(ev.id) && !seenSemanticKeys.has(semKey)) {
+        seenIds.add(ev.id);
+        seenSemanticKeys.add(semKey);
         list.push({ ...ev, isRecurringWeekly: false });
       }
     });
 
-    // 2. Recurring BlockedTimeEvents
+    // 2. Recurring BlockedTimeEvents (respetando excludedDates para imprevistos puntuales)
     blockedEvents.forEach((ev) => {
       if (!ev.date && ev.recurringDays && ev.recurringDays.includes(dayOfWeek)) {
-        const key = `${ev.id || ev.title.toLowerCase()}-${ev.startTime}-${ev.endTime}`;
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
+        if (ev.excludedDates && ev.excludedDates.includes(dateStr)) return;
+        const semKey = makeSemanticKey(ev.title, ev.startTime, ev.endTime);
+        if (!seenIds.has(ev.id) && !seenSemanticKeys.has(semKey)) {
+          seenIds.add(ev.id);
+          seenSemanticKeys.add(semKey);
           list.push({
             ...ev,
             date: dateStr,
@@ -356,17 +626,20 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       }
     });
 
-    // 3. WeeklyFixedObligations from preferences (Clases, entrenos, gimnasio, trabajo...)
+    // 3. WeeklyFixedObligations from preferences (respetando excludedDates y evitando duplicar hábitos/bloques ya añadidos en step 2)
     (preferences.weeklyFixedObligations || []).forEach((ob) => {
+      if (ob.excludedDates && ob.excludedDates.includes(dateStr)) return;
       const matchesDay =
         ob.dayOfWeek === dayOfWeek ||
         (ob.recurringDays && ob.recurringDays.includes(dayOfWeek));
       if (matchesDay) {
-        const key = `${ob.title.toLowerCase()}-${ob.startTime}-${ob.endTime}`;
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
+        const semKey = makeSemanticKey(ob.title, ob.startTime, ob.endTime);
+        const obKeyId = `weekly-ob-${ob.id}-${dateStr}`;
+        if (!seenIds.has(obKeyId) && !seenSemanticKeys.has(semKey)) {
+          seenIds.add(obKeyId);
+          seenSemanticKeys.add(semKey);
           list.push({
-            id: `weekly-ob-${ob.id}-${dateStr}`,
+            id: obKeyId,
             sourceObligationId: ob.id,
             title: ob.title,
             date: dateStr,
@@ -376,6 +649,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             category: ob.category === 'gimnasio' ? 'deporte' : (ob.category as any),
             notes: ob.notes,
             recurringDays: ob.recurringDays || [ob.dayOfWeek],
+            excludedDates: ob.excludedDates,
             isRecurringWeekly: true,
             isWeeklyObligation: true,
           });
@@ -807,12 +1081,25 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     const obligations = preferences.weeklyFixedObligations || [];
 
     const dayBreakdowns = WEEK_DAYS.map((wd) => {
-      const obsOnDay = obligations.filter((o) => o.dayOfWeek === wd.day);
+      const seenDayKeys = new Set<string>();
+      const obsOnDay = obligations.filter((o) => {
+        const matches =
+          o.dayOfWeek === wd.day || (o.recurringDays && o.recurringDays.includes(wd.day));
+        if (!matches) return false;
+        const k = `${o.title.trim().toLowerCase()}|${o.startTime}|${o.endTime}`;
+        if (seenDayKeys.has(k)) return false;
+        seenDayKeys.add(k);
+        return true;
+      });
       const obsHours = obsOnDay.reduce((acc, o) => acc + (o.durationHours || 0), 0);
 
       const blockedRecurringOnDay = blockedEvents.filter((b) => {
         const days = b.recurringDays && b.recurringDays.length > 0 ? b.recurringDays : [];
-        return days.includes(wd.day);
+        if (!days.includes(wd.day)) return false;
+        const k = `${b.title.trim().toLowerCase()}|${b.startTime}|${b.endTime}`;
+        if (seenDayKeys.has(k)) return false;
+        seenDayKeys.add(k);
+        return true;
       });
       const blockedHours = blockedRecurringOnDay.reduce((acc, b) => acc + (b.durationHours || 0), 0);
 
@@ -867,6 +1154,124 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       usagePct,
     };
   }, [preferences.weeklyFixedObligations, blockedEvents, localHoursPerDay, localDailyGoalHours]);
+
+  // Previsión integral de horas para los temarios subidos (Total necesario, Horas que llevas, Horas restantes y Previsto en 1 semana / 1 mes)
+  const syllabusHoursForecast = useMemo(() => {
+    let rawTotalHours = 0;
+    let rawCompletedHours = 0;
+    let rawRemainingHours = 0;
+    let totalTopics = 0;
+    let completedTopics = 0;
+    let totalPages = 0;
+    let pagesRead = 0;
+    let uploadedDocsCount = 0;
+
+    relevantSubjects.forEach((sub) => {
+      const topics = sub.topics || [];
+      totalTopics += topics.length;
+      completedTopics += topics.filter(
+        (t) => t.status === 'estudiado' || t.status === 'repasado'
+      ).length;
+      uploadedDocsCount += topics.reduce((acc, t) => acc + (t.attachedFiles?.length || 0), 0);
+
+      if (topics.length > 0) {
+        const sp = schedulerService.calculateSubjectAcademicProgress(topics, preferences);
+        rawTotalHours += sp.totalHours;
+        rawCompletedHours += Math.max(0, sp.totalHours - sp.remainingHours);
+        rawRemainingHours += sp.remainingHours;
+        totalPages += sp.totalPages;
+        pagesRead += sp.pagesRead;
+      } else {
+        const fallbackGoal =
+          preferences?.subjectWeeklyGoalHours?.[sub.id] ??
+          preferences?.defaultSubjectWeeklyGoalHours ??
+          0;
+        rawTotalHours += fallbackGoal;
+        rawRemainingHours += fallbackGoal;
+      }
+    });
+
+    const totalSyllabusHours = Math.round(rawTotalHours * 10) / 10;
+    const remainingHours =
+      Math.round(Math.max(rawRemainingHours, kpiMetrics.totalPlannedStudyHours) * 10) / 10;
+    const completedHours =
+      Math.round(
+        Math.max(rawCompletedHours, Math.max(0, totalSyllabusHours - remainingHours)) * 10
+      ) / 10;
+    const effectiveTotalHours =
+      Math.round(Math.max(totalSyllabusHours, completedHours + remainingHours) * 10) / 10;
+
+    const completedPct =
+      effectiveTotalHours > 0
+        ? Math.min(100, Math.round((completedHours / effectiveTotalHours) * 100))
+        : 0;
+
+    const plannedDailyHours = Math.round(calendarAvailabilityData.configuredDailyGoal * 10) / 10;
+    const plannedWeeklyHours = Math.round(calendarAvailabilityData.totalWeeklyStudyGoal * 10) / 10;
+    const plannedMonthlyHours = Math.round(plannedWeeklyHours * 4.3 * 10) / 10;
+    const plannedQuarterlyHours = Math.round(plannedWeeklyHours * 13 * 10) / 10;
+
+    const next7DateLimit = addDaysToDateStr(todayStr, 7);
+    const next30DateLimit = addDaysToDateStr(todayStr, 30);
+
+    const scheduledNext7DaysHours =
+      Math.round(
+        allGeneratedSessions
+          .filter((s) => s.date >= todayStr && s.date <= next7DateLimit)
+          .reduce((acc, s) => acc + (s.durationHours || 0), 0) * 10
+      ) / 10;
+
+    const scheduledNext30DaysHours =
+      Math.round(
+        allGeneratedSessions
+          .filter((s) => s.date >= todayStr && s.date <= next30DateLimit)
+          .reduce((acc, s) => acc + (s.durationHours || 0), 0) * 10
+      ) / 10;
+
+    const weeksNeededToFinish =
+      plannedWeeklyHours > 0 ? Math.round((remainingHours / plannedWeeklyHours) * 10) / 10 : 0;
+    const studyDaysNeededToFinish =
+      plannedDailyHours > 0 ? Math.ceil(remainingHours / plannedDailyHours) : 0;
+
+    const weeklyCoverageOfRemainingPct =
+      remainingHours > 0
+        ? Math.min(100, Math.round((plannedWeeklyHours / remainingHours) * 100))
+        : 100;
+    const monthlyCoverageOfRemainingPct =
+      remainingHours > 0
+        ? Math.min(100, Math.round((plannedMonthlyHours / remainingHours) * 100))
+        : 100;
+
+    return {
+      totalSyllabusHours: effectiveTotalHours,
+      completedHours,
+      remainingHours,
+      completedPct,
+      totalTopics,
+      completedTopics,
+      totalPages,
+      pagesRead,
+      uploadedDocsCount,
+      plannedDailyHours,
+      plannedWeeklyHours,
+      plannedMonthlyHours,
+      plannedQuarterlyHours,
+      scheduledNext7DaysHours,
+      scheduledNext30DaysHours,
+      weeksNeededToFinish,
+      studyDaysNeededToFinish,
+      weeklyCoverageOfRemainingPct,
+      monthlyCoverageOfRemainingPct,
+    };
+  }, [
+    relevantSubjects,
+    preferences,
+    kpiMetrics.totalPlannedStudyHours,
+    calendarAvailabilityData.configuredDailyGoal,
+    calendarAvailabilityData.totalWeeklyStudyGoal,
+    allGeneratedSessions,
+    todayStr,
+  ]);
 
   // Record a Spaced Repetition review (Curva del Olvido: 24h, 3d, 7d, 15d, 30d + ajuste por errores/retención y páginas estudiadas)
   const handleRecordReview = (
@@ -1241,15 +1646,27 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         if (nextExtraMap[sourceDateStr]) {
           const prevExtra = nextExtraMap[sourceDateStr];
           delete nextExtraMap[sourceDateStr];
-          nextExtraMap[targetDateStr] = { ...prevExtra, startTime: cleanStart };
+          nextExtraMap[targetDateStr] = {
+            ...prevExtra,
+            startTime: cleanStart,
+            replacePreviousPlan: true,
+          };
         } else {
-          // Moving a topic session to another date places an explicit user session on targetDateStr
-          nextExtraMap[targetDateStr] = { startTime: cleanStart };
+          // Moving a topic session to another date relocates the topic cleanly without leaving a ghost duplicate
+          nextExtraMap[targetDateStr] = {
+            startTime: cleanStart,
+            replacePreviousPlan: true,
+          };
         }
       } else if (nextExtraMap[targetDateStr]) {
         nextExtraMap[targetDateStr] = {
           ...nextExtraMap[targetDateStr],
           startTime: cleanStart,
+        };
+      } else {
+        nextExtraMap[targetDateStr] = {
+          startTime: cleanStart,
+          replacePreviousPlan: true,
         };
       }
 
@@ -1257,11 +1674,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
       return {
         ...t,
+        scheduledDate: targetDateStr,
         scheduledTime: cleanStart,
         scheduledEndTime: autoEndStr,
         studyTimeByDate: nextStudyMap,
         extraStudySessionsByDate: nextExtraMap,
-        // Keep manualScheduledDate false so the sequential scheduler NEVER pulls a second topic into the same day
+        // Keep manualScheduledDate false so replacePreviousPlan defers earlier auto dates cleanly without pulling duplicates
         manualScheduledDate: false,
       };
     });
@@ -1316,6 +1734,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   );
   const [extraTopicStartTime, setExtraTopicStartTime] = useState<string>('17:00');
   const [extraTopicPagesCount, setExtraTopicPagesCount] = useState<number>(5);
+  const [suggestedTopicFeedback, setSuggestedTopicFeedback] = useState<string | null>(null);
+  const [replaceExistingPlanOnAdd, setReplaceExistingPlanOnAdd] = useState<boolean>(true);
 
   // Helper: Minutes per page based on user preferences and topic difficulty
   const getTopicMinutesPerPage = (topic?: any): number => {
@@ -1346,7 +1766,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     ).padStart(2, '0')}`;
   };
 
-  // Helper: Get sensible default pages count for a chosen topic
+  // Helper: Get sensible default pages count for a chosen topic (when NOT previously planned)
   const getDefaultPagesForTopic = (topic?: any, dateForCheck?: string): number => {
     if (!topic) return 5;
     if (dateForCheck && topic.extraStudySessionsByDate?.[dateForCheck]?.pagesCount) {
@@ -1367,26 +1787,119 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     return Math.max(1, Math.min(8, Math.round((estH * 60) / minsPerPage)));
   };
 
+  // Helper: Full pending pages of a topic (used when modifying the entire plan of a previously planned topic)
+  const getFullTopicPagesForSlot = (topic?: any): number => {
+    if (!topic) return 6;
+    const attachedPages = (topic.attachedFiles || []).reduce(
+      (sum: number, f: any) => sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
+      0
+    );
+    const rawTotal = Math.max(topic.pageCount || 0, topic.paginasTotales || 0, attachedPages);
+    if (rawTotal > 0) {
+      const readP = Math.max(0, topic.pagesRead || 0);
+      return Math.max(1, rawTotal - readP);
+    }
+    const minsPerPage = getTopicMinutesPerPage(topic);
+    const estH = topic.estimatedHours && topic.estimatedHours > 0 ? topic.estimatedHours : 1.5;
+    return Math.max(1, Math.round((estH * 60) / minsPerPage));
+  };
+
+  // Helper: Find existing planned sessions for a topic in the calendar
+  const getPlannedSessionsForTopic = (subjectId: string, topicId: string): ScheduledStudySession[] => {
+    return allGeneratedSessions.filter(
+      (s) => s.subjectId === subjectId && s.topicId === topicId && s.type === 'estudio_nuevo'
+    );
+  };
+
+  // Helper: Apply topic selection inside "Añadir Tema en Hueco Libre"
+  // Si el tema ya estaba planeado anteriormente, carga TODAS sus páginas pendientes y activa el reemplazo completo
+  const applyTopicSelectionForFreeSlot = (
+    subId: string,
+    topicObj: Topic | undefined,
+    targetDate: string
+  ): { isAlreadyPlanned: boolean; pagesSelected: number } => {
+    if (!topicObj) {
+      setReplaceExistingPlanOnAdd(false);
+      setExtraTopicPagesCount(5);
+      return { isAlreadyPlanned: false, pagesSelected: 5 };
+    }
+    const existingPlanned = getPlannedSessionsForTopic(subId, topicObj.id);
+    const hasExtraEntries = Object.keys(topicObj.extraStudySessionsByDate || {}).length > 0;
+    const isAlreadyPlanned = existingPlanned.length > 0 || hasExtraEntries;
+    const pagesSelected = isAlreadyPlanned
+      ? getFullTopicPagesForSlot(topicObj)
+      : getDefaultPagesForTopic(topicObj, targetDate);
+    setReplaceExistingPlanOnAdd(isAlreadyPlanned);
+    setExtraTopicPagesCount(pagesSelected);
+    return { isAlreadyPlanned, pagesSelected };
+  };
+
+  // Helper: Build ordered list of candidate topics across subjects (pending first, ordered by scheduling priority)
+  const getOrderedCandidateTopicsForSlot = (targetDateStr: string) => {
+    const sourceSubjects = relevantSubjects.length > 0 ? relevantSubjects : subjects;
+    const allItems: Array<{
+      subject: Subject;
+      topic: Topic;
+      isDone: boolean;
+      alreadyExtraOnDate: boolean;
+      priorityScore: number;
+      priorityLabel: string;
+    }> = [];
+
+    sourceSubjects.forEach((sub) => {
+      const subInfo = schedulerService.calculateSubjectSchedulingPriority(sub, todayStr);
+      (sub.topics || []).forEach((t) => {
+        const attachedP = (t.attachedFiles || []).reduce(
+          (sum, f) => sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
+          0
+        );
+        const totalP = Math.max(0, t.pageCount || 0, t.paginasTotales || 0, attachedP);
+        const readP = Math.max(0, t.pagesRead || 0);
+        const isDone =
+          totalP > 0
+            ? readP >= totalP && (t.status === 'estudiado' || t.status === 'repasado')
+            : Boolean(t.studiedAt || t.status === 'estudiado' || t.status === 'repasado');
+        const alreadyExtraOnDate = Boolean(t.extraStudySessionsByDate?.[targetDateStr]);
+        const tInfo = schedulerService.calculateTopicSchedulingPriority(t, sub, todayStr);
+        const combinedScore = tInfo.effectiveScore + subInfo.effectiveScore * 0.25;
+
+        allItems.push({
+          subject: sub,
+          topic: t,
+          isDone,
+          alreadyExtraOnDate,
+          priorityScore: combinedScore,
+          priorityLabel: tInfo.summaryLabel,
+        });
+      });
+    });
+
+    // Sort: 1) Not done & not already scheduled as extra today, 2) Not done, 3) Priority score descending
+    allItems.sort((a, b) => {
+      const aBucket = !a.isDone && !a.alreadyExtraOnDate ? 0 : !a.isDone ? 1 : 2;
+      const bBucket = !b.isDone && !b.alreadyExtraOnDate ? 0 : !b.isDone ? 1 : 2;
+      if (aBucket !== bBucket) return aBucket - bBucket;
+      return b.priorityScore - a.priorityScore;
+    });
+
+    const pendingCandidates = allItems.filter((item) => !item.isDone);
+    return pendingCandidates.length > 0 ? pendingCandidates : allItems;
+  };
+
   const openAddTopicSlotModalForDate = (dateStr: string, preferredHourStr?: string) => {
     setExtraTopicDate(dateStr);
-    const defaultSub =
-      subjects.find((s) => s.topics.some((t) => !t.studiedAt && t.status !== 'estudiado')) ||
-      subjects[0];
-    if (defaultSub) {
-      setExtraTopicSubjectId(defaultSub.id);
-      const nextPending =
-        defaultSub.topics.find((t) => {
-          const totalP = Math.max(0, t.pageCount || 0);
-          const readP = Math.max(0, t.pagesRead || 0);
-          const done =
-            totalP > 0
-              ? readP >= totalP
-              : Boolean(t.studiedAt || t.status === 'estudiado' || t.status === 'repasado');
-          return !done;
-        }) || defaultSub.topics[0];
-      if (nextPending) {
-        setExtraTopicId(nextPending.id);
-        setExtraTopicPagesCount(getDefaultPagesForTopic(nextPending, dateStr));
+    setSuggestedTopicFeedback(null);
+    const candidates = getOrderedCandidateTopicsForSlot(dateStr);
+    if (candidates.length > 0) {
+      const first = candidates[0];
+      setExtraTopicSubjectId(first.subject.id);
+      setExtraTopicId(first.topic.id);
+      applyTopicSelectionForFreeSlot(first.subject.id, first.topic, dateStr);
+    } else if (subjects[0]) {
+      setExtraTopicSubjectId(subjects[0].id);
+      if (subjects[0].topics[0]) {
+        setExtraTopicId(subjects[0].topics[0].id);
+        applyTopicSelectionForFreeSlot(subjects[0].id, subjects[0].topics[0], dateStr);
       }
     }
     if (preferredHourStr) {
@@ -1401,23 +1914,41 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   };
 
   const handleSuggestNextPendingTopicForSlot = () => {
-    for (const sub of subjects) {
-      const candidate = sub.topics.find((t) => {
-        const totalP = Math.max(0, t.pageCount || 0);
-        const readP = Math.max(0, t.pagesRead || 0);
-        const done =
-          totalP > 0
-            ? readP >= totalP
-            : Boolean(t.studiedAt || t.status === 'estudiado' || t.status === 'repasado');
-        return !done && !t.extraStudySessionsByDate?.[extraTopicDate];
-      });
-      if (candidate) {
-        setExtraTopicSubjectId(sub.id);
-        setExtraTopicId(candidate.id);
-        setExtraTopicPagesCount(getDefaultPagesForTopic(candidate, extraTopicDate));
-        return;
-      }
+    const candidates = getOrderedCandidateTopicsForSlot(extraTopicDate);
+    if (candidates.length === 0) {
+      setSuggestedTopicFeedback(
+        'No hay temas registrados todavía. Añade primero temas al temario de tus asignaturas.'
+      );
+      return;
     }
+
+    // Buscar la posición del tema actualmente seleccionado para avanzar al SIGUIENTE candidato
+    const currentIdx = candidates.findIndex(
+      (item) => item.subject.id === extraTopicSubjectId && item.topic.id === extraTopicId
+    );
+    const nextIdx =
+      currentIdx === -1 ? 0 : (currentIdx + 1) % candidates.length;
+    const chosen = candidates[nextIdx];
+
+    setExtraTopicSubjectId(chosen.subject.id);
+    setExtraTopicId(chosen.topic.id);
+    const { isAlreadyPlanned, pagesSelected } = applyTopicSelectionForFreeSlot(
+      chosen.subject.id,
+      chosen.topic,
+      extraTopicDate
+    );
+
+    // Si hay una hora libre óptima en ese día, asegurarnos de tener una hora válida
+    const freeH = findFreeHourForDate(extraTopicDate);
+    if (freeH !== null && !extraTopicStartTime) {
+      setExtraTopicStartTime(`${String(freeH).padStart(2, '0')}:00`);
+    }
+
+    setSuggestedTopicFeedback(
+      isAlreadyPlanned
+        ? `✨ Sugerido (#${nextIdx + 1} de ${candidates.length}): ${chosen.subject.name} · "${chosen.topic.title}" (${pagesSelected} págs. completas · ya planeado anteriormente, al guardarlo modificará todo su plan).`
+        : `✨ Sugerido (#${nextIdx + 1} de ${candidates.length}): ${chosen.subject.name} · "${chosen.topic.title}" (${pagesSelected} págs. recomendadas · ${chosen.priorityLabel}). Pulsa de nuevo para ver la siguiente opción.`
+    );
   };
 
   const handleConfirmAddExtraTopicToDay = (e: React.FormEvent) => {
@@ -1434,15 +1965,53 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     const estHours = Math.max(0.1, Math.round((durationMinutes / 60) * 100) / 100);
     const autoEndStr = calculateAutoEndTimeFromMinutes(cleanStart, durationMinutes);
 
+    const existingPlanned = getPlannedSessionsForTopic(targetSub.id, targetTopic.id);
+    const hasPriorExtra = Object.keys(targetTopic.extraStudySessionsByDate || {}).length > 0;
+    const shouldReplaceWholePlan =
+      replaceExistingPlanOnAdd && (existingPlanned.length > 0 || hasPriorExtra);
+
+    const newBlockId = `block-topic-${targetTopic.id}-${extraTopicDate}`;
+    if (shouldReplaceWholePlan && onDeleteBlockedEvent) {
+      blockedEvents
+        .filter(
+          (ev) =>
+            ev.id !== newBlockId &&
+            (ev.id.startsWith(`block-topic-${targetTopic.id}`) ||
+              (ev.linkedItemType === 'topic' && ev.linkedTopicId === targetTopic.id))
+        )
+        .forEach((ev) => onDeleteBlockedEvent(ev.id));
+    }
+
     const updatedTopics = targetSub.topics.map((t) => {
       if (t.id !== targetTopic.id) return t;
-      const currentTotalPages = Math.max(
-        t.pageCount || 0,
-        (t. pagesRead || 0) + chosenPages
-      );
+      const baseTotal = Math.max(t.pageCount || 0, t.paginasTotales || 0);
+      const neededTotal = (t.pagesRead || 0) + chosenPages;
+      const nextPageCount = baseTotal >= neededTotal ? baseTotal : neededTotal;
+
+      if (shouldReplaceWholePlan) {
+        return {
+          ...t,
+          pageCount: nextPageCount,
+          scheduledDate: extraTopicDate,
+          scheduledTime: cleanStart,
+          scheduledEndTime: autoEndStr,
+          manualScheduledDate: true,
+          studyTimeByDate: {
+            [extraTopicDate]: cleanStart,
+          },
+          extraStudySessionsByDate: {
+            [extraTopicDate]: {
+              startTime: cleanStart,
+              pagesCount: chosenPages,
+              replacePreviousPlan: true,
+            },
+          },
+        };
+      }
+
       return {
         ...t,
-        pageCount: t.pageCount && t.pageCount >= currentTotalPages ? t.pageCount : currentTotalPages,
+        pageCount: t.pageCount && t.pageCount >= neededTotal ? t.pageCount : nextPageCount,
         studyTimeByDate: {
           ...(t.studyTimeByDate || {}),
           [extraTopicDate]: cleanStart,
@@ -1465,7 +2034,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
     // Also persist in blockedEvents with the exact duration and endTime computed from chosenPages
     upsertBlockedEventInAppState({
-      id: `block-topic-${targetTopic.id}-${extraTopicDate}`,
+      id: newBlockId,
       title: `📖 Estudio: ${targetTopic.title} (${chosenPages} ${
         chosenPages === 1 ? 'pág' : 'págs'
       } · ${targetSub.name})`,
@@ -1474,7 +2043,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       endTime: autoEndStr,
       durationHours: estHours,
       category: 'estudio',
-      notes: `Sesión extra de ${chosenPages} páginas (~${durationMinutes} min) de ${cleanStart} a ${autoEndStr}`,
+      notes: shouldReplaceWholePlan
+        ? `Plan completo del tema movido aquí: ${chosenPages} páginas (~${durationMinutes} min) de ${cleanStart} a ${autoEndStr}`
+        : `Sesión extra de ${chosenPages} páginas (~${durationMinutes} min) de ${cleanStart} a ${autoEndStr}`,
       linkedItemType: 'topic',
       linkedTopicId: targetTopic.id,
       linkedSubjectId: targetSub.id,
@@ -1485,11 +2056,17 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     setShowAddTopicSlotModal(false);
     setSelectedDayStr(extraTopicDate);
     setRescheduledNotice(
-      `➕ Tema "${targetTopic.title}" (${chosenPages} ${
-        chosenPages === 1 ? 'página' : 'páginas'
-      } · ~${durationMinutes} min) añadido el ${formatReadableDate(
-        extraTopicDate
-      )} de ${cleanStart} a ${autoEndStr}.`
+      shouldReplaceWholePlan
+        ? `🔄 Plan completo de "${targetTopic.title}" modificado al ${formatReadableDate(
+            extraTopicDate
+          )} (${cleanStart}–${autoEndStr}, ${chosenPages} ${
+            chosenPages === 1 ? 'página' : 'páginas'
+          }). El resto del calendario se ha recalculado.`
+        : `➕ Tema "${targetTopic.title}" (${chosenPages} ${
+            chosenPages === 1 ? 'página' : 'páginas'
+          } · ~${durationMinutes} min) añadido el ${formatReadableDate(
+            extraTopicDate
+          )} de ${cleanStart} a ${autoEndStr}.`
     );
     setTimeout(() => setRescheduledNotice(null), 5000);
   };
@@ -1524,11 +2101,27 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   };
 
   // Universal Drop Handler for Tasks, Study Topics, Spaced Reviews, and Blocked Events across Days and Hours
-  const handleDropCalendarItem = (targetDateStr: string, targetHourStr?: string) => {
+  const handleDropCalendarItem = (
+    targetDateStr: string,
+    targetHourStr?: string,
+    dragEvent?: React.DragEvent
+  ) => {
     setDragOverSlot(null);
 
+    let effectiveDraggedItem: DraggedCalendarItem | null = draggedItem;
+    if (!effectiveDraggedItem && dragEvent?.dataTransfer) {
+      try {
+        const rawJson = dragEvent.dataTransfer.getData('application/studyflow-drag');
+        if (rawJson) {
+          effectiveDraggedItem = JSON.parse(rawJson) as DraggedCalendarItem;
+        }
+      } catch {
+        // ignore invalid payload
+      }
+    }
+
     // Support legacy draggedReview if set
-    if (!draggedItem && draggedReview) {
+    if (!effectiveDraggedItem && draggedReview) {
       handleAssignReviewToTimeSlot(
         draggedReview.subjectId,
         draggedReview.topicId,
@@ -1541,46 +2134,55 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       return;
     }
 
-    if (!draggedItem) return;
+    if (!effectiveDraggedItem) return;
 
-    if (draggedItem.kind === 'spaced_review') {
+    const item = effectiveDraggedItem;
+    setSelectedDayStr(targetDateStr);
+
+    if (item.kind === 'spaced_review') {
       handleAssignReviewToTimeSlot(
-        draggedItem.subjectId,
-        draggedItem.topicId,
+        item.subjectId,
+        item.topicId,
         targetDateStr,
         targetHourStr,
-        draggedItem.sourceDateStr,
-        draggedItem.cycle
+        item.sourceDateStr,
+        item.cycle
       );
       setDraggedItem(null);
       setDraggedReview(null);
       return;
     }
 
-    if (draggedItem.kind === 'topic_session') {
+    if (item.kind === 'topic_session') {
       const finalHourStr =
         targetHourStr ||
-        draggedItem.sourceHourStr ||
+        item.sourceHourStr ||
         (() => {
           const freeH = findFreeHourForDate(targetDateStr);
           return freeH !== null ? `${String(freeH).padStart(2, '0')}:00` : '10:00';
         })();
 
-      const durationHours = Math.max(0.5, Math.min(4, draggedItem.durationHours || 1));
+      const durationHours = Math.max(0.5, Math.min(4, item.durationHours || 1));
       handleChangeTopicSessionStartTime(
-        draggedItem.subjectId,
-        draggedItem.topicId,
+        item.subjectId,
+        item.topicId,
         targetDateStr,
         finalHourStr,
         durationHours,
-        draggedItem.sourceDateStr
+        item.sourceDateStr
       );
+      setRescheduledNotice(
+        `Bloque "${item.topicTitle || item.title || 'Tema'}" (${item.subjectName}) reprogramado al ${formatReadableDate(
+          targetDateStr
+        )} (${finalHourStr}).`
+      );
+      setTimeout(() => setRescheduledNotice(null), 4500);
       setDraggedItem(null);
       return;
     }
 
-    if (draggedItem.kind === 'task') {
-      const targetSub = subjects.find((s) => s.id === draggedItem.subjectId);
+    if (item.kind === 'task') {
+      const targetSub = subjects.find((s) => s.id === item.subjectId);
       if (!targetSub) {
         setDraggedItem(null);
         return;
@@ -1588,7 +2190,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
       const finalHourStr =
         targetHourStr ||
-        draggedItem.sourceHourStr ||
+        item.sourceHourStr ||
         (() => {
           const freeH = findFreeHourForDate(targetDateStr);
           return freeH !== null ? `${String(freeH).padStart(2, '0')}:00` : '16:00';
@@ -1598,7 +2200,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       const finalEndStr = `${String(endHourNum).padStart(2, '0')}:00`;
 
       const updatedTasks = targetSub.tasks.map((tk) => {
-        if (tk.id !== draggedItem.taskId) return tk;
+        if (tk.id !== item.taskId) return tk;
         return {
           ...tk,
           dueDate: targetDateStr,
@@ -1612,46 +2214,45 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         onUpdateSubject({ ...targetSub, tasks: updatedTasks });
       }
 
-      const displayTaskTitle = draggedItem.title || draggedItem.taskTitle || 'Tarea';
+      const displayTaskTitle = item.title || item.taskTitle || 'Tarea';
       const existingTaskBlock = blockedEvents.find(
         (b) =>
-          b.id === `block-task-${draggedItem.taskId}` ||
-          b.linkedTaskId === draggedItem.taskId
+          b.id === `block-task-${item.taskId}` ||
+          b.linkedTaskId === item.taskId
       );
 
-      // Automatically update blockedEvents in the main App state
       upsertBlockedEventInAppState({
-        id: existingTaskBlock?.id || `block-task-${draggedItem.taskId}`,
-        title: `✓ Tarea: ${displayTaskTitle} (${draggedItem.subjectName})`,
+        id: existingTaskBlock?.id || `block-task-${item.taskId}`,
+        title: `✓ Tarea: ${displayTaskTitle} (${item.subjectName})`,
         date: targetDateStr,
         startTime: finalHourStr,
         endTime: finalEndStr,
         durationHours: 1,
         category: 'trabajo',
-        notes: `Bloque de tarea asignado mediante Drag & Drop para "${displayTaskTitle}" (${draggedItem.subjectName})`,
+        notes: `Bloque de tarea asignado mediante Drag & Drop para "${displayTaskTitle}" (${item.subjectName})`,
         linkedItemType: 'task',
-        linkedTaskId: draggedItem.taskId,
-        linkedSubjectId: draggedItem.subjectId,
-        subjectName: draggedItem.subjectName,
+        linkedTaskId: item.taskId,
+        linkedSubjectId: item.subjectId,
+        subjectName: item.subjectName,
         subjectColor: targetSub.color,
       });
 
       setRescheduledNotice(
         `✓ Tarea "${displayTaskTitle}" movida al ${formatReadableDate(
           targetDateStr
-        )} (${finalHourStr}–${finalEndStr}) · Bloque actualizado en blockedEvents.`
+        )} (${finalHourStr}–${finalEndStr}).`
       );
       setTimeout(() => setRescheduledNotice(null), 5000);
       setDraggedItem(null);
       return;
     }
 
-    if (draggedItem.kind === 'blocked_event') {
+    if (item.kind === 'blocked_event') {
       const targetDayOfWeek = getDayOfWeekFromDateStr(targetDateStr);
 
-      if (draggedItem.isWeeklyObligation && onUpdatePreferences) {
+      if (item.isWeeklyObligation && onUpdatePreferences) {
         const updatedObs = (preferences.weeklyFixedObligations || []).map((ob) => {
-          if (ob.id !== draggedItem.eventId && ob.id !== draggedItem.sourceObligationId) return ob;
+          if (ob.id !== item.eventId && ob.id !== item.sourceObligationId) return ob;
           const [sH, sM] = (ob.startTime || '09:00').split(':').map(Number);
           const [eH, eM] = (ob.endTime || '10:00').split(':').map(Number);
           const computedDurHours = Math.max(
@@ -1676,7 +2277,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
           weeklyFixedObligations: updatedObs,
         });
       } else {
-        const targetEvt = blockedEvents.find((b) => b.id === draggedItem.eventId);
+        const targetEvt = blockedEvents.find((b) => b.id === item.eventId);
         if (targetEvt) {
           const [sH, sM] = (targetEvt.startTime || '09:00').split(':').map(Number);
           const [eH, eM] = (targetEvt.endTime || '10:00').split(':').map(Number);
@@ -1687,8 +2288,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
           const origDurationHours =
             targetEvt.durationHours && targetEvt.durationHours > 0
               ? targetEvt.durationHours
-              : draggedItem.durationHours && draggedItem.durationHours > 0
-              ? draggedItem.durationHours
+              : item.durationHours && item.durationHours > 0
+              ? item.durationHours
               : computedDurHours;
 
           const nextStart = targetHourStr || targetEvt.startTime || '09:00';
@@ -1702,7 +2303,6 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             durationHours: origDurationHours,
           });
 
-          // If this blocked event is linked to a topic or task, sync its new date and time block
           if (targetEvt.linkedSubjectId && (targetEvt.linkedTopicId || targetEvt.linkedTaskId)) {
             const linkedSub = subjects.find((s) => s.id === targetEvt.linkedSubjectId);
             if (linkedSub) {
@@ -1716,6 +2316,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                   nextStudyMap[targetDateStr] = nextStart;
                   return {
                     ...t,
+                    scheduledDate: targetDateStr,
                     scheduledTime: nextStart,
                     scheduledEndTime: nextEnd,
                     studyTimeByDate: nextStudyMap,
@@ -1747,9 +2348,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       }
 
       setRescheduledNotice(
-        `🕒 Bloque "${draggedItem.title}" movido al ${formatReadableDate(targetDateStr)}${
+        `🕒 Bloque "${item.title}" movido al ${formatReadableDate(targetDateStr)}${
           targetHourStr ? ` (${targetHourStr})` : ''
-        } · Hora de fin recalculada y guardada en blockedEvents.`
+        }.`
       );
       setTimeout(() => setRescheduledNotice(null), 5000);
       setDraggedItem(null);
@@ -1951,51 +2552,119 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     }
   };
 
-  // Delete an effective blocked item (either a specific BlockedTimeEvent or a WeeklyObligation)
-  const handleDeleteEffectiveBlockedItem = (item: EffectiveBlockedCalendarItem) => {
-    if (item.isWeeklyObligation && item.sourceObligationId && onUpdatePreferences) {
-      const nextObs = (preferences.weeklyFixedObligations || []).filter(
-        (ob) => ob.id !== item.sourceObligationId
+  // Execute full removal of an automated/weekly block across all weeks
+  const executeDeleteWholeAutomatedBlock = (item: EffectiveBlockedCalendarItem) => {
+    const normalizedTitle = item.title.trim().toLowerCase();
+    if (onUpdatePreferences) {
+      const nextObs = (preferences.weeklyFixedObligations || []).filter((ob) => {
+        if (item.sourceObligationId && ob.id === item.sourceObligationId) return false;
+        if (
+          ob.title.trim().toLowerCase() === normalizedTitle &&
+          ob.startTime === item.startTime &&
+          ob.endTime === item.endTime
+        ) {
+          return false;
+        }
+        return true;
+      });
+      if (nextObs.length !== (preferences.weeklyFixedObligations || []).length) {
+        onUpdatePreferences({
+          ...preferences,
+          weeklyFixedObligations: nextObs,
+        });
+      }
+    }
+
+    if (onDeleteBlockedEvent) {
+      const matchingBlocked = blockedEvents.filter(
+        (ev) =>
+          ev.id === item.id ||
+          (item.sourceObligationId && ev.id === `block-weekly-${item.sourceObligationId}`) ||
+          (!ev.date &&
+            ev.title.trim().toLowerCase() === normalizedTitle &&
+            ev.startTime === item.startTime &&
+            ev.endTime === item.endTime)
       );
+      if (matchingBlocked.length > 0) {
+        matchingBlocked.forEach((ev) => onDeleteBlockedEvent(ev.id));
+      } else if (!item.isWeeklyObligation) {
+        onDeleteBlockedEvent(item.id);
+      }
+    }
+
+    setPendingDeleteAutomatedBlock(null);
+    setRescheduledNotice(`🔁 Automatización semanal "${item.title}" eliminada de todo el calendario.`);
+    setTimeout(() => setRescheduledNotice(null), 4000);
+  };
+
+  // Skip ONLY a single date of an automated/recurring block (for unexpected changes / imprevistos)
+  const handleExcludeSingleDayFromAutomatedBlock = (item: EffectiveBlockedCalendarItem) => {
+    const targetDate = item.date || selectedDayStr || todayStr;
+    const normalizedTitle = item.title.trim().toLowerCase();
+
+    if (onUpdatePreferences) {
+      const updatedObs = (preferences.weeklyFixedObligations || []).map((ob) => {
+        const matches =
+          (item.sourceObligationId && ob.id === item.sourceObligationId) ||
+          (ob.title.trim().toLowerCase() === normalizedTitle &&
+            ob.startTime === item.startTime &&
+            ob.endTime === item.endTime);
+        if (!matches) return ob;
+        const nextExcluded = Array.from(new Set([...(ob.excludedDates || []), targetDate]));
+        return { ...ob, excludedDates: nextExcluded };
+      });
       onUpdatePreferences({
         ...preferences,
-        weeklyFixedObligations: nextObs,
+        weeklyFixedObligations: updatedObs,
       });
-      // Also remove any mirrored recurring event in blockedEvents with matching title/hours
-      if (onDeleteBlockedEvent) {
-        blockedEvents
-          .filter(
-            (ev) =>
-              ev.id === item.id ||
-              ev.id === `block-weekly-${item.sourceObligationId}` ||
-              (!ev.date &&
-                ev.title.toLowerCase() === item.title.toLowerCase() &&
-                ev.startTime === item.startTime &&
-                ev.endTime === item.endTime)
-          )
-          .forEach((ev) => onDeleteBlockedEvent(ev.id));
-      }
-      setRescheduledNotice(`Rutina semanal "${item.title}" eliminada del calendario.`);
-      setTimeout(() => setRescheduledNotice(null), 4000);
-    } else if (onDeleteBlockedEvent) {
-      onDeleteBlockedEvent(item.id);
-      // If it was a recurring weekly event that also exists in weeklyFixedObligations, remove it there too
-      if (item.isRecurringWeekly && onUpdatePreferences) {
-        const nextObs = (preferences.weeklyFixedObligations || []).filter(
-          (ob) =>
-            !(
-              ob.title.toLowerCase() === item.title.toLowerCase() &&
-              ob.startTime === item.startTime &&
-              ob.endTime === item.endTime
-            )
-        );
-        if (nextObs.length !== (preferences.weeklyFixedObligations || []).length) {
-          onUpdatePreferences({
-            ...preferences,
-            weeklyFixedObligations: nextObs,
-          });
+    }
+
+    if (onUpdateBlockedEvent) {
+      blockedEvents.forEach((ev) => {
+        const matches =
+          ev.id === item.id ||
+          (item.sourceObligationId && ev.id === `block-weekly-${item.sourceObligationId}`) ||
+          (!ev.date &&
+            ev.title.trim().toLowerCase() === normalizedTitle &&
+            ev.startTime === item.startTime &&
+            ev.endTime === item.endTime);
+        if (matches) {
+          const nextExcluded = Array.from(new Set([...(ev.excludedDates || []), targetDate]));
+          onUpdateBlockedEvent({ ...ev, excludedDates: nextExcluded });
         }
-      }
+      });
+    }
+
+    setPendingDeleteAutomatedBlock(null);
+    setRescheduledNotice(
+      `📅 "${item.title}" quitado solo el ${formatReadableDate(targetDate)}. Tu automatización semanal sigue activa.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
+  // Delete an effective blocked item (consults before deleting automated/recurring blocks)
+  const handleDeleteEffectiveBlockedItem = (
+    item: EffectiveBlockedCalendarItem,
+    dateOverride?: string
+  ) => {
+    const isAutomated = Boolean(
+      item.isRecurringWeekly ||
+        item.isWeeklyObligation ||
+        (item.recurringDays && item.recurringDays.length > 0) ||
+        item.id.startsWith('weekly-ob-') ||
+        item.id.startsWith('block-weekly-')
+    );
+
+    if (isAutomated) {
+      setPendingDeleteAutomatedBlock({
+        ...item,
+        date: item.date || dateOverride || selectedDayStr || todayStr,
+      });
+      return;
+    }
+
+    if (onDeleteBlockedEvent) {
+      onDeleteBlockedEvent(item.id);
       if (item.linkedSubjectId && (item.linkedTopicId || item.linkedTaskId)) {
         const linkedSub = subjects.find((s) => s.id === item.linkedSubjectId);
         if (linkedSub) {
@@ -2051,6 +2720,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
     const cleanDays = days && days.length > 0 ? days : [1, 2, 3, 4, 5];
     const batchTs = Date.now();
+    const normalizedTitle = title.trim().toLowerCase();
 
     const newObs: WeeklyObligation[] = cleanDays.map((d) => ({
       id: `ob-auto-${batchTs}-${d}-${Math.random().toString(36).slice(2, 5)}`,
@@ -2065,14 +2735,24 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       recurringDays: [d],
     }));
 
+    // Deduplicar obligaciones existentes con el mismo título y horario (o mismo hábito actualizado)
+    const filteredExistingObs = (preferences.weeklyFixedObligations || []).filter((ob) => {
+      const sameTitle = ob.title.trim().toLowerCase() === normalizedTitle;
+      const isHabitOb = ob.notes?.includes('Hábito') && notes?.includes('Hábito');
+      if (sameTitle && ((ob.startTime === startTime && ob.endTime === endTime) || isHabitOb)) {
+        return false;
+      }
+      return true;
+    });
+
     const updatedPreferences: StudyPreferences = {
       ...preferences,
-      weeklyFixedObligations: [...(preferences.weeklyFixedObligations || []), ...newObs],
+      weeklyFixedObligations: [...filteredExistingObs, ...newObs],
     };
 
     onUpdatePreferences?.(updatedPreferences);
 
-    // Also persist as a recurring BlockedTimeEvent in blockedEvents so it stays synced across all storage layers
+    // Also persist as a single recurring BlockedTimeEvent in blockedEvents without duplicating
     const mappedBlockedCat: BlockedTimeEvent['category'] =
       category === 'gimnasio'
         ? 'deporte'
@@ -2084,8 +2764,11 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         ? 'descanso'
         : 'personal';
 
+    const cleanSlug = normalizedTitle.replace(/[^a-z0-9]+/g, '-').slice(0, 32);
+    const deterministicId = `block-weekly-${cleanSlug || batchTs}-${startTime.replace(':', '')}-${endTime.replace(':', '')}`;
+
     const recurringBlockedEvent: BlockedTimeEvent = {
-      id: `block-weekly-${batchTs}-${Math.random().toString(36).slice(2, 6)}`,
+      id: deterministicId,
       title,
       startTime,
       endTime,
@@ -2096,7 +2779,18 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     };
 
     onAddBlockedEvent?.(recurringBlockedEvent);
-    const nextBlockedList = [...blockedEvents, recurringBlockedEvent];
+    const nextBlockedList = [
+      ...blockedEvents.filter(
+        (ev) =>
+          !(
+            !ev.date &&
+            ev.title.trim().toLowerCase() === normalizedTitle &&
+            ev.startTime === startTime &&
+            ev.endTime === endTime
+          ) && ev.id !== deterministicId
+      ),
+      recurringBlockedEvent,
+    ];
 
     if (autoRecalculate) {
       handleRecalculateTopicsAndReviews({
@@ -2282,6 +2976,59 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     () => getWeekDatesList(currentDate),
     [currentDate]
   );
+
+  const [weeklyIcsStatus, setWeeklyIcsStatus] = useState<string | null>(null);
+
+  const openExportModalForVisibleWeek = () => {
+    const weekStart = weekDates[0] || todayStr;
+    const weekEnd = weekDates[weekDates.length - 1] || weekStart;
+    setIcsExportPreset({
+      horizonDays: 7,
+      weekRange: {
+        startDate: weekStart,
+        endDate: weekEnd,
+        label: `Semana visible (${formatReadableDate(weekStart)} – ${formatReadableDate(weekEnd)})`,
+      },
+    });
+    setShowIcsExportModal(true);
+  };
+
+  const handleQuickDownloadWeeklyIcs = () => {
+    const weekStart = weekDates[0] || todayStr;
+    const weekEnd = weekDates[weekDates.length - 1] || weekStart;
+    const weeklyEvents = collectCalendarEventsForExport(
+      subjects,
+      preferences,
+      blockedEvents,
+      {
+        includeStudySessions: true,
+        includeSpacedReviews: true,
+        includeHabits: true,
+        includeBlockedEvents: true,
+        includeExams: true,
+        includeTasks: true,
+        horizonDays: 7,
+        startDateStr: weekStart,
+        endDateStr: weekEnd,
+        useRRuleForRecurring: false,
+        includeAlarms: true,
+        subjectFilterId: selectedSubjectId,
+      },
+      allGeneratedSessions
+    );
+    if (weeklyEvents.length === 0) {
+      openExportModalForVisibleWeek();
+      return;
+    }
+    const icsContent = generateIcsFileContent(
+      weeklyEvents,
+      `StudyFlow · Semana del ${formatReadableDate(weekStart)}`
+    );
+    const filename = `studyflow-plan-semanal-${weekStart}.ics`;
+    downloadIcsFile(icsContent, filename);
+    setWeeklyIcsStatus(`✓ ${weeklyEvents.length} eventos (.ics)`);
+    setTimeout(() => setWeeklyIcsStatus(null), 4000);
+  };
 
   // Dynamic timeline hours: default 08:00..22:00, automatically expanding to include early/late plans (e.g. 07:00 or 23:00)
   const timelineHours = useMemo(() => {
@@ -2571,6 +3318,619 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     );
   };
 
+  // ============================================================================
+  // MOTOR VISUAL E INTERACTIVO DE ORDEN DE PRIORIDAD (% NOTA FINAL + MANUAL)
+  // ============================================================================
+  const schedulingPriorityData = useMemo(() => {
+    const subjectItems: Array<{
+      subject: Subject;
+      info: SubjectSchedulingPriorityInfo;
+    }> = relevantSubjects.map((sub) => ({
+      subject: sub,
+      info: schedulerService.calculateSubjectSchedulingPriority(sub, todayStr),
+    }));
+
+    const topicItems: Array<{
+      subject: Subject;
+      topic: Topic;
+      info: TopicSchedulingPriorityInfo;
+      subjectInfo: SubjectSchedulingPriorityInfo;
+    }> = [];
+
+    subjectItems.forEach(({ subject, info: subjectInfo }) => {
+      (subject.topics || []).forEach((topic) => {
+        const tInfo = schedulerService.calculateTopicSchedulingPriority(
+          topic,
+          {
+            id: subject.id,
+            subjectName: subject.name,
+            exams: subject.exams,
+            tasks: subject.tasks,
+            projects: subject.projects,
+            gradingConfig: subject.gradingConfig,
+            topicsCount: subject.topics?.length || 1,
+          },
+          todayStr
+        );
+        topicItems.push({
+          subject,
+          topic,
+          info: tInfo,
+          subjectInfo,
+        });
+      });
+    });
+
+    // Ordenar temas por orden de prioridad efectivo:
+    // 1. Pendientes / en progreso primero sobre ya completados
+    // 2. Nivel u orden manual y puntuación de prioridad combinada (% nota final + urgencia + prioridad de asignatura)
+    topicItems.sort((a, b) => {
+      const aDone = a.topic.status === 'estudiado' || a.topic.status === 'repasado' ? 1 : 0;
+      const bDone = b.topic.status === 'estudiado' || b.topic.status === 'repasado' ? 1 : 0;
+      if (aDone !== bDone) return aDone - bDone;
+
+      if (
+        a.subject.id === b.subject.id &&
+        typeof a.info.manualPriorityOrder === 'number' &&
+        typeof b.info.manualPriorityOrder === 'number' &&
+        a.info.manualPriorityOrder !== b.info.manualPriorityOrder
+      ) {
+        return a.info.manualPriorityOrder - b.info.manualPriorityOrder;
+      }
+
+      const combinedA = a.info.effectiveScore + a.subjectInfo.effectiveScore * 0.25;
+      const combinedB = b.info.effectiveScore + b.subjectInfo.effectiveScore * 0.25;
+      if (combinedB !== combinedA) return combinedB - combinedA;
+
+      return b.info.totalGradeWeightPct - a.info.totalGradeWeightPct;
+    });
+
+    return {
+      subjectItems,
+      topicItems,
+    };
+  }, [relevantSubjects, todayStr, smartGoalsRevision]);
+
+  // Cambiar prioridad manual o automática de un Tema individual
+  const handleUpdateTopicSchedulingPriority = (
+    subjectId: string,
+    topicId: string,
+    newPriority: SchedulingPriorityLevel,
+    customWeight?: number | null
+  ) => {
+    const sub = subjects.find((s) => s.id === subjectId);
+    if (!sub) return;
+
+    const updatedTopics = sub.topics.map((t) => {
+      if (t.id !== topicId) return t;
+      return {
+        ...t,
+        schedulingPriority: newPriority,
+        customGradeWeightImpact:
+          customWeight === null
+            ? undefined
+            : customWeight !== undefined
+            ? customWeight
+            : t.customGradeWeightImpact,
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({ ...sub, topics: updatedTopics });
+    } else {
+      onUpdateTopicsSchedule(sub.id, updatedTopics);
+    }
+
+    const targetTopic = sub.topics.find((t) => t.id === topicId);
+    const labelMap: Record<SchedulingPriorityLevel, string> = {
+      auto: 'Automática (según % nota final)',
+      critica: 'Crítica (Máxima prioridad)',
+      alta: 'Alta',
+      media: 'Media',
+      baja: 'Baja',
+    };
+    setRescheduledNotice(
+      `🎯 Prioridad de "${targetTopic?.title || 'Tema'}" (${sub.name}) establecida en ${labelMap[newPriority]}.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 4500);
+  };
+
+  // Mover un tema arriba o abajo en el orden de prioridad dentro de su asignatura (o lista global)
+  const handleMoveTopicPriorityOrder = (
+    subjectId: string,
+    topicId: string,
+    direction: 'up' | 'down'
+  ) => {
+    const sub = subjects.find((s) => s.id === subjectId);
+    if (!sub) return;
+
+    const subTopicItems = schedulingPriorityData.topicItems.filter(
+      (item) => item.subject.id === subjectId
+    );
+    const currentIndex = subTopicItems.findIndex((item) => item.topic.id === topicId);
+    if (currentIndex === -1) return;
+
+    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (swapIndex < 0 || swapIndex >= subTopicItems.length) return;
+
+    const orderedIds = subTopicItems.map((item) => item.topic.id);
+    const temp = orderedIds[currentIndex];
+    orderedIds[currentIndex] = orderedIds[swapIndex];
+    orderedIds[swapIndex] = temp;
+
+    const rankMap = new Map<string, number>();
+    orderedIds.forEach((id, idx) => rankMap.set(id, idx + 1));
+
+    const updatedTopics = sub.topics.map((t) => ({
+      ...t,
+      manualPriorityOrder: rankMap.get(t.id) ?? t.manualPriorityOrder,
+    }));
+
+    if (onUpdateSubject) {
+      onUpdateSubject({ ...sub, topics: updatedTopics });
+    } else {
+      onUpdateTopicsSchedule(sub.id, updatedTopics);
+    }
+
+    const movedTopic = sub.topics.find((t) => t.id === topicId);
+    setRescheduledNotice(
+      `↕ Orden de prioridad actualizado para "${movedTopic?.title || 'Tema'}" (#${swapIndex + 1} en ${sub.name}).`
+    );
+    setTimeout(() => setRescheduledNotice(null), 4000);
+  };
+
+  // Cambiar prioridad manual o automática de una Asignatura completa
+  const handleUpdateSubjectSchedulingPriority = (
+    subjectId: string,
+    newPriority: SchedulingPriorityLevel
+  ) => {
+    const sub = subjects.find((s) => s.id === subjectId);
+    if (!sub || !onUpdateSubject) return;
+
+    onUpdateSubject({
+      ...sub,
+      schedulingPriority: newPriority,
+    });
+
+    const labelMap: Record<SchedulingPriorityLevel, string> = {
+      auto: 'Automática (% nota final)',
+      critica: 'Crítica',
+      alta: 'Alta',
+      media: 'Media',
+      baja: 'Baja',
+    };
+    setRescheduledNotice(
+      `🎯 Prioridad de la asignatura "${sub.name}" cambiada a ${labelMap[newPriority]}.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 4500);
+  };
+
+  // Mover una asignatura arriba o abajo en el ranking de agendado al calendario
+  const handleMoveSubjectPriorityRank = (subjectId: string, direction: 'up' | 'down') => {
+    const orderedSubs = schedulingPriorityData.subjectItems.map((item) => item.subject);
+    const currentIndex = orderedSubs.findIndex((s) => s.id === subjectId);
+    if (currentIndex === -1) return;
+
+    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (swapIndex < 0 || swapIndex >= orderedSubs.length) return;
+
+    const nextOrder = [...orderedSubs];
+    const temp = nextOrder[currentIndex];
+    nextOrder[currentIndex] = nextOrder[swapIndex];
+    nextOrder[swapIndex] = temp;
+
+    const rankMap = new Map<string, number>();
+    nextOrder.forEach((s, idx) => rankMap.set(s.id, idx + 1));
+
+    const updatedAll = subjects.map((s) =>
+      rankMap.has(s.id) ? { ...s, manualPriorityRank: rankMap.get(s.id) } : s
+    );
+
+    if (onBatchUpdateSubjects) {
+      onBatchUpdateSubjects(updatedAll);
+    } else if (onUpdateSubject) {
+      updatedAll.forEach((s) => {
+        if (rankMap.has(s.id)) onUpdateSubject(s);
+      });
+    }
+
+    setRescheduledNotice(
+      `↕ Asignatura "${temp.name}" movida a la posición #${swapIndex + 1} de prioridad de agendado.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 4000);
+  };
+
+  // Restablecer todas las prioridades al modo Automático basado en el % de la nota final
+  const handleResetAllPrioritiesToAuto = () => {
+    const resetSubs = subjects.map((s) => ({
+      ...s,
+      schedulingPriority: 'auto' as SchedulingPriorityLevel,
+      manualPriorityRank: undefined,
+      topics: (s.topics || []).map((t) => ({
+        ...t,
+        schedulingPriority: 'auto' as SchedulingPriorityLevel,
+        manualPriorityOrder: undefined,
+        customGradeWeightImpact: undefined,
+      })),
+    }));
+
+    if (onBatchUpdateSubjects) {
+      onBatchUpdateSubjects(resetSubs);
+    } else {
+      resetSubs.forEach((sub) => {
+        if (onUpdateSubject) {
+          onUpdateSubject(sub);
+        } else {
+          onUpdateTopicsSchedule(sub.id, sub.topics);
+        }
+      });
+    }
+
+    setRescheduledNotice(
+      '✨ Todas las prioridades se han restablecido al modo Automático según el % de la nota final (Exámenes, Proyectos y Tareas).'
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
+  // --- REAJUSTE INTRADÍA AUTOMÁTICO (DÍA · SEMANA · MES) Y SESIONES HECHAS PARCIALMENTE ---
+  const currentReferenceClockTime = useMemo(() => {
+    if (intradaySimulatedTime && /^\d{1,2}:\d{2}$/.test(intradaySimulatedTime.trim())) {
+      return intradaySimulatedTime.trim();
+    }
+    const now = new Date();
+    return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  }, [intradaySimulatedTime]);
+
+  const intradayAdjustmentSummary = useMemo(() => {
+    const next7Limit = addDaysToDateStr(todayStr, 7);
+    const next30Limit = addDaysToDateStr(todayStr, 30);
+
+    const todaySessions = allGeneratedSessions.filter(
+      (s) => s.date === todayStr && s.type === 'estudio_nuevo'
+    );
+    const weekSessions = allGeneratedSessions.filter(
+      (s) => s.date >= todayStr && s.date <= next7Limit && s.type === 'estudio_nuevo'
+    );
+    const monthSessions = allGeneratedSessions.filter(
+      (s) => s.date >= todayStr && s.date <= next30Limit && s.type === 'estudio_nuevo'
+    );
+
+    const rescheduledToday = todaySessions.filter((s) => s.isIntradayRescheduled);
+    const partialRemaindersAll = allGeneratedSessions.filter((s) => s.isPartialRemainder);
+
+    const todayStudyHours =
+      Math.round(todaySessions.reduce((acc, s) => acc + (s.durationHours || 0), 0) * 10) / 10;
+    const weekStudyHours =
+      Math.round(weekSessions.reduce((acc, s) => acc + (s.durationHours || 0), 0) * 10) / 10;
+    const monthStudyHours =
+      Math.round(monthSessions.reduce((acc, s) => acc + (s.durationHours || 0), 0) * 10) / 10;
+
+    // Recopilar historial reciente de sesiones hechas parcialmente en todos los temas
+    const partialRecords: {
+      subjectName: string;
+      subjectColor: string;
+      topicTitle: string;
+      record: PartialSessionCompletionRecord;
+    }[] = [];
+
+    relevantSubjects.forEach((sub) => {
+      (sub.topics || []).forEach((t) => {
+        if (t.partialCompletionHistory && t.partialCompletionHistory.length > 0) {
+          t.partialCompletionHistory.forEach((rec) => {
+            partialRecords.push({
+              subjectName: sub.name,
+              subjectColor: sub.color || '#3b82f6',
+              topicTitle: t.title,
+              record: rec,
+            });
+          });
+        }
+      });
+    });
+
+    partialRecords.sort((a, b) =>
+      `${b.record.date}_${b.record.time}`.localeCompare(`${a.record.date}_${a.record.time}`)
+    );
+
+    return {
+      todaySessions,
+      rescheduledToday,
+      partialRemaindersAll,
+      todayStudyHours,
+      weekStudyHours,
+      monthStudyHours,
+      weekSessionsCount: weekSessions.length,
+      monthSessionsCount: monthSessions.length,
+      partialRecords: partialRecords.slice(0, 6),
+    };
+  }, [allGeneratedSessions, todayStr, relevantSubjects]);
+
+  // Huecos libres recomendados para la parte que falte de una sesión hecha parcialmente
+  const partialSessionSuggestedSlots = useMemo(() => {
+    if (!partialModalSession) return [];
+    const totalHours = Math.max(0.5, partialModalSession.durationHours || 1.5);
+    const remainingHours = Math.max(
+      0.5,
+      Math.round((totalHours - Math.min(totalHours - 0.25, partialCompletedHours)) * 10) / 10
+    );
+
+    return schedulerService.findNextFreeSlotsForPartialSession(
+      effectiveSchedulerPreferences,
+      blockedEvents,
+      allGeneratedSessions,
+      {
+        fromDateStr: partialModalSession.date || todayStr,
+        afterTimeStr: partialModalSession.endTime || currentReferenceClockTime,
+        durationHours: remainingHours,
+        excludeSessionId: partialModalSession.id,
+        maxSuggestions: 6,
+      }
+    );
+  }, [
+    partialModalSession,
+    partialCompletedHours,
+    effectiveSchedulerPreferences,
+    blockedEvents,
+    allGeneratedSessions,
+    todayStr,
+    currentReferenceClockTime,
+  ]);
+
+  const handleToggleAutoIntradayReschedule = (enabled: boolean) => {
+    setAutoIntradayReschedule(enabled);
+    if (onUpdatePreferences) {
+      onUpdatePreferences({
+        ...preferences,
+        autoIntradayReschedule: enabled,
+        intradaySimulatedTime: intradaySimulatedTime || undefined,
+      });
+    }
+    setRescheduledNotice(
+      enabled
+        ? `🔄 Reajuste intradía activado (${currentReferenceClockTime}h): las sesiones no realizadas a primera hora se reubican automáticamente y recalculan el plan del día, semana y mes.`
+        : '⏸ Reajuste intradía desactivado: las sesiones mantienen su hora matinal original (08:00h).'
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
+  const handleSetIntradayReferenceTime = (newTimeStr: string) => {
+    setIntradaySimulatedTime(newTimeStr);
+    const effectiveEnabled = newTimeStr ? true : autoIntradayReschedule;
+    if (newTimeStr && !autoIntradayReschedule) {
+      setAutoIntradayReschedule(true);
+    }
+    if (onUpdatePreferences) {
+      onUpdatePreferences({
+        ...preferences,
+        autoIntradayReschedule: effectiveEnabled,
+        intradaySimulatedTime: newTimeStr || undefined,
+      });
+    }
+    const displayClock = newTimeStr || 'hora actual en vivo';
+    setRescheduledNotice(
+      `⏰ Plan del Día, Semana y Mes recalculado tomando como referencia las ${displayClock}. Cualquier sesión anterior no completada se ha movido al siguiente hueco disponible.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
+  const handleOpenPartialSessionModal = (session: ScheduledStudySession) => {
+    const totalH = Math.max(0.5, session.durationHours || 1.5);
+    // Extraer páginas del rango si existe (ej: "Págs. 1–6" o "Pág. 4")
+    let sessionPages = 4;
+    const allocText = session.pagesAllocation || session.topicTitle || '';
+    if (allocText) {
+      const rangeMatch = allocText.match(/(\d+)\s*[–-]\s*(\d+)/);
+      if (rangeMatch) {
+        const startP = parseInt(rangeMatch[1], 10);
+        const endP = parseInt(rangeMatch[2], 10);
+        if (endP >= startP) sessionPages = endP - startP + 1;
+      } else {
+        const singleMatch = allocText.match(/Pág\.?\s*(\d+)/i);
+        if (singleMatch) sessionPages = 1;
+      }
+    } else {
+      const sub = subjects.find((s) => s.id === session.subjectId);
+      const top = sub?.topics?.find((t) => t.id === session.topicId);
+      if (top?.pageCount) {
+        sessionPages = Math.max(1, top.pageCount - (top.pagesRead || 0));
+      }
+    }
+
+    const defaultPct = 50;
+    const defaultDoneHours = Math.max(0.25, Math.round(totalH * 0.5 * 4) / 4);
+    const defaultDonePages = Math.max(1, Math.round(sessionPages * 0.5));
+    const remHours = Math.max(0.5, Math.round((totalH - defaultDoneHours) * 10) / 10);
+
+    const suggestedSlots = schedulerService.findNextFreeSlotsForPartialSession(
+      effectiveSchedulerPreferences,
+      blockedEvents,
+      allGeneratedSessions,
+      {
+        fromDateStr: session.date || todayStr,
+        afterTimeStr: session.endTime || currentReferenceClockTime,
+        durationHours: remHours,
+        excludeSessionId: session.id,
+        maxSuggestions: 6,
+      }
+    );
+
+    setPartialModalSession(session);
+    setPartialCompletedPct(defaultPct);
+    setPartialCompletedHours(defaultDoneHours);
+    setPartialCompletedPages(defaultDonePages);
+    setPartialTotalSessionPages(sessionPages);
+
+    if (suggestedSlots.length > 0) {
+      setPartialRelocateDate(suggestedSlots[0].date);
+      setPartialRelocateStartTime(suggestedSlots[0].startTime);
+    } else {
+      setPartialRelocateDate(session.date || todayStr);
+      setPartialRelocateStartTime('17:00');
+    }
+  };
+
+  const handleConfirmPartialSessionCompletion = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!partialModalSession) return;
+
+    const targetSub = subjects.find((s) => s.id === partialModalSession.subjectId);
+    const targetTopic = targetSub?.topics?.find((t) => t.id === partialModalSession.topicId);
+    if (!targetSub || !targetTopic) {
+      setPartialModalSession(null);
+      return;
+    }
+
+    const totalSessionHours = Math.max(0.5, partialModalSession.durationHours || 1.5);
+    const doneHours = Math.min(
+      totalSessionHours - 0.25,
+      Math.max(0.25, Number(partialCompletedHours) || 0.5)
+    );
+    const remainingHours = Math.max(0.5, Math.round((totalSessionHours - doneHours) * 10) / 10);
+
+    const donePages = Math.min(
+      Math.max(1, partialTotalSessionPages - 1),
+      Math.max(0, Math.round(partialCompletedPages))
+    );
+    const remainingPages = Math.max(1, partialTotalSessionPages - donePages);
+
+    const relocateDate = partialRelocateDate || todayStr;
+    const relocateStartTime = partialRelocateStartTime || '17:00';
+    const relocateEndTime = calculateAutoEndTime(relocateStartTime, remainingHours);
+
+    const newPartialRecord: PartialSessionCompletionRecord = {
+      id: `partial_${Date.now()}`,
+      date: partialModalSession.date || todayStr,
+      time: currentReferenceClockTime,
+      originalSlotTime: `${partialModalSession.startTime || '08:00'} - ${partialModalSession.endTime || '09:30'}`,
+      hoursCompleted: doneHours,
+      hoursRemaining: remainingHours,
+      pagesCompleted: donePages,
+      pagesRemaining: remainingPages,
+      relocatedToDate: relocateDate,
+      relocatedToStartTime: relocateStartTime,
+      relocatedToEndTime: relocateEndTime,
+    };
+
+    const currentPagesRead = targetTopic.pagesRead || 0;
+    const totalTopicPages = targetTopic.pageCount || Math.max(4, currentPagesRead + partialTotalSessionPages);
+    const updatedPagesRead = Math.min(totalTopicPages - 1, currentPagesRead + donePages);
+    const updatedActualHours = Math.round(((targetTopic.actualHoursSpent || 0) + doneHours) * 10) / 10;
+
+    // Agendar el hueco elegido para lo que falta en el tema y en el calendario
+    const nextExtraSessions: Record<string, { startTime: string; pagesCount?: number }> = {
+      ...(targetTopic.extraStudySessionsByDate || {}),
+      [relocateDate]: {
+        startTime: relocateStartTime,
+        pagesCount: remainingPages,
+      },
+    };
+
+    const nextStudyTimeByDate = { ...(targetTopic.studyTimeByDate || {}) };
+    nextStudyTimeByDate[relocateDate] = relocateStartTime;
+
+    const updatedTopics: Topic[] = (targetSub.topics || []).map((t) => {
+      if (t.id !== targetTopic.id) return t;
+      return {
+        ...t,
+        status: 'en_progreso',
+        pagesRead: updatedPagesRead,
+        pageCount: totalTopicPages,
+        actualHoursSpent: updatedActualHours,
+        scheduledDate: relocateDate < (t.scheduledDate || '9999-12-31') ? relocateDate : t.scheduledDate,
+        scheduledTime: relocateDate === t.scheduledDate ? relocateStartTime : t.scheduledTime,
+        scheduledEndTime: relocateDate === t.scheduledDate ? relocateEndTime : t.scheduledEndTime,
+        extraStudySessionsByDate: nextExtraSessions,
+        studyTimeByDate: nextStudyTimeByDate,
+        partialCompletionHistory: [...(t.partialCompletionHistory || []), newPartialRecord],
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({
+        ...targetSub,
+        topics: updatedTopics,
+      });
+    } else {
+      onUpdateTopicsSchedule(targetSub.id, updatedTopics);
+    }
+
+    // Registrar también el bloque visual en el calendario si existe callback onAddBlockedEvent
+    if (onAddBlockedEvent) {
+      const partialEventId = `partial_slot_${targetTopic.id}_${relocateDate}_${relocateStartTime.replace(':', '')}`;
+      const newRelocatedBlock: BlockedTimeEvent = {
+        id: partialEventId,
+        title: `⚡ Restante (${remainingHours}h · ${remainingPages} págs.): ${targetTopic.title}`,
+        date: relocateDate,
+        startTime: relocateStartTime,
+        endTime: relocateEndTime,
+        durationHours: remainingHours,
+        category: 'otro',
+        linkedSubjectId: targetSub.id,
+        linkedTopicId: targetTopic.id,
+        notes: `Parte pendiente tras completar ${doneHours}h (${donePages} págs., ${partialCompletedPct}%) de la sesión de las ${partialModalSession.startTime || '08:00'}.`,
+      };
+      onAddBlockedEvent(newRelocatedBlock);
+    }
+
+    setPartialModalSession(null);
+    setSelectedDayStr(relocateDate);
+    setRescheduledNotice(
+      `✅ Sesión marcada como hecha parcialmente (${partialCompletedPct}% · ${doneHours}h / ${donePages} págs. completadas). Lo que falta (${remainingHours}h · ${remainingPages} págs.) se ha reubicado el ${formatReadableDate(relocateDate)} de ${relocateStartTime} a ${relocateEndTime} y se ha recalculado el plan del día, semana y mes.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 6500);
+  };
+
+  const handleCompleteFullStudySession = (session: ScheduledStudySession) => {
+    const targetSub = subjects.find((s) => s.id === session.subjectId);
+    const targetTopic = targetSub?.topics?.find((t) => t.id === session.topicId);
+    if (!targetSub || !targetTopic) return;
+
+    const sessionHours = Math.max(0.5, session.durationHours || 1.5);
+    let sessionPages = 4;
+    const allocText = session.pagesAllocation || session.topicTitle || '';
+    if (allocText) {
+      const rangeMatch = allocText.match(/(\d+)\s*[–-]\s*(\d+)/);
+      if (rangeMatch) {
+        const startP = parseInt(rangeMatch[1], 10);
+        const endP = parseInt(rangeMatch[2], 10);
+        if (endP >= startP) sessionPages = endP - startP + 1;
+      }
+    }
+
+    const totalTopicPages = targetTopic.pageCount || Math.max(4, (targetTopic.pagesRead || 0) + sessionPages);
+    const nextPagesRead = Math.min(totalTopicPages, (targetTopic.pagesRead || 0) + sessionPages);
+    const isNowFullyCompleted = nextPagesRead >= totalTopicPages;
+
+    const updatedTopics: Topic[] = (targetSub.topics || []).map((t) => {
+      if (t.id !== targetTopic.id) return t;
+      return {
+        ...t,
+        status: isNowFullyCompleted ? 'estudiado' : 'en_progreso',
+        pagesRead: isNowFullyCompleted ? totalTopicPages : nextPagesRead,
+        pageCount: totalTopicPages,
+        actualHoursSpent: Math.round(((t.actualHoursSpent || 0) + sessionHours) * 10) / 10,
+        studiedAt: todayStr,
+        vueltasCount: isNowFullyCompleted ? Math.max(1, (t.vueltasCount || 0) + 1) : t.vueltasCount,
+      };
+    });
+
+    if (onUpdateSubject) {
+      onUpdateSubject({
+        ...targetSub,
+        topics: updatedTopics,
+      });
+    } else {
+      onUpdateTopicsSchedule(targetSub.id, updatedTopics);
+    }
+
+    setRescheduledNotice(
+      isNowFullyCompleted
+        ? `🎉 ¡Tema "${targetTopic.title}" completado! El plan del día, semana y mes se ha actualizado.`
+        : `✅ Bloque de "${targetTopic.title}" (${sessionHours}h) completado. El resto del plan se ha actualizado.`
+    );
+    setTimeout(() => setRescheduledNotice(null), 5000);
+  };
+
   return (
     <div className="space-y-5">
       {/* 1. CABECERA COMPACTA Y KPIS ESENCIALES */}
@@ -2627,19 +3987,65 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               ))}
             </select>
 
-            <button
-              type="button"
-              onClick={() => setShowQuickBlockBar(!showQuickBlockBar)}
-              className={`w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 text-xs font-bold rounded-xl border transition-colors cursor-pointer shadow-2xs ${
-                showQuickBlockBar
-                  ? 'bg-indigo-600 text-white border-indigo-600'
-                  : 'bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
-              }`}
-              title="Atajos de 1 clic para bloquear clases, entrenos o planes imprevistos"
-            >
-              <Ban className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="truncate">Bloqueos Rápidos</span>
-            </button>
+            {designMode !== 'minimal' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowIntradaySection(!showIntradaySection)}
+                  className={`w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 text-xs font-bold rounded-xl border transition-colors cursor-pointer shadow-2xs ${
+                    showIntradaySection
+                      ? 'bg-cyan-600 text-white border-cyan-600'
+                      : 'bg-cyan-50/80 dark:bg-cyan-950/40 hover:bg-cyan-100/80 text-cyan-900 dark:text-cyan-200 border-cyan-200 dark:border-cyan-800'
+                  }`}
+                  title="Reajuste automático durante las horas del día y marcar sesiones como hechas parcialmente"
+                >
+                  <Clock className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Reajuste Intradía</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowSchedulingPrioritySection(!showSchedulingPrioritySection)}
+                  className={`w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 text-xs font-bold rounded-xl border transition-colors cursor-pointer shadow-2xs ${
+                    showSchedulingPrioritySection
+                      ? 'bg-amber-600 text-white border-amber-600'
+                      : 'bg-amber-50/80 dark:bg-amber-950/40 hover:bg-amber-100/80 text-amber-900 dark:text-amber-200 border-amber-200 dark:border-amber-800'
+                  }`}
+                  title="Establecer o modificar el orden de prioridad al agendar temas según el % de la nota final y Objetivos SMART"
+                >
+                  <Award className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Prioridad (% Nota)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowSmartGoalsSection(!showSmartGoalsSection)}
+                  className={`w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 text-xs font-bold rounded-xl border transition-colors cursor-pointer shadow-2xs ${
+                    showSmartGoalsSection
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-indigo-50/70 dark:bg-indigo-950/40 hover:bg-indigo-100/80 text-indigo-800 dark:text-indigo-200 border-indigo-200 dark:border-indigo-800'
+                  }`}
+                  title="Desplegar u ocultar la sección de Objetivos SMART con IA en Plan y Repasos"
+                >
+                  <Target className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Objetivos SMART</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowQuickBlockBar(!showQuickBlockBar)}
+                  className={`w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 text-xs font-bold rounded-xl border transition-colors cursor-pointer shadow-2xs ${
+                    showQuickBlockBar
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                  }`}
+                  title="Atajos de 1 clic para bloquear clases, entrenos o planes imprevistos"
+                >
+                  <Ban className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span className="truncate">Bloqueos Rápidos</span>
+                </button>
+              </>
+            )}
 
             <button
               type="button"
@@ -2659,7 +4065,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               onClick={() => handleRecalculateTopicsAndReviews({ preserveManualPins: true })}
               disabled={isRecalculatingAll}
               className="w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-extrabold rounded-xl shadow-xs transition-all cursor-pointer"
-              title="Recalcular temas y repasos teniendo en cuenta tareas semanales y bloqueos"
+              title="Recalcular temas y repasos teniendo en cuenta tareas semanales, objetivos SMART y bloqueos"
             >
               <RotateCw className={`w-3.5 h-3.5 shrink-0 ${isRecalculatingAll ? 'animate-spin' : ''}`} />
               <span className="truncate">Recalcular Plan</span>
@@ -2667,18 +4073,40 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
             <button
               type="button"
-              onClick={() => setShowIcsExportModal(true)}
+              onClick={openExportModalForVisibleWeek}
               className="w-full h-10 inline-flex items-center justify-center gap-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl shadow-xs transition-all cursor-pointer"
-              title="Exportar eventos bloqueados (estudio, hábitos y exámenes) a un archivo .ics para Google Calendar o Apple Calendar"
+              title="Exportar tu plan semanal o completo a iCal (.ics) o CSV (.csv) para Google Calendar u Outlook"
             >
               <Download className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">Sincronizar .ICS</span>
+              <span className="truncate">Exportar (.ICS / .CSV)</span>
             </button>
           </div>
         </div>
 
-        {/* 5 Indicadores Visuales Compactos */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 pt-4 border-t border-slate-100 dark:border-slate-800">
+        {/* 5 Indicadores Visuales Compactos (Completos en Completo/Intermedio · 1 línea esencial en Minimalista) */}
+        {designMode === 'minimal' ? (
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-3 font-mono-numbers text-slate-700 dark:text-slate-300">
+              <span>
+                ⏳ Pendientes: <strong>{syllabusHoursForecast.remainingHours}h</strong>
+              </span>
+              <span>
+                🧠 Repasos hoy: <strong>{kpiMetrics.actionableToday}</strong>
+              </span>
+              <span>
+                📅 Fin previsto: <strong>{formatReadableDate(latestProjectedDate)}</strong>
+              </span>
+            </div>
+            <span className="text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold">
+              Modo Minimalista · Todos tus apuntes, vueltas y fechas siguen activos
+            </span>
+          </div>
+        ) : (
+        <div
+          className={`grid grid-cols-2 sm:grid-cols-3 ${
+            designMode === 'complete' ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+          } gap-3 pt-4 border-t border-slate-100 dark:border-slate-800`}
+        >
           <div
             onClick={() =>
               setCalendarLayerFilter(calendarLayerFilter === 'estudio' ? 'all' : 'estudio')
@@ -2689,19 +4117,22 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 : 'bg-slate-50/70 dark:bg-slate-800/50 border-slate-200/80 dark:border-slate-700/80 hover:border-blue-300'
             }`}
           >
-            <div>
+            <div className="min-w-0 flex-1">
               <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block">
-                Plan de Estudio
+                Horas del Plan y Restantes
               </span>
-              <div className="text-lg sm:text-xl font-extrabold font-mono-numbers text-slate-900 dark:text-white mt-0.5">
-                {kpiMetrics.totalPlannedStudyHours}h{' '}
-                <span className="text-xs font-normal text-slate-400">
-                  ({kpiMetrics.totalPlannedSessions} ses.)
+              <div className="text-lg sm:text-xl font-extrabold font-mono-numbers text-slate-900 dark:text-white mt-0.5 flex items-baseline gap-1.5 flex-wrap">
+                <span>{syllabusHoursForecast.remainingHours}h rest.</span>
+                <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400">
+                  de {syllabusHoursForecast.totalSyllabusHours}h
                 </span>
               </div>
-              <span className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold">
-                Fin: {formatReadableDate(latestProjectedDate)}
-              </span>
+              <div className="text-[10px] text-slate-600 dark:text-slate-300 font-mono-numbers mt-0.5">
+                Llevas <strong>{syllabusHoursForecast.completedHours}h</strong> ({syllabusHoursForecast.completedPct}%) · Fin: {formatReadableDate(latestProjectedDate)}
+              </div>
+              <div className="text-[10px] text-blue-700 dark:text-blue-300 font-mono-numbers font-semibold mt-0.5">
+                Previsto: {syllabusHoursForecast.plannedWeeklyHours}h/sem · {syllabusHoursForecast.plannedMonthlyHours}h/mes
+              </div>
             </div>
             <div className="p-2 rounded-xl bg-blue-100/80 dark:bg-blue-950 text-blue-600 dark:text-blue-400 shrink-0">
               <BookOpen className="w-4 h-4" />
@@ -2784,42 +4215,768 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             onClick={() => setShowDailyGoalAvailabilitySection(!showDailyGoalAvailabilitySection)}
             className="p-3.5 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-800/70 flex items-center justify-between gap-3 cursor-pointer"
           >
-            <div>
+            <div className="min-w-0 flex-1">
               <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 block">
                 Meta Diaria & Libres
               </span>
               <div className="text-lg sm:text-xl font-extrabold font-mono-numbers text-emerald-700 dark:text-emerald-300 mt-0.5">
                 {calendarAvailabilityData.configuredDailyGoal}h{' '}
-                <span className="text-xs font-normal text-slate-500">/día</span>
+                <span className="text-xs font-normal text-slate-500">
+                  /día (~{calendarAvailabilityData.avgDailyFreeHours}h libres)
+                </span>
               </div>
-              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold">
-                ~{calendarAvailabilityData.avgDailyFreeHours}h libres/d
-              </span>
+              <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-mono-numbers font-semibold mt-0.5">
+                Sem: {syllabusHoursForecast.plannedWeeklyHours}h · Mes: {syllabusHoursForecast.plannedMonthlyHours}h
+              </div>
+              <div className="text-[10px] text-slate-600 dark:text-slate-400 font-mono-numbers mt-0.5">
+                Temario: {syllabusHoursForecast.completedHours}h / {syllabusHoursForecast.totalSyllabusHours}h totales
+              </div>
             </div>
             <div className="p-2 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-300 shrink-0">
               <Clock className="w-4 h-4" />
             </div>
           </div>
         </div>
+        )}
       </div>
 
-      {/* BARRA COMPACTA DESPLEGABLE: CONTROL DE HÁBITOS (CON BUSCADOR DE HUECOS) Y MOOD TRACKER */}
-      <HabitsAndMoodTrackerBar
-        preferences={preferences}
-        onUpdatePreferences={onUpdatePreferences}
-        selectedDayStr={selectedDayStr}
-        sessionsByDate={sessionsByDate}
-        getEffectiveBlockedForDate={getEffectiveBlockedForDate}
-        onScheduleHabitOneDay={(title, dateStr, startTime, endTime, category, notes) =>
-          handleQuickAddOnTheFlyPlan(title, dateStr, startTime, endTime, category, true, notes)
-        }
-        onScheduleHabitWeekly={(title, category, days, startTime, endTime, notes) =>
-          handleQuickBlockWeeklyRecurring(title, category, days, startTime, endTime, true, notes)
-        }
-      />
+      {/* PANEL DESPLEGABLE: REAJUSTE DINÁMICO DURANTE LAS HORAS DEL DÍA (DÍA · SEMANA · MES) Y SESIONES PARCIALES */}
+      {designMode !== 'minimal' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-cyan-200 dark:border-cyan-800/80 shadow-xs overflow-hidden">
+          <div
+            onClick={() => setShowIntradaySection((prev) => !prev)}
+            className="px-4 py-3 sm:px-5 sm:py-3.5 bg-gradient-to-r from-cyan-50/85 via-white to-blue-50/70 dark:from-slate-800/90 dark:via-slate-800/70 dark:to-slate-900 flex flex-wrap items-center justify-between gap-3 cursor-pointer hover:from-cyan-100/70 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-xs shrink-0">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                    Reajuste Dinámico durante el Día y Sesiones Parciales
+                  </h4>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold border ${
+                      autoIntradayReschedule
+                        ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {autoIntradayReschedule
+                      ? `Activo · Ref. ${currentReferenceClockTime}h`
+                      : 'Pausado'}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono-numbers font-bold bg-cyan-100/80 dark:bg-cyan-950/70 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800">
+                    Hoy: {intradayAdjustmentSummary.todaySessions.length} ses. ({intradayAdjustmentSummary.todayStudyHours}h)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                  Desplaza sesiones atrasadas a huecos libres y recalcula día, semana y mes en cascada.
+                </p>
+              </div>
+            </div>
 
-      {/* SECCIÓN VISUAL: META DIARIA Y HORAS LIBRES DEL CALENDARIO (Disponibilidad de Estudio) */}
-      {showDailyGoalAvailabilitySection && (
+            <div
+              className="flex items-center gap-2 shrink-0"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => handleToggleAutoIntradayReschedule(!autoIntradayReschedule)}
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-extrabold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                  autoIntradayReschedule
+                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600 shadow-2xs'
+                    : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-700'
+                }`}
+              >
+                <RotateCw className="w-3 h-3" />
+                <span>{autoIntradayReschedule ? 'ON' : 'OFF'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowIntradaySection((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                  showIntradaySection
+                    ? 'bg-cyan-600 text-white border-cyan-600 shadow-2xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-cyan-400'
+                }`}
+                title={showIntradaySection ? 'Ocultar panel de reajuste dinámico' : 'Desplegar panel de reajuste dinámico'}
+              >
+                <span className="hidden sm:inline">{showIntradaySection ? 'Ocultar' : 'Desplegar'}</span>
+                {showIntradaySection ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {showIntradaySection && (
+            <div className="p-4 sm:p-5 border-t border-cyan-100 dark:border-slate-800 space-y-4">
+
+          {/* Selector de Hora del Día (Hora en vivo vs Simulador rápido ej. 12:00h, 16:00h, 19:00h) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
+            <div className="lg:col-span-5 p-3.5 rounded-xl bg-cyan-50/50 dark:bg-cyan-950/20 border border-cyan-200/70 dark:border-cyan-800/60 flex flex-col justify-between gap-2.5">
+              <div>
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-cyan-800 dark:text-cyan-300 block">
+                  Hora actual o de corte para recalcular Hoy
+                </span>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-0.5">
+                  Elige la hora en vivo o prueba qué ocurre cuando son las <strong>12:00h</strong>, <strong>16:00h</strong> o <strong>19:00h</strong> y no pudiste hacer la sesión de las 08:00h:
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleSetIntradayReferenceTime('')}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer ${
+                    !intradaySimulatedTime
+                      ? 'bg-cyan-600 text-white border-cyan-600 shadow-2xs'
+                      : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-cyan-400'
+                  }`}
+                >
+                  🕒 Hora real en vivo
+                </button>
+                {['10:00', '12:00', '16:00', '19:00'].map((presetHour) => (
+                  <button
+                    key={presetHour}
+                    type="button"
+                    onClick={() => handleSetIntradayReferenceTime(presetHour)}
+                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer font-mono-numbers ${
+                      intradaySimulatedTime === presetHour
+                        ? 'bg-cyan-600 text-white border-cyan-600 shadow-2xs'
+                        : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-cyan-400'
+                    }`}
+                  >
+                    Son las {presetHour}h
+                  </button>
+                ))}
+                <input
+                  type="time"
+                  value={intradaySimulatedTime || currentReferenceClockTime}
+                  onChange={(e) => handleSetIntradayReferenceTime(e.target.value)}
+                  className="px-2 py-1 rounded-lg text-xs font-mono-numbers font-bold bg-white dark:bg-slate-800 border border-cyan-300 dark:border-cyan-700 text-slate-800 dark:text-slate-100 focus:outline-none"
+                  title="Elegir cualquier hora personalizada del día"
+                />
+              </div>
+            </div>
+
+            {/* Resumen del Recálculo en Cascada: DÍA · SEMANA · MES */}
+            <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                    Plan de Hoy ({formatReadableDate(todayStr)})
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-cyan-100 dark:bg-cyan-950 text-cyan-800 dark:text-cyan-300 font-mono-numbers">
+                    {intradayAdjustmentSummary.todayStudyHours}h
+                  </span>
+                </div>
+                <div className="mt-1.5">
+                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {intradayAdjustmentSummary.todaySessions.length} sesiones hoy
+                  </div>
+                  <p className="text-[10px] text-cyan-700 dark:text-cyan-300 font-semibold mt-0.5">
+                    {intradayAdjustmentSummary.rescheduledToday.length > 0
+                      ? `🔄 ${intradayAdjustmentSummary.rescheduledToday.length} reajustada(s) desde la mañana a partir de las ${currentReferenceClockTime}h`
+                      : `✅ Todas en horario disponible (desde ${currentReferenceClockTime}h)`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                    Plan de la Semana (7d)
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 font-mono-numbers">
+                    {intradayAdjustmentSummary.weekStudyHours}h
+                  </span>
+                </div>
+                <div className="mt-1.5">
+                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {intradayAdjustmentSummary.weekSessionsCount} sesiones en 7 días
+                  </div>
+                  <p className="text-[10px] text-indigo-700 dark:text-indigo-300 font-semibold mt-0.5">
+                    Absorbe automáticamente las horas que no quepan hoy
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                    Plan del Mes (30d)
+                  </span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-300 font-mono-numbers">
+                    {intradayAdjustmentSummary.monthStudyHours}h
+                  </span>
+                </div>
+                <div className="mt-1.5">
+                  <div className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    {intradayAdjustmentSummary.monthSessionsCount} sesiones en 30 días
+                  </div>
+                  <p className="text-[10px] text-purple-700 dark:text-purple-300 font-semibold mt-0.5">
+                    Fin proyectado: {formatReadableDate(latestProjectedDate)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Lista rápida de sesiones de Hoy / Próximas para marcar «½ Hecho parcial» o «✓ Hecho» en 1 clic */}
+          <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-extrabold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400" />
+                Sesiones de Hoy ({formatReadableDate(todayStr)}) — Marca «½ Hecho parcial» si te quedaste a medias para reubicar lo que te falte:
+              </span>
+            </div>
+
+            {intradayAdjustmentSummary.todaySessions.length === 0 ? (
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2">
+                <span>
+                  No quedan sesiones de estudio que quepan hoy tras las {currentReferenceClockTime}h (se han reajustado a los próximos días de la semana).
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleSetIntradayReferenceTime('08:00')}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-600 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                >
+                  Ver desde 08:00h
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+                {intradayAdjustmentSummary.todaySessions.map((sess, sIdx) => (
+                  <div
+                    key={`${sess.topicId}_${sess.startTime}_${sIdx}`}
+                    className="p-3 rounded-xl bg-slate-50/90 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 flex flex-col justify-between gap-2"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                        <span
+                          className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md text-white"
+                          style={{ backgroundColor: sess.subjectColor || '#3b82f6' }}
+                        >
+                          {sess.subjectName}
+                        </span>
+                        <span className="text-[11px] font-mono-numbers font-extrabold text-slate-800 dark:text-slate-100">
+                          {sess.startTime} – {sess.endTime} ({sess.durationHours}h)
+                        </span>
+                      </div>
+
+                      <div className="text-xs font-bold text-slate-900 dark:text-white mt-1.5 line-clamp-1">
+                        {sess.topicTitle}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                        {sess.pagesAllocation && (
+                          <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                            📄 {sess.pagesAllocation}
+                          </span>
+                        )}
+                        {sess.isIntradayRescheduled && (
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-100 dark:bg-cyan-950/80 text-cyan-800 dark:text-cyan-200 text-[10px] font-bold">
+                            🔄 Reajustado ({sess.originalStartTime || '08:00'} → {sess.startTime})
+                          </span>
+                        )}
+                        {sess.isPartialRemainder && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-200 text-[10px] font-bold">
+                            ⚡ Parte restante ({sess.partialHoursCompleted}h ya hechas)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 pt-2 border-t border-slate-200/70 dark:border-slate-700/70">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPartialSessionModal(sess)}
+                        className="flex-1 py-1.5 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
+                        title="Marcar sesión como hecha parcialmente y reubicar lo que falte en otro hueco libre"
+                      >
+                        <span>½ Hecho parcial</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCompleteFullStudySession(sess)}
+                        className="py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1 shadow-2xs"
+                        title="Marcar esta sesión como 100% completada"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Hecho</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            </div>
+          </div>
+          )}
+        </div>
+      )}
+
+      {/* BARRA COMPACTA DESPLEGABLE: CONTROL DE HÁBITOS Y MOOD TRACKER (Solo en diseño Completo) */}
+      {designMode === 'complete' && (
+        <HabitsAndMoodTrackerBar
+          preferences={preferences}
+          onUpdatePreferences={onUpdatePreferences}
+          selectedDayStr={selectedDayStr}
+          sessionsByDate={sessionsByDate}
+          getEffectiveBlockedForDate={getEffectiveBlockedForDate}
+          onScheduleHabitOneDay={(title, dateStr, startTime, endTime, category, notes) =>
+            handleQuickAddOnTheFlyPlan(title, dateStr, startTime, endTime, category, true, notes)
+          }
+          onScheduleHabitWeekly={(title, category, days, startTime, endTime, notes) =>
+            handleQuickBlockWeeklyRecurring(title, category, days, startTime, endTime, true, notes)
+          }
+        />
+      )}
+
+      {/* SECCIÓN DESPLEGABLE: OBJETIVOS SMART DEL PLAN Y REPASOS (Completo e Intermedio) */}
+      {designMode !== 'minimal' && (
+        <SmartGoalsCollapsibleSection
+          subjects={relevantSubjects}
+          preferences={preferences}
+          blockedEvents={blockedEvents}
+          isExpandedExternal={showSmartGoalsSection}
+          onToggleExpandExternal={() => setShowSmartGoalsSection((prev) => !prev)}
+          onApplyDailyGoalHours={(dailyHours) => {
+            setLocalDailyGoalHours(dailyHours);
+            if (!showCustomDaysGoal) {
+              const upd: Record<number, number> = {};
+              [1, 2, 3, 4, 5, 6, 0].forEach((d) => (upd[d] = dailyHours));
+              setLocalHoursPerDay(upd);
+            }
+            handleApplyDailyGoalHours(dailyHours);
+          }}
+          onSelectSubject={onSelectSubject}
+          onAddTaskToSubject={onAddTaskToSubject}
+          onTaskScheduledToCalendar={(_subjectId, newTask) => {
+            if (newTask.dueDate) {
+              setSelectedDayStr(newTask.dueDate);
+              setCurrentDate(parseLocalDate(newTask.dueDate));
+            }
+            setSmartGoalsRevision((prev) => prev + 1);
+            setRescheduledNotice(
+              `🎯 Tarea SMART "${newTask.title}" añadida a la asignatura y al calendario el ${formatReadableDate(newTask.dueDate)}${newTask.scheduledTime ? ` a las ${newTask.scheduledTime}h` : ''}.`
+            );
+            setTimeout(() => setRescheduledNotice(null), 5000);
+          }}
+        />
+      )}
+
+      {/* SECCIÓN DESPLEGABLE: ORDEN DE PRIORIDAD AL AGENDAR TEMAS AL CALENDARIO (% NOTA FINAL + OBJETIVOS SMART + MANUAL) */}
+      {designMode !== 'minimal' && (
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-amber-200/90 dark:border-amber-800/70 shadow-sm overflow-hidden">
+        <div
+          onClick={() => setShowSchedulingPrioritySection((prev) => !prev)}
+          className="px-4 py-3 sm:px-5 sm:py-3.5 bg-gradient-to-r from-amber-50/90 via-orange-50/60 to-indigo-50/60 dark:from-slate-800/90 dark:via-slate-800/70 dark:to-slate-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer"
+        >
+          <div className="flex items-start sm:items-center gap-3 min-w-0">
+            <div className="p-2 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 text-white shadow-xs shrink-0">
+              <Award className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h4 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                  Orden de Prioridad al Agendar Temas al Calendario
+                </h4>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
+                  % Nota Final · Objetivos SMART · Manual
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 truncate mt-0.5">
+                Prioriza automáticamente según peso en la nota, objetivos SMART activos o tu orden manual.
+              </p>
+            </div>
+          </div>
+
+          <div
+            className="flex items-center gap-2 shrink-0 self-end sm:self-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() =>
+                handleRecalculateTopicsAndReviews({
+                  preserveManualPins: false,
+                  prefixMessage:
+                    '🎯 Calendario reordenado según la prioridad por % de la nota final y ajustes manuales',
+                })
+              }
+              disabled={isRecalculatingAll}
+              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white text-xs font-extrabold shadow-xs transition-all cursor-pointer inline-flex items-center gap-1.5"
+              title="Reagendar todos los temas pendientes y repasos respetando este orden de prioridad"
+            >
+              <RotateCw className={`w-3.5 h-3.5 ${isRecalculatingAll ? 'animate-spin' : ''}`} />
+              <span>Agendar según Prioridad</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowSchedulingPrioritySection((prev) => !prev)}
+              className="p-2 rounded-xl bg-white/80 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-white cursor-pointer"
+              title={showSchedulingPrioritySection ? 'Ocultar panel de prioridades' : 'Desplegar panel de prioridades'}
+            >
+              {showSchedulingPrioritySection ? (
+                <ChevronUp className="w-4 h-4" />
+              ) : (
+                <ChevronDown className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {showSchedulingPrioritySection && (
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* Barra de Modo: Prioridad por Temas vs Prioridad por Asignaturas + Botón Restablecer Automático */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 self-start">
+                <button
+                  type="button"
+                  onClick={() => setPriorityTabMode('temas')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all cursor-pointer ${
+                    priorityTabMode === 'temas'
+                      ? 'bg-white dark:bg-slate-900 text-amber-700 dark:text-amber-300 shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  1. Orden de Temas ({schedulingPriorityData.topicItems.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPriorityTabMode('asignaturas')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all cursor-pointer ${
+                    priorityTabMode === 'asignaturas'
+                      ? 'bg-white dark:bg-slate-900 text-amber-700 dark:text-amber-300 shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  2. Orden de Asignaturas ({schedulingPriorityData.subjectItems.length})
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Los temas con mayor <strong>% de la nota final</strong> o prioridad manual <strong>Crítica/Alta</strong> se agendan primero en tus horas libres.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleResetAllPrioritiesToAuto}
+                  className="px-3 py-1.5 rounded-xl text-[11px] font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer shrink-0"
+                  title="Devolver todos los temas y asignaturas al cálculo automático basado en el % de la nota final"
+                >
+                  Restablecer Automático (% Nota)
+                </button>
+              </div>
+            </div>
+
+            {priorityTabMode === 'temas' ? (
+              <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                {schedulingPriorityData.topicItems.length === 0 ? (
+                  <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 text-xs text-slate-500 text-center">
+                    No hay temas registrados en las asignaturas seleccionadas.
+                  </div>
+                ) : (
+                  schedulingPriorityData.topicItems.map(
+                    ({ subject, topic, info }, globalIdx) => {
+                      const isDone =
+                        topic.status === 'estudiado' || topic.status === 'repasado';
+                      const subTopicsList = schedulingPriorityData.topicItems.filter(
+                        (it) => it.subject.id === subject.id
+                      );
+                      const posInSub = subTopicsList.findIndex(
+                        (it) => it.topic.id === topic.id
+                      );
+
+                      const badgeColors =
+                        info.effectiveLevel === 'critica'
+                          ? 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/60 dark:text-rose-300'
+                          : info.effectiveLevel === 'alta'
+                          ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300'
+                          : info.effectiveLevel === 'media'
+                          ? 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/60 dark:text-blue-300'
+                          : 'bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300';
+
+                      const levelLabels = {
+                        critica: '🔥 Crítica',
+                        alta: '⚡ Alta',
+                        media: '● Media',
+                        baja: '▽ Baja',
+                      };
+
+                      return (
+                        <div
+                          key={`${subject.id}-${topic.id}`}
+                          className={`p-3.5 rounded-xl border transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+                            isDone
+                              ? 'bg-slate-50/60 dark:bg-slate-800/30 border-slate-200/70 dark:border-slate-800 opacity-75'
+                              : info.effectiveLevel === 'critica'
+                              ? 'bg-rose-50/40 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800/70'
+                              : info.effectiveLevel === 'alta'
+                              ? 'bg-amber-50/40 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/70'
+                              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3 min-w-0 flex-1">
+                            {/* Posición en la Cola de Agendado + Flechas Subir/Bajar */}
+                            <div className="flex flex-col items-center gap-1 shrink-0">
+                              <span
+                                className="w-7 h-7 rounded-lg font-mono-numbers text-xs font-black flex items-center justify-center text-white shadow-2xs"
+                                style={{ backgroundColor: subject.color || '#3b82f6' }}
+                                title={`Orden de agendado global #${globalIdx + 1} (#${posInSub + 1} en ${subject.name})`}
+                              >
+                                #{globalIdx + 1}
+                              </span>
+                              <div className="inline-flex items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  disabled={posInSub <= 0}
+                                  onClick={() =>
+                                    handleMoveTopicPriorityOrder(subject.id, topic.id, 'up')
+                                  }
+                                  className="p-1 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 disabled:opacity-30 cursor-pointer"
+                                  title="Subir prioridad de este tema dentro de la asignatura"
+                                >
+                                  <ArrowUp className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={posInSub >= subTopicsList.length - 1}
+                                  onClick={() =>
+                                    handleMoveTopicPriorityOrder(subject.id, topic.id, 'down')
+                                  }
+                                  className="p-1 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 disabled:opacity-30 cursor-pointer"
+                                  title="Bajar prioridad de este tema dentro de la asignatura"
+                                >
+                                  <ArrowDown className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-extrabold text-white"
+                                  style={{ backgroundColor: subject.color || '#3b82f6' }}
+                                >
+                                  {subject.name}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${badgeColors}`}
+                                >
+                                  {levelLabels[info.effectiveLevel]}
+                                  {info.mode === 'manual' ? ' · Manual' : ' · Auto (% Nota)'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-200 border border-indigo-200 dark:border-indigo-800 text-[11px] font-mono-numbers font-extrabold">
+                                  Impacto Nota Final: {info.totalGradeWeightPct}%
+                                </span>
+                                {info.smartGoalAligned && (
+                                  <span
+                                    className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 text-[10px] font-extrabold"
+                                    title={info.alignedSmartGoalTitle || 'Alineado con Objetivo SMART'}
+                                  >
+                                    🎯 Objetivo SMART
+                                  </span>
+                                )}
+                                {topic.scheduledDate && (
+                                  <span className="text-[11px] font-mono-numbers text-slate-500 dark:text-slate-400">
+                                    📅 Agendado: <strong>{topic.scheduledDate}</strong>
+                                    {topic.scheduledTime ? ` (${topic.scheduledTime})` : ''}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white truncate">
+                                {topic.title}
+                              </div>
+
+                              {/* Desglose del % de la Nota Final (Exámenes, Proyectos y Tareas) */}
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-600 dark:text-slate-400 font-mono-numbers">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800">
+                                  📝 Exámenes: <strong>{info.examWeightPct}%</strong>
+                                </span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800">
+                                  🚀 Proyectos: <strong>{info.projectWeightPct}%</strong>
+                                </span>
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800">
+                                  ✅ Tareas: <strong>{info.taskWeightPct}%</strong>
+                                </span>
+                                <span className="text-slate-500 font-sans truncate">
+                                  · {info.reasons.join(' · ') || info.summaryLabel}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Controles Interactivos: Selector Manual/Auto de Prioridad + Ajuste Manual de % Nota */}
+                          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0">
+                            <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-1.5">
+                              <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                                % Nota:
+                              </label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={
+                                  topic.customGradeWeightImpact !== undefined
+                                    ? topic.customGradeWeightImpact
+                                    : info.totalGradeWeightPct
+                                }
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  handleUpdateTopicSchedulingPriority(
+                                    subject.id,
+                                    topic.id,
+                                    topic.schedulingPriority || 'auto',
+                                    Number.isNaN(val) ? null : Math.max(0, Math.min(100, val))
+                                  );
+                                }}
+                                className="w-12 text-xs font-mono-numbers font-bold text-indigo-700 dark:text-indigo-300 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-1.5 py-0.5 text-center focus:outline-none"
+                                title="Porcentaje de impacto en la nota final asignado a este tema (puedes ajustarlo manualmente)"
+                              />
+                              <span className="text-[10px] font-bold text-slate-400">%</span>
+                            </div>
+
+                            <select
+                              value={topic.schedulingPriority || 'auto'}
+                              onChange={(e) =>
+                                handleUpdateTopicSchedulingPriority(
+                                  subject.id,
+                                  topic.id,
+                                  e.target.value as SchedulingPriorityLevel
+                                )
+                              }
+                              className="text-xs font-bold rounded-xl px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 cursor-pointer focus:outline-none shadow-2xs"
+                              title="Cambiar entre prioridad automática (calculada según % de nota final de exámenes, proyectos y tareas) o prioridad manual"
+                            >
+                              <option value="auto">🤖 Auto ({info.totalGradeWeightPct}% nota)</option>
+                              <option value="critica">🔥 Prioridad Crítica (1º)</option>
+                              <option value="alta">⚡ Prioridad Alta (2º)</option>
+                              <option value="media">● Prioridad Media (3º)</option>
+                              <option value="baja">▽ Prioridad Baja (4º)</option>
+                            </select>
+                          </div>
+                        </div>
+                      );
+                    }
+                  )
+                )}
+              </div>
+            ) : (
+              /* Vista 2: Orden de Prioridad por Asignaturas */
+              <div className="space-y-2.5">
+                {schedulingPriorityData.subjectItems.map(({ subject, info }, idx) => {
+                  const badgeColors =
+                    info.effectiveLevel === 'critica'
+                      ? 'bg-rose-100 text-rose-800 border-rose-300'
+                      : info.effectiveLevel === 'alta'
+                      ? 'bg-amber-100 text-amber-800 border-amber-300'
+                      : info.effectiveLevel === 'media'
+                      ? 'bg-blue-100 text-blue-800 border-blue-300'
+                      : 'bg-slate-100 text-slate-700 border-slate-300';
+
+                  return (
+                    <div
+                      key={subject.id}
+                      className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span
+                            className="w-7 h-7 rounded-lg font-mono-numbers text-xs font-black flex items-center justify-center text-white"
+                            style={{ backgroundColor: subject.color || '#3b82f6' }}
+                          >
+                            #{idx + 1}
+                          </span>
+                          <div className="flex flex-col gap-0.5">
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => handleMoveSubjectPriorityRank(subject.id, 'up')}
+                              className="p-0.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 disabled:opacity-30 cursor-pointer"
+                              title="Subir asignatura en el orden de agendado"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === schedulingPriorityData.subjectItems.length - 1}
+                              onClick={() => handleMoveSubjectPriorityRank(subject.id, 'down')}
+                              className="p-0.5 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 disabled:opacity-30 cursor-pointer"
+                              title="Bajar asignatura en el orden de agendado"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-extrabold text-slate-900 dark:text-white">
+                              {subject.name}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${badgeColors}`}
+                            >
+                              {info.effectiveLevel.toUpperCase()}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 text-[11px] font-mono-numbers font-bold">
+                              Peso Evaluable Total: {info.totalActiveGradeWeightPct}% de la Nota Final
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers mt-1">
+                            <span>📝 Exámenes: <strong>{info.examWeightPct}%</strong></span>
+                            <span>🚀 Proyectos: <strong>{info.projectWeightPct}%</strong></span>
+                            <span>✅ Tareas: <strong>{info.taskWeightPct}%</strong></span>
+                            {info.nearestDeadlineDate && (
+                              <span>
+                                · Próx. fecha límite: <strong>{info.nearestDeadlineDate}</strong>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <select
+                          value={subject.schedulingPriority || 'auto'}
+                          onChange={(e) =>
+                            handleUpdateSubjectSchedulingPriority(
+                              subject.id,
+                              e.target.value as SchedulingPriorityLevel
+                            )
+                          }
+                          className="text-xs font-bold rounded-xl px-3 py-2 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 cursor-pointer focus:outline-none"
+                        >
+                          <option value="auto">🤖 Auto ({info.totalActiveGradeWeightPct}% nota)</option>
+                          <option value="critica">🔥 Prioridad Crítica</option>
+                          <option value="alta">⚡ Prioridad Alta</option>
+                          <option value="media">● Prioridad Media</option>
+                          <option value="baja">▽ Prioridad Baja</option>
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
+
+      {/* SECCIÓN VISUAL: META DIARIA Y HORAS LIBRES DEL CALENDARIO (Disponibilidad de Estudio - Completo o expandido) */}
+      {designMode !== 'minimal' && showDailyGoalAvailabilitySection && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-5 sm:p-6 space-y-5">
           {/* Section Header */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
@@ -2866,6 +5023,114 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             </div>
           </div>
 
+          {/* PANEL DESTACADO: PREVISIÓN DE HORAS SEGÚN TEMARIOS SUBIDOS (TOTAL · LLEVAS · RESTANTES · EN 1 SEMANA Y 1 MES) */}
+          <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-indigo-50/70 via-blue-50/50 to-emerald-50/50 dark:from-slate-800/80 dark:via-slate-800/60 dark:to-slate-800/80 border border-indigo-200/80 dark:border-slate-700 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs">
+                  <BookOpen className="w-4 h-4" />
+                </span>
+                <div>
+                  <h5 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                    Previsión de Horas con los Temarios Subidos (Total · Llevas · Restantes · 1 Semana y 1 Mes)
+                  </h5>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Calculado sobre {syllabusHoursForecast.totalTopics} temas ({syllabusHoursForecast.completedTopics} estudiados), {syllabusHoursForecast.totalPages} páginas{syllabusHoursForecast.uploadedDocsCount > 0 ? ` y ${syllabusHoursForecast.uploadedDocsCount} documentos subidos` : ''}.
+                  </p>
+                </div>
+              </div>
+
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-mono-numbers font-bold bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 self-start sm:self-auto">
+                <span>Progreso global en horas:</span>
+                <strong>{syllabusHoursForecast.completedPct}%</strong>
+              </span>
+            </div>
+
+            {/* Barra de progreso visual Horas Completadas vs Totales */}
+            <div className="space-y-1">
+              <div className="w-full h-2.5 bg-slate-200/80 dark:bg-slate-700 rounded-full overflow-hidden flex">
+                <div
+                  className="bg-emerald-500 h-full transition-all duration-500"
+                  style={{ width: `${syllabusHoursForecast.completedPct}%` }}
+                  title={`Horas que llevas: ${syllabusHoursForecast.completedHours}h`}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] font-mono-numbers text-slate-600 dark:text-slate-300">
+                <span>
+                  Llevas completadas: <strong className="text-emerald-700 dark:text-emerald-400">{syllabusHoursForecast.completedHours}h</strong>
+                </span>
+                <span>
+                  Restantes por estudiar: <strong className="text-indigo-700 dark:text-indigo-300">{syllabusHoursForecast.remainingHours}h</strong> (de <strong>{syllabusHoursForecast.totalSyllabusHours}h</strong> totales)
+                </span>
+              </div>
+            </div>
+
+            {/* 4 Tarjetas claras: Total Necesario · Horas que Llevas y Restantes · Previsto en 1 Semana · Previsto en 1 Mes */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {/* 1. Horas Totales Previstas con Temarios Subidos */}
+              <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-700 space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                  1. Total Previsto (Temarios)
+                </span>
+                <div className="text-xl font-black font-mono-numbers text-slate-900 dark:text-white">
+                  {syllabusHoursForecast.totalSyllabusHours}h{' '}
+                  <span className="text-xs font-normal text-slate-500">en total</span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers">
+                  {syllabusHoursForecast.totalTopics} temas · {syllabusHoursForecast.totalPages} págs.
+                </p>
+              </div>
+
+              {/* 2. Horas que Llevas vs Horas Restantes */}
+              <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800/80 space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 block">
+                  2. Horas que Llevas y Restantes
+                </span>
+                <div className="text-xl font-black font-mono-numbers text-emerald-600 dark:text-emerald-400">
+                  {syllabusHoursForecast.completedHours}h{' '}
+                  <span className="text-xs font-semibold text-slate-500">
+                    llevas ({syllabusHoursForecast.completedPct}%)
+                  </span>
+                </div>
+                <p className="text-[11px] text-indigo-700 dark:text-indigo-300 font-mono-numbers font-bold">
+                  Faltan {syllabusHoursForecast.remainingHours}h para acabar todo
+                </p>
+              </div>
+
+              {/* 3. Horas Previstas en 1 Semana (7 días) */}
+              <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-800/80 space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-400 block">
+                  3. Previsto en 1 Semana (7d)
+                </span>
+                <div className="text-xl font-black font-mono-numbers text-blue-600 dark:text-blue-400">
+                  {syllabusHoursForecast.plannedWeeklyHours}h{' '}
+                  <span className="text-xs font-normal text-slate-500">/ semana</span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers">
+                  {syllabusHoursForecast.scheduledNext7DaysHours > 0
+                    ? `${syllabusHoursForecast.scheduledNext7DaysHours}h en agenda próx. 7d (${syllabusHoursForecast.weeklyCoverageOfRemainingPct}% de lo restante)`
+                    : `Cubre el ${syllabusHoursForecast.weeklyCoverageOfRemainingPct}% de las horas restantes`}
+                </p>
+              </div>
+
+              {/* 4. Horas Previstas en 1 Mes (30 días) */}
+              <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-purple-200 dark:border-purple-800/80 space-y-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 dark:text-purple-400 block">
+                  4. Previsto en 1 Mes (30d)
+                </span>
+                <div className="text-xl font-black font-mono-numbers text-purple-600 dark:text-purple-400">
+                  {syllabusHoursForecast.plannedMonthlyHours}h{' '}
+                  <span className="text-xs font-normal text-slate-500">/ mes</span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers">
+                  {syllabusHoursForecast.remainingHours <= 0
+                    ? '¡Temario subido completado al 100%!'
+                    : `Terminas todo en ~${syllabusHoursForecast.weeksNeededToFinish} sem (${syllabusHoursForecast.studyDaysNeededToFinish} días)`}
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* 3 Metric Cards: Horas Libres en Calendario vs Meta Elegida vs Margen de Descanso */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
             {/* Card 1: Horas Libres del Calendario */}
@@ -2883,9 +5148,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 <span className="text-xs text-slate-500">/ día de media</span>
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers pt-1 border-t border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between">
-                <span>Total semanal libre:</span>
+                <span>Libres 1 sem / 1 mes:</span>
                 <strong className="text-slate-800 dark:text-slate-200">
-                  {calendarAvailabilityData.totalWeeklyFreeHours}h / sem
+                  {calendarAvailabilityData.totalWeeklyFreeHours}h / {Math.round(calendarAvailabilityData.totalWeeklyFreeHours * 4.3 * 10) / 10}h
                 </strong>
               </div>
             </div>
@@ -2905,9 +5170,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 <span className="text-xs text-slate-500">/ día planificadas</span>
               </div>
               <div className="text-[11px] text-slate-600 dark:text-slate-400 font-mono-numbers pt-1 border-t border-emerald-200/60 dark:border-emerald-800/60 flex items-center justify-between">
-                <span>Total estudio semanal:</span>
+                <span>Previsto 1 sem / 1 mes:</span>
                 <strong className="text-emerald-700 dark:text-emerald-300">
-                  {calendarAvailabilityData.totalWeeklyStudyGoal}h / sem
+                  {calendarAvailabilityData.totalWeeklyStudyGoal}h / {syllabusHoursForecast.plannedMonthlyHours}h
                 </strong>
               </div>
             </div>
@@ -3152,7 +5417,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       )}
 
       {/* PANEL DESPLEGABLE OPCIONAL: ATAJOS RÁPIDOS DE BLOQUEOS SEMANALES Y PLANES */}
-      {showQuickBlockBar && (
+      {designMode !== 'minimal' && showQuickBlockBar && (
         <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-indigo-200/80 dark:border-indigo-900/60 shadow-2xs space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
@@ -3245,44 +5510,73 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         </div>
       )}
 
-      {/* 2. SECCIÓN VISUAL: CONTROL DE VUELTAS AL TEMARIO Y REVISIÓN POR TAREAS SEMANALES */}
-      {showVueltasSection && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-5 sm:p-6 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 text-white shadow-xs shrink-0">
-                <RotateCw className="w-5 h-5" />
+      {/* 2. SECCIÓN DESPLEGABLE VISUAL: CONTROL DE VUELTAS AL TEMARIO Y REVISIÓN POR TAREAS SEMANALES */}
+      {designMode === 'complete' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-purple-200/80 dark:border-purple-800/70 shadow-sm overflow-hidden">
+          <div
+            onClick={() => setShowVueltasSection((prev) => !prev)}
+            className="px-4 py-3 sm:px-5 sm:py-3.5 bg-gradient-to-r from-purple-50/90 via-white to-indigo-50/70 dark:from-slate-800/90 dark:via-slate-800/70 dark:to-slate-900 flex flex-wrap items-center justify-between gap-3 cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="p-2 rounded-xl bg-gradient-to-br from-purple-600 to-indigo-600 text-white shadow-xs shrink-0">
+                <RotateCw className="w-4 h-4" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h4 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white">
+                  <h4 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
                     Control Visual de Vueltas al Temario y Tareas de la Semana
                   </h4>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-numbers font-extrabold bg-purple-100 dark:bg-purple-950/70 text-purple-800 dark:text-purple-200 border border-purple-200 dark:border-purple-800">
+                    1ªV: {vueltasAndWeeklyTasksData.vuelta1Pct}% · 2ªV: {vueltasAndWeeklyTasksData.vuelta2Pct}% · Media: {vueltasAndWeeklyTasksData.avgVueltas}V
+                  </span>
                   {vueltasAndWeeklyTasksData.topicWeeklyTaskLookup.size > 0 && (
-                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 border border-amber-300">
-                      📋 {vueltasAndWeeklyTasksData.topicWeeklyTaskLookup.size}{' '}
-                      {vueltasAndWeeklyTasksData.topicWeeklyTaskLookup.size === 1
-                        ? 'tema priorizado por tarea esta semana'
-                        : 'temas priorizados por tareas esta semana'}
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 border border-amber-300">
+                      📋 {vueltasAndWeeklyTasksData.topicWeeklyTaskLookup.size} con tarea semanal
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
                   Anillos de progreso por vuelta (1ª, 2ª y 3ª+) y temas vinculados a tus entregas de esta semana.
                 </p>
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => handleRecalculateTopicsAndReviews({ preserveManualPins: true })}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold cursor-pointer shadow-2xs transition-colors"
-              title="Recalcular el plan priorizando los temas vinculados a las tareas que vencen esta semana"
+            <div
+              className="flex items-center gap-2 shrink-0"
+              onClick={(e) => e.stopPropagation()}
             >
-              <RotateCw className="w-3.5 h-3.5" />
-              <span>Priorizar Tareas de la Semana</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => handleRecalculateTopicsAndReviews({ preserveManualPins: true })}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold cursor-pointer shadow-2xs transition-colors"
+                title="Recalcular el plan priorizando los temas vinculados a las tareas que vencen esta semana"
+              >
+                <RotateCw className="w-3 h-3" />
+                <span className="hidden sm:inline">Priorizar Tareas</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowVueltasSection((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                  showVueltasSection
+                    ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-purple-400'
+                }`}
+                title={showVueltasSection ? 'Ocultar control visual de vueltas' : 'Desplegar control visual de vueltas'}
+              >
+                <span className="hidden sm:inline">{showVueltasSection ? 'Ocultar' : 'Desplegar'}</span>
+                {showVueltasSection ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
           </div>
+
+          {showVueltasSection && (
+            <div className="p-5 sm:p-6 border-t border-purple-100 dark:border-slate-800 space-y-5">
 
           {/* 3 Anillos Visuales Globales (1ª Vuelta, 2ª Vuelta, 3ª+ Vuelta) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -3592,6 +5886,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 ))}
             </div>
           </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3639,44 +5935,60 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       {/* 3. BARRA UNIFICADA DE CONTROLES DEL CALENDARIO */}
       <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Selector de Vista: Semanal, Mes, Día, Año */}
-          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs">
+          {/* Selector de Vista Principal: Semanal / Mensual + Día / Año (conserva estado de vista y fecha activa) */}
+          <div
+            role="tablist"
+            aria-label="Selector de vista del calendario"
+            className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs"
+          >
             <button
-              onClick={() => setCalendarView('weekly')}
-              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              type="button"
+              role="tab"
+              aria-selected={calendarView === 'weekly'}
+              onClick={() => handleSwitchCalendarView('weekly')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 calendarView === 'weekly'
                   ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              Semana
+              Semanal
             </button>
             <button
-              onClick={() => setCalendarView('monthly')}
-              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              type="button"
+              role="tab"
+              aria-selected={calendarView === 'monthly'}
+              onClick={() => handleSwitchCalendarView('monthly')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 calendarView === 'monthly'
                   ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              Mes
+              Mensual
             </button>
             <button
-              onClick={() => setCalendarView('daily')}
-              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              type="button"
+              role="tab"
+              aria-selected={calendarView === 'daily'}
+              onClick={() => handleSwitchCalendarView('daily')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 calendarView === 'daily'
                   ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               Día
             </button>
             <button
-              onClick={() => setCalendarView('yearly')}
-              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              type="button"
+              role="tab"
+              aria-selected={calendarView === 'yearly'}
+              onClick={() => handleSwitchCalendarView('yearly')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 calendarView === 'yearly'
                   ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs font-bold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               Año
@@ -3723,7 +6035,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
           {/* Herramientas de Vista y Drag & Drop */}
           <div className="flex flex-wrap items-center gap-2">
-            {(calendarView === 'weekly' || calendarView === 'daily') && (
+            {calendarView === 'daily' && (
               <button
                 onClick={() => setTimeBlockMode(!timeBlockMode)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
@@ -3737,15 +6049,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               </button>
             )}
 
-            {calendarView === 'weekly' && (
+            {(calendarView === 'weekly' || calendarView === 'monthly') && (
               <button
                 type="button"
                 onClick={() => setShowDraggableTray(!showDraggableTray)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 border transition-colors cursor-pointer whitespace-nowrap ${
                   showDraggableTray
                     ? 'bg-blue-600 text-white border-blue-600'
                     : 'bg-slate-50 dark:bg-slate-800 hover:bg-blue-50 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
                 }`}
+                title="Mostrar u ocultar bandeja arrastrable de temas de estudio y tareas para reprogramar bloques"
               >
                 <GripVertical className="w-3.5 h-3.5" />
                 <span>Bandeja Temas/Tareas</span>
@@ -3770,6 +6083,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             >
               <Wand2 className="w-3.5 h-3.5" />
               <span>Ubicar Repasos</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={openExportModalForVisibleWeek}
+              className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              title="Exportar el plan de estudio de esta semana a CSV o iCal (.ics) para Google Calendar u Outlook"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Exportar Semana (.ICS/.CSV)</span>
             </button>
           </div>
         </div>
@@ -3798,34 +6121,375 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             ))}
           </div>
 
-          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={includeUnstartedProjections}
-              onChange={(e) => setIncludeUnstartedProjections(e.target.checked)}
-              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-            />
-            <span>Proyectar repasos futuros</span>
-          </label>
+          <div className="flex flex-wrap items-center gap-3">
+            {onUpdateSubject && subjects.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowSubjectColorBar((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                  showSubjectColorBar
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                    : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                }`}
+                title="Cambiar el color de los bloques del calendario según la asignatura"
+              >
+                <Palette className="w-3.5 h-3.5" />
+                <span>Colores por Asignatura</span>
+              </button>
+            )}
+
+            <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeUnstartedProjections}
+                onChange={(e) => setIncludeUnstartedProjections(e.target.checked)}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <span>Proyectar repasos futuros</span>
+            </label>
+          </div>
         </div>
+
+        {/* Selector rápido de color por asignatura (actualiza en vivo todos los bloques del calendario) */}
+        {showSubjectColorBar && onUpdateSubject && subjects.length > 0 && (
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                <Palette className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Personaliza el color de los bloques según su asignatura:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowSubjectColorBar(false)}
+                className="text-slate-400 hover:text-slate-600 text-xs font-semibold cursor-pointer"
+              >
+                Ocultar
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {subjects.map((sub) => {
+                const activeColor = sub.color || '#3b82f6';
+                return (
+                  <div
+                    key={sub.id}
+                    className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl border bg-white dark:bg-slate-900 shadow-2xs"
+                    style={getSubjectBlockStyle(activeColor, 'pill')}
+                  >
+                    <label
+                      className="relative w-5 h-5 rounded-md border border-black/15 cursor-pointer shrink-0 overflow-hidden shadow-2xs"
+                      style={{ backgroundColor: activeColor }}
+                      title={`Elegir color personalizado para ${sub.name}`}
+                    >
+                      <input
+                        type="color"
+                        value={activeColor}
+                        onChange={(e) => onUpdateSubject({ ...sub, color: e.target.value })}
+                        className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                      />
+                    </label>
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100 max-w-[140px] truncate">
+                      {sub.name}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {SUBJECT_COLOR_PRESETS.slice(0, 6).map((presetHex) => (
+                        <button
+                          key={presetHex}
+                          type="button"
+                          onClick={() => onUpdateSubject({ ...sub, color: presetHex })}
+                          className={`w-3.5 h-3.5 rounded-full transition-transform cursor-pointer ${
+                            activeColor.toLowerCase() === presetHex.toLowerCase()
+                              ? 'ring-2 ring-offset-1 ring-slate-700 dark:ring-white scale-110'
+                              : 'opacity-75 hover:opacity-100 hover:scale-110'
+                          }`}
+                          style={{ backgroundColor: presetHex }}
+                          title={`Aplicar este color a ${sub.name}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* VIEW 1: MONTHLY UNIFIED CALENDAR + RIGHT/BOTTOM DAY INSPECTOR */}
-      {calendarView === 'monthly' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Monthly Grid (8 cols on lg) */}
+      {/* BANDEJA ARRASTRABLE COMPARTIDA (Disponible en Semanal y Mensual para reprogramar temas/tareas por Drag & Drop) */}
+      {(calendarView === 'weekly' || calendarView === 'monthly') && showDraggableTray && (
+        <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+              Arrastra cualquier tema de estudio o tarea directamente sobre un día {calendarView === 'weekly' ? 'u hora ' : ''}del calendario para reprogramarlo
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+              Se guarda automáticamente en tu plan horario
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {/* Draggable Study Topics List */}
+            <div className="p-3 rounded-xl bg-slate-50/80 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700 space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-800 dark:text-slate-200">
+                <span className="inline-flex items-center gap-1.5">
+                  <BookOpen className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Temas de Estudio</span>
+                </span>
+                <span className="text-[11px] text-slate-500 font-mono-numbers">
+                  {relevantSubjects.reduce((acc, s) => acc + s.topics.length, 0)} temas
+                </span>
+              </div>
+              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                {relevantSubjects.flatMap((sub) =>
+                  sub.topics.map((top) => {
+                    const matchedGenSession = allGeneratedSessions.find(
+                      (s) => s.topicId === top.id && s.type === 'estudio_nuevo'
+                    );
+                    const syncedBlock = blockedEvents.find(
+                      (b) =>
+                        b.id === `block-topic-${top.id}` ||
+                        (b.linkedTopicId === top.id && b.linkedItemType === 'topic')
+                    );
+                    const scheduledDateLabel =
+                      syncedBlock?.date || top.scheduledDate || matchedGenSession?.date;
+                    const scheduledHourLabel =
+                      syncedBlock?.startTime || top.scheduledTime || matchedGenSession?.startTime;
+
+                    return (
+                      <div
+                        key={`tray-top-${top.id}`}
+                        draggable
+                        onDragStart={(e) =>
+                          startDraggingCalendarItem(e, {
+                            kind: 'topic_session',
+                            subjectId: sub.id,
+                            topicId: top.id,
+                            title: top.title,
+                            topicTitle: top.title,
+                            subjectName: sub.name,
+                            sourceDateStr: scheduledDateLabel || selectedDayStr,
+                            sourceHourStr: scheduledHourLabel,
+                            durationHours: Math.max(
+                              1,
+                              Math.min(2, Math.round(matchedGenSession?.durationHours || top.estimatedHours || 1))
+                            ),
+                          })
+                        }
+                        onDragEnd={() => {
+                          setDraggedItem(null);
+                          setDragOverSlot(null);
+                        }}
+                        className="shrink-0 w-[200px] p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-blue-400 cursor-grab active:cursor-grabbing space-y-1 transition-colors"
+                        title={`Arrastra "${top.title}" (${sub.name}) a cualquier día para reprogramar su bloque`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                          <span className="font-semibold text-slate-600 dark:text-slate-300 truncate inline-flex items-center gap-1">
+                            <span
+                              className="w-2 h-2 rounded-xs shrink-0"
+                              style={{ backgroundColor: sub.color || '#3b82f6' }}
+                            />
+                            <span className="truncate">{sub.name}</span>
+                          </span>
+                          <span className="font-mono-numbers text-slate-500 shrink-0">
+                            {top.estimatedHours || 1}h
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-bold text-slate-900 dark:text-white truncate">
+                          {top.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono-numbers truncate">
+                          {scheduledDateLabel
+                            ? `${scheduledDateLabel.slice(5)}${scheduledHourLabel ? ` · ${scheduledHourLabel}` : ''}`
+                            : 'Sin bloque asignado'}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                {relevantSubjects.every((s) => s.topics.length === 0) && (
+                  <span className="text-xs text-slate-400 py-2">
+                    No hay temas creados en las asignaturas seleccionadas.
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Draggable Tasks List */}
+            <div className="p-3 rounded-xl bg-slate-50/80 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700 space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-800 dark:text-slate-200">
+                <span className="inline-flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-teal-600" />
+                  <span>Tareas y Entregas</span>
+                </span>
+                <span className="text-[11px] text-slate-500 font-mono-numbers">
+                  {relevantSubjects.reduce((acc, s) => acc + s.tasks.length, 0)} tareas
+                </span>
+              </div>
+              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                {relevantSubjects.flatMap((sub) =>
+                  sub.tasks.map((tk) => {
+                    const syncedTaskBlock = blockedEvents.find(
+                      (b) => b.id === `block-task-${tk.id}` || b.linkedTaskId === tk.id
+                    );
+                    const taskHour = syncedTaskBlock?.startTime || tk.scheduledTime || tk.startTime;
+                    return (
+                      <div
+                        key={`tray-task-${tk.id}`}
+                        draggable
+                        onDragStart={(e) =>
+                          startDraggingCalendarItem(e, {
+                            kind: 'task',
+                            subjectId: sub.id,
+                            taskId: tk.id,
+                            title: tk.title,
+                            taskTitle: tk.title,
+                            subjectName: sub.name,
+                            sourceDateStr: tk.dueDate || selectedDayStr,
+                            sourceHourStr: taskHour,
+                          })
+                        }
+                        onDragEnd={() => {
+                          setDraggedItem(null);
+                          setDragOverSlot(null);
+                        }}
+                        className="shrink-0 w-[200px] p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-teal-400 cursor-grab active:cursor-grabbing space-y-1 transition-colors"
+                        title={`Arrastra la tarea "${tk.title}" (${sub.name}) a cualquier día`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5 text-[10px]">
+                          <span className="font-semibold text-slate-600 dark:text-slate-300 truncate inline-flex items-center gap-1">
+                            <span
+                              className="w-2 h-2 rounded-xs shrink-0"
+                              style={{ backgroundColor: sub.color || '#14b8a6' }}
+                            />
+                            <span className="truncate">{sub.name}</span>
+                          </span>
+                          <span className="font-mono-numbers text-slate-500 uppercase shrink-0">
+                            {tk.priority}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-bold text-slate-900 dark:text-white truncate">
+                          {tk.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono-numbers truncate">
+                          {tk.dueDate
+                            ? `${tk.dueDate.slice(5)}${taskHour ? ` · ${taskHour}` : ''}`
+                            : 'Sin fecha límite'}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                {relevantSubjects.every((s) => s.tasks.length === 0) && (
+                  <span className="text-xs text-slate-400 py-2">
+                    No hay tareas pendientes en las asignaturas seleccionadas.
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW 1: MONTHLY ALTERNATIVE CALENDAR + UNIFIED DAY INSPECTOR */}
+      {calendarView === 'monthly' && (() => {
+        const currentMonthDays = daysGrid.filter((d) => d.isCurrentMonth);
+        const monthlyStudyHoursTotal =
+          Math.round(
+            currentMonthDays.reduce(
+              (sum, d) =>
+                sum + (sessionsByDate[d.dateStr] || []).reduce((acc, s) => acc + s.durationHours, 0),
+              0
+            ) * 10
+          ) / 10;
+        const monthlySessionsCount = currentMonthDays.reduce(
+          (sum, d) => sum + (sessionsByDate[d.dateStr] || []).length,
+          0
+        );
+        const monthlyReviewsCount = currentMonthDays.reduce(
+          (sum, d) => sum + (srReviewsByDate[d.dateStr] || []).length,
+          0
+        );
+        const monthlyTasksExamsCount = currentMonthDays.reduce(
+          (sum, d) =>
+            sum + (tasksByDate[d.dateStr] || []).length + (examsByDate[d.dateStr] || []).length,
+          0
+        );
+        const monthWeeks: typeof daysGrid[] = [];
+        for (let i = 0; i < daysGrid.length; i += 7) {
+          monthWeeks.push(daysGrid.slice(i, i + 7));
+        }
+
+        return (
+        <div className="space-y-3">
+          {/* Monthly Summary & Sub-view Strip (preserves state across Semanal/Mensual toggles) */}
+          <div className="bg-white dark:bg-slate-900 px-4 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-600 dark:text-slate-300 font-mono-numbers">
+              <span className="font-bold text-slate-900 dark:text-white font-sans">
+                {monthNames[currentMonth]} {currentYear}
+              </span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span className="font-semibold text-blue-700 dark:text-blue-400">
+                {monthlyStudyHoursTotal}h planificadas
+              </span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{monthlySessionsCount} bloques de estudio</span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{monthlyReviewsCount} repasos</span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{monthlyTasksExamsCount} tareas/exámenes</span>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center gap-1 p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setMonthlyVariant('grid')}
+                  className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    monthlyVariant === 'grid'
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  Cuadrícula Mensual
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMonthlyVariant('weeks')}
+                  className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    monthlyVariant === 'weeks'
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  Semanas del Mes
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {draggedItem && (
+            <div className="px-4 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 text-xs text-blue-900 dark:text-blue-200 flex items-center justify-between gap-2">
+              <span className="font-semibold">
+                Modo reprogramación activo: suelta «{draggedItem.title || ('topicTitle' in draggedItem && draggedItem.topicTitle) || ('subjectName' in draggedItem && draggedItem.subjectName) || 'Bloque'}» sobre cualquier día del mes para mover su bloque.
+              </span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Monthly Grid or Week-by-Week Monthly Board (8 cols on lg) */}
           <div className="lg:col-span-8 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs overflow-hidden">
             {/* Monthly View Action Header */}
             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs">
                 <span className="font-bold text-slate-800 dark:text-slate-100">
-                  Calendario Mensual · {monthNames[currentMonth]} {currentYear}
+                  {monthlyVariant === 'grid'
+                    ? `Calendario Mensual · ${monthNames[currentMonth]} ${currentYear}`
+                    : `Plan Mensual por Semanas · ${monthNames[currentMonth]} ${currentYear}`}
                 </span>
                 <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
-                  (Arrastra cualquier tema, repaso, tarea o cita sobre otro día para moverlo)
+                  Arrastra temas de estudio sobre cualquier día para reprogramar su bloque
                 </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => {
@@ -3833,14 +6497,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                     setBlockedModalMode('on_the_fly');
                     setShowAddBlockedModal(true);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-bold cursor-pointer"
+                  className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 text-[11px] font-bold cursor-pointer whitespace-nowrap"
                 >
                   + Plan en {selectedDayStr.slice(5)}
                 </button>
                 <button
                   type="button"
                   onClick={() => handleRecalculateTopicsAndReviews({ preserveManualPins: true })}
-                  className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                  className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer shadow-2xs whitespace-nowrap"
                 >
                   <RotateCw className="w-3 h-3" />
                   <span>Recalcular Temas y Repasos</span>
@@ -3848,6 +6512,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               </div>
             </div>
 
+            {monthlyVariant === 'grid' ? (
+              <>
             {/* Days of week header */}
             <div className="grid grid-cols-7 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 text-center text-xs font-bold text-slate-600 dark:text-slate-300 py-2.5">
               <div>Lun</div>
@@ -3879,31 +6545,32 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                       setCurrentDate(parseLocalDate(day.dateStr));
                     }}
                     onDragOver={(e) => {
-                      if (!draggedItem && !draggedReview) return;
                       e.preventDefault();
                       e.dataTransfer.dropEffect = 'move';
                       if (dragOverSlot !== `month-${day.dateStr}`) {
                         setDragOverSlot(`month-${day.dateStr}`);
                       }
                     }}
-                    onDragLeave={() => {
-                      if (dragOverSlot === `month-${day.dateStr}`) {
-                        setDragOverSlot(null);
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                        if (dragOverSlot === `month-${day.dateStr}`) {
+                          setDragOverSlot(null);
+                        }
                       }
                     }}
                     onDrop={(e) => {
                       e.preventDefault();
                       setDragOverSlot(null);
-                      handleDropCalendarItem(day.dateStr);
+                      handleDropCalendarItem(day.dateStr, undefined, e);
                     }}
-                    className={`p-2 min-h-[125px] cursor-pointer transition-colors flex flex-col justify-between ${
+                    className={`p-2 min-h-[132px] cursor-pointer transition-colors flex flex-col justify-between ${
                       isDropTarget
                         ? 'bg-indigo-100/80 dark:bg-indigo-950/70 ring-2 ring-inset ring-indigo-500'
                         : isSelected
                         ? 'bg-blue-50/50 dark:bg-indigo-950/40 ring-2 ring-blue-500/40'
                         : day.isCurrentMonth
                         ? 'bg-white dark:bg-slate-900 hover:bg-slate-50/80 dark:hover:bg-slate-800/50'
-                        : 'bg-slate-50/30 dark:bg-slate-900/30 opacity-45 hover:opacity-75'
+                        : 'bg-slate-50/30 dark:bg-slate-900/30 opacity-50 hover:opacity-80'
                     }`}
                   >
                     <div className="flex items-center justify-between text-xs">
@@ -3922,115 +6589,135 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedDayStr(day.dateStr);
-                          setBlockedDate(day.dateStr);
-                          setBlockedModalMode('on_the_fly');
-                          setShowAddBlockedModal(true);
+                          openAddTopicSlotModalForDate(day.dateStr);
                         }}
-                        className="text-[10px] text-slate-400 hover:text-amber-600 font-bold px-1 rounded hover:bg-amber-50 cursor-pointer"
-                        title="Añadir plan sobre la marcha en este día"
+                        className="text-[11px] text-slate-400 hover:text-blue-600 font-bold px-1 rounded hover:bg-blue-50 dark:hover:bg-blue-950/50 cursor-pointer"
+                        title="Añadir tema de estudio en este día"
                       >
                         +
                       </button>
                     </div>
 
-                    {/* Unified Day Content Badges (Draggable!) */}
+                    {/* Unified Day Content Blocks (Draggable!) */}
                     <div className="mt-1 space-y-1 overflow-hidden">
                       {/* Exam badge */}
                       {dayExams.length > 0 && (
-                        <div className="text-[10px] font-bold text-rose-800 dark:text-rose-200 bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800 px-1.5 py-0.5 rounded truncate">
-                          🎯 Examen ({dayExams[0].exam.examType})
-                        </div>
-                      )}
-
-                      {/* Blocked events / Weekly routines badge (draggable) */}
-                      {dayBlocked.slice(0, 1).map((b) => (
                         <div
-                          key={b.id}
-                          draggable
-                          onDragStart={(e) => {
-                            e.stopPropagation();
-                            e.dataTransfer.effectAllowed = 'move';
-                            setDraggedItem({
-                              kind: 'blocked_event',
-                              eventId: b.id,
-                              title: b.title,
-                              sourceDateStr: day.dateStr,
-                              sourceHourStr: b.startTime,
-                              durationHours: b.durationHours,
-                              isWeeklyObligation: b.isWeeklyObligation,
-                              sourceObligationId: b.sourceObligationId,
-                            });
-                          }}
-                          onDragEnd={() => {
-                            setDraggedItem(null);
-                            setDragOverSlot(null);
-                          }}
-                          className="text-[10px] font-bold text-amber-900 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing flex items-center justify-between gap-1"
-                          title={`${b.isWeeklyObligation ? '🔁 Rutina semanal' : '🚫 Plan bloqueado'}: ${b.title} (${b.startTime}-${b.endTime}) · Arrastra para mover`}
-                        >
-                          <span className="truncate">
-                            {b.isWeeklyObligation ? '🔁' : '🚫'} {b.title}
-                          </span>
-                          {dayBlocked.length > 1 && (
-                            <span className="text-[9px] shrink-0">+{dayBlocked.length - 1}</span>
+                          className="text-[10px] font-bold text-slate-900 dark:text-slate-100 border px-1.5 py-0.5 rounded truncate"
+                          style={getSubjectBlockStyle(
+                            getSubjectColor(dayExams[0].subjectId, '#e11d48'),
+                            'exam'
                           )}
-                        </div>
-                      ))}
-
-                      {/* Smart Plan Study Topics (draggable pills) */}
-                      {sessions.slice(0, 2).map((sess) => (
-                        <div
-                          key={sess.id}
-                          draggable
-                          onDragStart={(e) => {
-                            e.stopPropagation();
-                            e.dataTransfer.effectAllowed = 'move';
-                            setDraggedItem({
-                              kind: 'topic_session',
-                              subjectId: sess.subjectId,
-                              topicId: sess.topicId,
-                              topicTitle: sess.topicTitle,
-                              subjectName: sess.subjectName,
-                              sourceDateStr: day.dateStr,
-                              sourceHourStr: sess.startTime,
-                              durationHours: sess.durationHours,
-                            });
-                          }}
-                          onDragEnd={() => {
-                            setDraggedItem(null);
-                            setDragOverSlot(null);
-                          }}
-                          className="text-[10px] font-semibold text-blue-800 dark:text-blue-200 bg-blue-50 dark:bg-blue-950/60 border border-blue-200/70 dark:border-blue-800 px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing flex items-center gap-1"
-                          title={`Arrastra este tema a otro día: ${sess.subjectName} · ${sess.topicTitle}`}
                         >
-                          <span className="shrink-0">📖</span>
-                          <span className="truncate">{sess.topicTitle}</span>
-                        </div>
-                      ))}
-                      {sessions.length > 2 && (
-                        <div className="text-[9px] font-bold text-blue-600 pl-1">
-                          +{sessions.length - 2} tema(s) más
+                          Examen ({dayExams[0].exam.examType})
                         </div>
                       )}
 
-                      {/* Spaced Repetition SM-2 Milestones (draggable pills) */}
-                      {daySR.slice(0, 2).map(({ analysis, milestone }) => {
-                        const pillClass =
-                          milestone.status === 'completed'
-                            ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
-                            : milestone.status === 'overdue' ||
-                              milestone.status === 'due_today'
-                            ? 'bg-rose-50 dark:bg-rose-950/70 text-rose-800 dark:text-rose-200 border-rose-300 dark:border-rose-800 font-bold'
-                            : 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-200 border-indigo-200 dark:border-indigo-800';
+                      {/* Blocked events / Weekly routines (draggable) */}
+                      {dayBlocked.slice(0, 1).map((b) => {
+                        const linkedColor =
+                          b.linkedSubjectId || b.subjectColor
+                            ? getSubjectColor(b.linkedSubjectId, b.subjectColor)
+                            : undefined;
+                        return (
+                          <div
+                            key={b.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.stopPropagation();
+                              startDraggingCalendarItem(e, {
+                                kind: 'blocked_event',
+                                eventId: b.id,
+                                title: b.title,
+                                sourceDateStr: day.dateStr,
+                                sourceHourStr: b.startTime,
+                                durationHours: b.durationHours,
+                                isWeeklyObligation: b.isWeeklyObligation,
+                                sourceObligationId: b.sourceObligationId,
+                              });
+                            }}
+                            onDragEnd={() => {
+                              setDraggedItem(null);
+                              setDragOverSlot(null);
+                            }}
+                            style={
+                              linkedColor
+                                ? getSubjectBlockStyle(linkedColor, 'pill')
+                                : undefined
+                            }
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border truncate cursor-grab active:cursor-grabbing flex items-center justify-between gap-1 ${
+                              linkedColor
+                                ? 'text-slate-900 dark:text-slate-100'
+                                : 'text-amber-900 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800'
+                            }`}
+                            title={`${b.isWeeklyObligation ? 'Rutina semanal' : 'Bloque horario'}: ${b.title} (${b.startTime}-${b.endTime}) · Arrastra para mover`}
+                          >
+                            <span className="truncate">{b.title}</span>
+                            {dayBlocked.length > 1 && (
+                              <span className="text-[9px] font-mono-numbers shrink-0">
+                                +{dayBlocked.length - 1}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
 
+                      {/* Smart Plan Study Topics (draggable across days!) */}
+                      {sessions.slice(0, 3).map((sess) => {
+                        const subColor = getSubjectColor(sess.subjectId, sess.subjectColor);
+                        return (
+                          <div
+                            key={sess.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.stopPropagation();
+                              startDraggingCalendarItem(e, {
+                                kind: 'topic_session',
+                                subjectId: sess.subjectId,
+                                topicId: sess.topicId,
+                                topicTitle: sess.topicTitle,
+                                subjectName: sess.subjectName,
+                                sourceDateStr: day.dateStr,
+                                sourceHourStr: sess.startTime,
+                                durationHours: sess.durationHours,
+                              });
+                            }}
+                            onDragEnd={() => {
+                              setDraggedItem(null);
+                              setDragOverSlot(null);
+                            }}
+                            style={getSubjectBlockStyle(subColor, 'pill')}
+                            className="text-[10px] font-semibold text-slate-900 dark:text-slate-100 border px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing flex items-center justify-between gap-1"
+                            title={`Arrastra este tema a otro día del mes para reprogramarlo: ${sess.subjectName} · ${sess.topicTitle} (${sess.startTime || 'Todo el día'})`}
+                          >
+                            <span className="truncate">{sess.topicTitle}</span>
+                            {sess.startTime && (
+                              <span className="text-[9px] font-mono-numbers opacity-75 shrink-0 hidden xl:inline">
+                                {sess.startTime}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {sessions.length > 3 && (
+                        <div className="text-[9px] font-bold text-slate-500 dark:text-slate-400 pl-1 font-mono-numbers">
+                          +{sessions.length - 3} tema(s) más
+                        </div>
+                      )}
+
+                      {/* Spaced Repetition SM-2 Milestones (draggable) */}
+                      {daySR.slice(0, 2).map(({ analysis, milestone }) => {
+                        const subColor = getSubjectColor(
+                          analysis.subject.id,
+                          analysis.subject.color
+                        );
                         return (
                           <div
                             key={`${analysis.topic.id}-${milestone.cycle}`}
                             draggable
                             onDragStart={(e) => {
                               e.stopPropagation();
-                              e.dataTransfer.effectAllowed = 'move';
-                              const itemPayload: DraggedCalendarItem = {
+                              startDraggingCalendarItem(e, {
                                 kind: 'spaced_review',
                                 subjectId: analysis.subject.id,
                                 topicId: analysis.topic.id,
@@ -4039,24 +6726,25 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                 topicTitle: analysis.topic.title,
                                 subjectName: analysis.subject.name,
                                 label: milestone.label,
-                              };
-                              setDraggedItem(itemPayload);
-                              setDraggedReview(itemPayload);
+                              });
                             }}
                             onDragEnd={() => {
                               setDraggedItem(null);
                               setDraggedReview(null);
                               setDragOverSlot(null);
                             }}
-                            className={`text-[10px] px-1.5 py-0.5 rounded border truncate flex items-center gap-1 cursor-grab active:cursor-grabbing ${pillClass}`}
+                            style={getSubjectBlockStyle(subColor, 'pill')}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border text-slate-900 dark:text-slate-100 truncate flex items-center gap-1 cursor-grab active:cursor-grabbing ${
+                              milestone.status === 'overdue' || milestone.status === 'due_today'
+                                ? 'font-bold'
+                                : ''
+                            }`}
                             title={`Repaso Espaciado ${milestone.label}: ${analysis.topic.title} (${analysis.studiedPages}/${analysis.totalPages} págs. leídas)`}
                           >
                             <span className="font-mono-numbers font-bold shrink-0">
-                              🧠 R{milestone.cycle} ({milestone.intervalDays}d)
+                              R{milestone.cycle}
                             </span>
-                            <span className="truncate">
-                              {analysis.topic.title} ({analysis.studiedPages}p)
-                            </span>
+                            <span className="truncate">{analysis.topic.title}</span>
                           </div>
                         );
                       })}
@@ -4066,15 +6754,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                         </div>
                       )}
 
-                      {/* Tasks (draggable pills) */}
+                      {/* Tasks (draggable) */}
                       {pendingDayTasks.slice(0, 1).map(({ task, subjectId, subjectName }) => (
                         <div
                           key={task.id}
                           draggable
                           onDragStart={(e) => {
                             e.stopPropagation();
-                            e.dataTransfer.effectAllowed = 'move';
-                            setDraggedItem({
+                            startDraggingCalendarItem(e, {
                               kind: 'task',
                               subjectId,
                               taskId: task.id,
@@ -4088,7 +6775,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             setDraggedItem(null);
                             setDragOverSlot(null);
                           }}
-                          className="text-[10px] font-semibold text-teal-900 dark:text-teal-200 bg-teal-50 dark:bg-teal-950/60 border border-teal-200 dark:border-teal-800 px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing"
+                          style={getSubjectBlockStyle(getSubjectColor(subjectId), 'pill')}
+                          className="text-[10px] font-semibold text-slate-900 dark:text-slate-100 border px-1.5 py-0.5 rounded truncate cursor-grab active:cursor-grabbing"
                           title={`Arrastra esta tarea a otro día: ${task.title}`}
                         >
                           ✓ {task.title}
@@ -4111,6 +6799,218 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 );
               })}
             </div>
+              </>
+            ) : (
+              /* Alternative Sub-view: Week-by-Week Monthly Agenda Rows (high clarity for long topic names + smooth cross-week Drag & Drop) */
+              <div className="divide-y divide-slate-200 dark:divide-slate-800">
+                {monthWeeks.map((weekSlice, wIdx) => {
+                  const weekHours =
+                    Math.round(
+                      weekSlice.reduce(
+                        (sum, d) =>
+                          sum +
+                          (sessionsByDate[d.dateStr] || []).reduce(
+                            (acc, s) => acc + s.durationHours,
+                            0
+                          ),
+                        0
+                      ) * 10
+                    ) / 10;
+                  return (
+                    <div key={`mweek-${wIdx}`} className="p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-slate-700 dark:text-slate-300 font-mono-numbers">
+                          Semana {wIdx + 1} · {formatReadableDate(weekSlice[0].dateStr)} –{' '}
+                          {formatReadableDate(weekSlice[6].dateStr)}
+                        </span>
+                        <span className="text-[11px] font-mono-numbers text-blue-700 dark:text-blue-400 font-semibold">
+                          {weekHours}h planificadas
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-7 gap-2">
+                        {weekSlice.map((day) => {
+                          const sessions = showStudyLayer ? sessionsByDate[day.dateStr] || [] : [];
+                          const daySR = showRepasoLayer ? srReviewsByDate[day.dateStr] || [] : [];
+                          const dayTasks = showExamsTasksLayer
+                            ? (tasksByDate[day.dateStr] || []).filter((t) => !t.task.completed)
+                            : [];
+                          const isSelected = selectedDayStr === day.dateStr;
+                          const isDropTarget = dragOverSlot === `monthweek-${day.dateStr}`;
+                          const dayDateObj = parseLocalDate(day.dateStr);
+                          const dayShort = dayDateObj.toLocaleDateString('es-ES', {
+                            weekday: 'short',
+                          });
+
+                          return (
+                            <div
+                              key={`mwcell-${day.dateStr}`}
+                              onClick={() => {
+                                setSelectedDayStr(day.dateStr);
+                                setCurrentDate(parseLocalDate(day.dateStr));
+                              }}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = 'move';
+                                if (dragOverSlot !== `monthweek-${day.dateStr}`) {
+                                  setDragOverSlot(`monthweek-${day.dateStr}`);
+                                }
+                              }}
+                              onDragLeave={(e) => {
+                                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                                  if (dragOverSlot === `monthweek-${day.dateStr}`) {
+                                    setDragOverSlot(null);
+                                  }
+                                }
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                setDragOverSlot(null);
+                                handleDropCalendarItem(day.dateStr, undefined, e);
+                              }}
+                              className={`p-2 rounded-xl border min-h-[110px] flex flex-col justify-between gap-1.5 cursor-pointer transition-colors ${
+                                isDropTarget
+                                  ? 'bg-indigo-100/80 dark:bg-indigo-950/70 border-indigo-500 ring-2 ring-indigo-500/40'
+                                  : isSelected
+                                  ? 'bg-blue-50/50 dark:bg-indigo-950/40 border-blue-400'
+                                  : day.isCurrentMonth
+                                  ? 'bg-slate-50/50 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700 hover:bg-white dark:hover:bg-slate-800'
+                                  : 'bg-slate-50/20 dark:bg-slate-900/20 border-slate-100 dark:border-slate-800 opacity-50'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between text-[11px] font-mono-numbers">
+                                <span className="capitalize font-semibold text-slate-600 dark:text-slate-300">
+                                  {dayShort} {day.dayNumber}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedDayStr(day.dateStr);
+                                    openAddTopicSlotModalForDate(day.dateStr);
+                                  }}
+                                  className="text-slate-400 hover:text-blue-600 font-bold px-1 rounded cursor-pointer"
+                                  title="Añadir tema en este día"
+                                >
+                                  +
+                                </button>
+                              </div>
+
+                              <div className="space-y-1 flex-1">
+                                {sessions.map((sess) => {
+                                  const subColor = getSubjectColor(
+                                    sess.subjectId,
+                                    sess.subjectColor
+                                  );
+                                  return (
+                                    <div
+                                      key={sess.id}
+                                      draggable
+                                      onDragStart={(e) => {
+                                        e.stopPropagation();
+                                        startDraggingCalendarItem(e, {
+                                          kind: 'topic_session',
+                                          subjectId: sess.subjectId,
+                                          topicId: sess.topicId,
+                                          topicTitle: sess.topicTitle,
+                                          subjectName: sess.subjectName,
+                                          sourceDateStr: day.dateStr,
+                                          sourceHourStr: sess.startTime,
+                                          durationHours: sess.durationHours,
+                                        });
+                                      }}
+                                      onDragEnd={() => {
+                                        setDraggedItem(null);
+                                        setDragOverSlot(null);
+                                      }}
+                                      style={getSubjectBlockStyle(subColor, 'pill')}
+                                      className="px-1.5 py-1 rounded border text-[10px] font-semibold text-slate-900 dark:text-slate-100 cursor-grab active:cursor-grabbing"
+                                      title={`Arrastra para reprogramar: ${sess.topicTitle} (${sess.durationHours}h)`}
+                                    >
+                                      <div className="truncate">{sess.topicTitle}</div>
+                                      <div className="text-[9px] font-mono-numbers text-slate-500 dark:text-slate-300">
+                                        {sess.startTime || 'Sin hora'} · {sess.durationHours}h
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+
+                                {daySR.map(({ analysis, milestone }) => (
+                                  <div
+                                    key={`mw-sr-${analysis.topic.id}-${milestone.cycle}`}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      startDraggingCalendarItem(e, {
+                                        kind: 'spaced_review',
+                                        subjectId: analysis.subject.id,
+                                        topicId: analysis.topic.id,
+                                        cycle: milestone.cycle,
+                                        sourceDateStr: day.dateStr,
+                                        topicTitle: analysis.topic.title,
+                                        subjectName: analysis.subject.name,
+                                        label: milestone.label,
+                                      });
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedItem(null);
+                                      setDraggedReview(null);
+                                      setDragOverSlot(null);
+                                    }}
+                                    style={getSubjectBlockStyle(
+                                      getSubjectColor(analysis.subject.id, analysis.subject.color),
+                                      'pill'
+                                    )}
+                                    className="px-1.5 py-0.5 rounded border text-[10px] font-semibold text-slate-800 dark:text-slate-100 truncate cursor-grab active:cursor-grabbing"
+                                  >
+                                    R{milestone.cycle} · {analysis.topic.title}
+                                  </div>
+                                ))}
+
+                                {dayTasks.map(({ task, subjectId, subjectName }) => (
+                                  <div
+                                    key={`mw-tk-${task.id}`}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      startDraggingCalendarItem(e, {
+                                        kind: 'task',
+                                        subjectId,
+                                        taskId: task.id,
+                                        taskTitle: task.title,
+                                        subjectName,
+                                        sourceDateStr: day.dateStr,
+                                        sourceHourStr: task.scheduledTime,
+                                      });
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedItem(null);
+                                      setDragOverSlot(null);
+                                    }}
+                                    style={getSubjectBlockStyle(getSubjectColor(subjectId), 'pill')}
+                                    className="px-1.5 py-0.5 rounded border text-[10px] font-semibold text-slate-800 dark:text-slate-100 truncate cursor-grab active:cursor-grabbing"
+                                  >
+                                    ✓ {task.title}
+                                  </div>
+                                ))}
+
+                                {sessions.length === 0 &&
+                                  daySR.length === 0 &&
+                                  dayTasks.length === 0 && (
+                                    <div className="text-[10px] text-slate-400 py-2 text-center">
+                                      Libre
+                                    </div>
+                                  )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Unified Selected Day Inspector (4 cols on lg) */}
@@ -4151,61 +7051,72 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 {selectedDayExams.map((ex, idx) => (
                   <div
                     key={idx}
-                    className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs"
+                    style={getSubjectBlockStyle(getSubjectColor(ex.subjectId, '#e11d48'), 'exam')}
+                    className="p-3 rounded-xl border text-xs"
                   >
-                    <div className="font-bold text-rose-900 dark:text-rose-200">
+                    <div className="font-bold text-slate-900 dark:text-slate-100">
                       🎯 Examen: {ex.exam.title}
                     </div>
-                    <div className="text-[11px] text-rose-700 dark:text-rose-300 mt-0.5">
+                    <div className="text-[11px] text-slate-700 dark:text-slate-300 mt-0.5">
                       {ex.subjectName} · Convocatoria {ex.exam.examType}
                     </div>
                   </div>
                 ))}
 
-                {selectedDayBlocked.map((b) => (
-                  <div
-                    key={b.id}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.effectAllowed = 'move';
-                      setDraggedItem({
-                        kind: 'blocked_event',
-                        eventId: b.id,
-                        title: b.title,
-                        sourceDateStr: selectedDayStr,
-                        sourceHourStr: b.startTime,
-                        durationHours: b.durationHours,
-                        isWeeklyObligation: b.isWeeklyObligation,
-                        sourceObligationId: b.sourceObligationId,
-                      });
-                    }}
-                    onDragEnd={() => {
-                      setDraggedItem(null);
-                      setDragOverSlot(null);
-                    }}
-                    className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs flex items-center justify-between cursor-grab active:cursor-grabbing"
-                    title="Arrastra a otro día del calendario para mover este bloqueo"
-                  >
-                    <div>
-                      <div className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1">
-                        <GripVertical className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span>
-                          {b.isWeeklyObligation ? '🔁 Rutina Semanal:' : '🚫 Plan:'} {b.title}
-                        </span>
-                      </div>
-                      <div className="text-[11px] font-mono-numbers text-amber-700 dark:text-amber-300 pl-4">
-                        {b.startTime} - {b.endTime} ({b.durationHours}h)
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteEffectiveBlockedItem(b)}
-                      className="text-amber-500 hover:text-rose-600 cursor-pointer"
-                      title="Eliminar bloqueo o rutina"
+                {selectedDayBlocked.map((b) => {
+                  const linkedColor =
+                    b.linkedSubjectId || b.subjectColor
+                      ? getSubjectColor(b.linkedSubjectId, b.subjectColor)
+                      : undefined;
+                  return (
+                    <div
+                      key={b.id}
+                      draggable
+                      onDragStart={(e) => {
+                        startDraggingCalendarItem(e, {
+                          kind: 'blocked_event',
+                          eventId: b.id,
+                          title: b.title,
+                          sourceDateStr: selectedDayStr,
+                          sourceHourStr: b.startTime,
+                          durationHours: b.durationHours,
+                          isWeeklyObligation: b.isWeeklyObligation,
+                          sourceObligationId: b.sourceObligationId,
+                        });
+                      }}
+                      onDragEnd={() => {
+                        setDraggedItem(null);
+                        setDragOverSlot(null);
+                      }}
+                      style={linkedColor ? getSubjectBlockStyle(linkedColor, 'session') : undefined}
+                      className={`p-3 rounded-xl border text-xs flex items-center justify-between cursor-grab active:cursor-grabbing ${
+                        linkedColor
+                          ? 'text-slate-900 dark:text-slate-100'
+                          : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800'
+                      }`}
+                      title="Arrastra a otro día del calendario para mover este bloqueo"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
+                      <div>
+                        <div className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1">
+                          <GripVertical className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                          <span>
+                            {b.isWeeklyObligation ? '🔁 Rutina Semanal:' : '🚫 Plan:'} {b.title}
+                          </span>
+                        </div>
+                        <div className="text-[11px] font-mono-numbers text-slate-600 dark:text-slate-300 pl-4">
+                          {b.startTime} - {b.endTime} ({b.durationHours}h)
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteEffectiveBlockedItem(b, selectedDayStr)}
+                        className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                        title="Eliminar bloqueo o rutina"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
 
                 {/* 2. Bloques del Plan de Estudio Inteligente (Draggable + Editable Start Time) */}
                 <div className="space-y-2">
@@ -4229,14 +7140,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                     const effectiveEnd =
                       sess.endTime || calculateAutoEndTime(effectiveStart, sess.durationHours);
                     const isExtraSession = sess.id.startsWith('sess-extra-');
+                    const subColor = getSubjectColor(sess.subjectId, sess.subjectColor);
 
                     return (
                       <div
                         key={sess.id}
                         draggable
                         onDragStart={(e) => {
-                          e.dataTransfer.effectAllowed = 'move';
-                          setDraggedItem({
+                          startDraggingCalendarItem(e, {
                             kind: 'topic_session',
                             subjectId: sess.subjectId,
                             topicId: sess.topicId,
@@ -4251,13 +7162,18 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           setDraggedItem(null);
                           setDragOverSlot(null);
                         }}
-                        className="p-3 rounded-xl border border-blue-200 dark:border-blue-800/70 bg-blue-50/40 dark:bg-blue-950/20 text-xs space-y-2 cursor-grab active:cursor-grabbing"
+                        style={getSubjectBlockStyle(subColor, 'session')}
+                        className="p-3 rounded-xl border text-xs space-y-2 cursor-grab active:cursor-grabbing"
                         title="Cambia la hora de inicio o arrastra este tema a otra casilla"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-1">
-                            <GripVertical className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                            {sess.subjectName}
+                          <span className="font-bold text-slate-800 dark:text-slate-100 truncate inline-flex items-center gap-1.5">
+                            <GripVertical className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: subColor }}
+                            />
+                            <span className="truncate">{sess.subjectName}</span>
                           </span>
                           <div className="flex items-center gap-1.5 shrink-0">
                             <span className="font-mono-numbers text-blue-700 dark:text-blue-300 font-semibold text-[11px]">
@@ -4320,6 +7236,45 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             <span>{sess.pagesAllocation}</span>
                           </div>
                         )}
+                        {(sess.isIntradayRescheduled || sess.isPartialRemainder) && (
+                          <div className="flex flex-wrap items-center gap-1">
+                            {sess.isIntradayRescheduled && (
+                              <span className="px-1.5 py-0.5 rounded bg-cyan-100 dark:bg-cyan-950 text-cyan-800 dark:text-cyan-200 text-[10px] font-bold">
+                                🔄 Reajustado ({sess.originalStartTime || '08:00'} → {effectiveStart})
+                              </span>
+                            )}
+                            {sess.isPartialRemainder && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200 text-[10px] font-bold">
+                                ⚡ Restante parcial ({sess.partialHoursCompleted}h ya hechas)
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-1.5 pt-1">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenPartialSessionModal(sess);
+                            }}
+                            className="flex-1 py-1.5 px-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[10px] font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1"
+                            title="Marcar sesión como hecha parcialmente y reubicar lo que falte en otro hueco libre"
+                          >
+                            <span>½ Hecho parcial</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCompleteFullStudySession(sess);
+                            }}
+                            className="py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-extrabold transition-colors cursor-pointer flex items-center justify-center gap-1"
+                            title="Marcar sesión como completada"
+                          >
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Hecho</span>
+                          </button>
+                        </div>
                         {onStartPomodoro && (
                           <button
                             type="button"
@@ -4371,22 +7326,22 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             setDraggedReview(null);
                             setDragOverSlot(null);
                           }}
-                          className={`p-3 rounded-xl border transition-all space-y-2.5 cursor-grab active:cursor-grabbing ${
-                            isCompleted
-                              ? 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800/60'
-                              : isOverdue
-                              ? 'bg-rose-50/40 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800/70'
-                              : 'bg-indigo-50/40 dark:bg-indigo-950/20 border-indigo-200 dark:border-indigo-800/70'
-                          }`}
+                          style={getSubjectBlockStyle(
+                            getSubjectColor(subject.id, subject.color),
+                            'review'
+                          )}
+                          className="p-3 rounded-xl border transition-all space-y-2.5 cursor-grab active:cursor-grabbing"
                           title="Arrastra este repaso a otro día del calendario mensual"
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <GripVertical className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                <GripVertical className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                                 <span
-                                  className="w-2 h-2 rounded-full shrink-0"
-                                  style={{ backgroundColor: subject.color || '#6366f1' }}
+                                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                                  style={{
+                                    backgroundColor: getSubjectColor(subject.id, subject.color),
+                                  }}
                                 />
                                 <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300 truncate">
                                   {subject.name}
@@ -4501,7 +7456,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           setDraggedItem(null);
                           setDragOverSlot(null);
                         }}
-                        className="flex items-start gap-2 p-2 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60 cursor-grab active:cursor-grabbing text-xs"
+                        style={getSubjectBlockStyle(getSubjectColor(subjectId), 'task')}
+                        className="flex items-start gap-2 p-2 rounded-xl border hover:opacity-95 cursor-grab active:cursor-grabbing text-xs"
                         title="Arrastra esta tarea a otro día del calendario mensual"
                       >
                         <GripVertical className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
@@ -4564,213 +7520,111 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             </div>
           </div>
         </div>
-      )}
+        </div>
+        );
+      })()}
 
       {/* VIEW 2: WEEKLY UNIFIED CALENDAR */}
-      {calendarView === 'weekly' && (
-        <div className="space-y-4">
-          {/* Bandeja Interactiva de Temas y Tareas para Arrastrar a Bloques de Tiempo */}
-          {showDraggableTray && (
-            <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-blue-200/80 dark:border-indigo-900/60 shadow-2xs space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300 text-[10px] font-extrabold uppercase tracking-wider">
-                    Drag & Drop a Bloques Horarios
-                  </span>
-                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    Arrastra cualquier tema o tarea hacia una casilla de hora (08:00–21:00) o muévelos entre bloques
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Al soltar en un bloque horario se actualiza <code className="font-mono font-bold text-indigo-600 dark:text-indigo-400">blockedEvents</code> automáticamente
-                </span>
-              </div>
+      {calendarView === 'weekly' && (() => {
+        const weeklyStudyHoursTotal =
+          Math.round(
+            weekDates.reduce(
+              (sum, dStr) =>
+                sum +
+                (sessionsByDate[dStr] || []).reduce((acc, s) => acc + s.durationHours, 0),
+              0
+            ) * 10
+          ) / 10;
+        const weeklySessionsCount = weekDates.reduce(
+          (sum, dStr) => sum + (sessionsByDate[dStr] || []).length,
+          0
+        );
+        const weeklyReviewsCount = weekDates.reduce(
+          (sum, dStr) => sum + (srReviewsByDate[dStr] || []).length,
+          0
+        );
+        const weeklyTasksAndExamsCount = weekDates.reduce(
+          (sum, dStr) =>
+            sum + (tasksByDate[dStr] || []).length + (examsByDate[dStr] || []).length,
+          0
+        );
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {/* Draggable Study Topics List */}
-                <div className="p-3 rounded-xl bg-blue-50/40 dark:bg-slate-800/60 border border-blue-100 dark:border-slate-700 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-bold text-blue-900 dark:text-blue-300">
-                    <span className="inline-flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Temas de Estudio Arrastrables</span>
-                    </span>
-                    <span className="text-[10px] text-blue-700 dark:text-blue-400 font-mono-numbers">
-                      {relevantSubjects.reduce((acc, s) => acc + s.topics.length, 0)} temas
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 overflow-x-auto pb-1.5 pt-0.5">
-                    {relevantSubjects.flatMap((sub) =>
-                      sub.topics.map((top) => {
-                        const syncedBlock = blockedEvents.find(
-                          (b) =>
-                            b.id === `block-topic-${top.id}` ||
-                            (b.linkedTopicId === top.id && b.linkedItemType === 'topic')
-                        );
-                        const scheduledDateLabel = syncedBlock?.date || top.scheduledDate;
-                        const scheduledHourLabel = syncedBlock?.startTime || top.scheduledTime;
+        return (
+        <div className="space-y-3">
+          {/* Resumen Semanal limpio y Selector de Sub-vista */}
+          <div className="bg-white dark:bg-slate-900 px-4 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-600 dark:text-slate-300 font-mono-numbers">
+              <span className="font-bold text-slate-900 dark:text-white font-sans">
+                Resumen de la semana
+              </span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span className="font-semibold text-blue-700 dark:text-blue-400">
+                {weeklyStudyHoursTotal}h planificadas
+              </span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{weeklySessionsCount} sesiones</span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{weeklyReviewsCount} repasos</span>
+              <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">·</span>
+              <span>{weeklyTasksAndExamsCount} entregas y exámenes</span>
+            </div>
 
-                        return (
-                          <div
-                            key={`tray-top-${top.id}`}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = 'move';
-                              setDraggedItem({
-                                kind: 'topic_session',
-                                subjectId: sub.id,
-                                topicId: top.id,
-                                title: top.title,
-                                topicTitle: top.title,
-                                subjectName: sub.name,
-                                sourceDateStr: scheduledDateLabel || selectedDayStr,
-                                sourceHourStr: scheduledHourLabel,
-                                durationHours: Math.max(1, Math.min(2, Math.round(top.estimatedHours || 1))),
-                              });
-                            }}
-                            onDragEnd={() => {
-                              setDraggedItem(null);
-                              setDragOverSlot(null);
-                            }}
-                            className="shrink-0 max-w-[230px] p-2 rounded-xl bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-800 hover:border-blue-400 shadow-2xs cursor-grab active:cursor-grabbing space-y-1 transition-all"
-                            title={`Arrastra "${top.title}" (${sub.name}) a cualquier bloque de tiempo de la semana`}
-                          >
-                            <div className="flex items-center justify-between gap-1.5 text-[10px]">
-                              <span className="font-bold text-blue-700 dark:text-blue-300 truncate inline-flex items-center gap-1">
-                                <GripVertical className="w-3 h-3 text-blue-400 shrink-0" />
-                                <span
-                                  className="w-2 h-2 rounded-full shrink-0"
-                                  style={{ backgroundColor: sub.color || '#3b82f6' }}
-                                />
-                                <span className="truncate">{sub.name}</span>
-                              </span>
-                              {syncedBlock && (
-                                <span className="px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-mono-numbers text-[9px] font-bold shrink-0">
-                                  🔒 {syncedBlock.startTime}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] font-bold text-slate-900 dark:text-white truncate">
-                              📖 {top.title}
-                            </div>
-                            <div className="text-[9px] text-slate-500 dark:text-slate-400 font-mono-numbers flex items-center justify-between">
-                              <span>
-                                {scheduledDateLabel
-                                  ? `${scheduledDateLabel.slice(5)}${scheduledHourLabel ? ` · ${scheduledHourLabel}` : ''}`
-                                  : 'Sin bloque fijo'}
-                              </span>
-                              <span>{top.estimatedHours || 1}h</span>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                    {relevantSubjects.every((s) => s.topics.length === 0) && (
-                      <span className="text-xs text-slate-400 py-2">
-                        No hay temas creados en las asignaturas seleccionadas.
-                      </span>
-                    )}
-                  </div>
-                </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleQuickDownloadWeeklyIcs}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/70 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-950 text-indigo-700 dark:text-indigo-300 text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                title="Descargar directamente el archivo .ics de esta semana para Google Calendar o Outlook"
+              >
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>{weeklyIcsStatus || 'Descargar .ics'}</span>
+              </button>
 
-                {/* Draggable Tasks List */}
-                <div className="p-3 rounded-xl bg-teal-50/40 dark:bg-slate-800/60 border border-teal-100 dark:border-slate-700 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-bold text-teal-900 dark:text-teal-300">
-                    <span className="inline-flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-600" />
-                      <span>Tareas y Entregas Arrastrables</span>
-                    </span>
-                    <span className="text-[10px] text-teal-700 dark:text-teal-400 font-mono-numbers">
-                      {relevantSubjects.reduce((acc, s) => acc + s.tasks.length, 0)} tareas
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 overflow-x-auto pb-1.5 pt-0.5">
-                    {relevantSubjects.flatMap((sub) =>
-                      sub.tasks.map((tk) => {
-                        const syncedTaskBlock = blockedEvents.find(
-                          (b) => b.id === `block-task-${tk.id}` || b.linkedTaskId === tk.id
-                        );
-                        const taskHour = syncedTaskBlock?.startTime || tk.scheduledTime || tk.startTime;
-                        return (
-                          <div
-                            key={`tray-task-${tk.id}`}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = 'move';
-                              setDraggedItem({
-                                kind: 'task',
-                                subjectId: sub.id,
-                                taskId: tk.id,
-                                title: tk.title,
-                                taskTitle: tk.title,
-                                subjectName: sub.name,
-                                sourceDateStr: tk.dueDate || selectedDayStr,
-                                sourceHourStr: taskHour,
-                              });
-                            }}
-                            onDragEnd={() => {
-                              setDraggedItem(null);
-                              setDragOverSlot(null);
-                            }}
-                            className="shrink-0 max-w-[230px] p-2 rounded-xl bg-white dark:bg-slate-900 border border-teal-200 dark:border-teal-800 hover:border-teal-400 shadow-2xs cursor-grab active:cursor-grabbing space-y-1 transition-all"
-                            title={`Arrastra la tarea "${tk.title}" (${sub.name}) a cualquier bloque de tiempo de la semana`}
-                          >
-                            <div className="flex items-center justify-between gap-1.5 text-[10px]">
-                              <span className="font-bold text-teal-700 dark:text-teal-300 truncate inline-flex items-center gap-1">
-                                <GripVertical className="w-3 h-3 text-teal-400 shrink-0" />
-                                <span
-                                  className="w-2 h-2 rounded-full shrink-0"
-                                  style={{ backgroundColor: sub.color || '#14b8a6' }}
-                                />
-                                <span className="truncate">{sub.name}</span>
-                              </span>
-                              {syncedTaskBlock && (
-                                <span className="px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-mono-numbers text-[9px] font-bold shrink-0">
-                                  🔒 {syncedTaskBlock.startTime}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] font-bold text-slate-900 dark:text-white truncate">
-                              ✓ {tk.title}
-                            </div>
-                            <div className="text-[9px] text-slate-500 dark:text-slate-400 font-mono-numbers flex items-center justify-between">
-                              <span>
-                                {tk.dueDate
-                                  ? `${tk.dueDate.slice(5)}${taskHour ? ` · ${taskHour}` : ''}`
-                                  : 'Sin fecha'}
-                              </span>
-                              <span className="uppercase">{tk.priority}</span>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                    {relevantSubjects.every((s) => s.tasks.length === 0) && (
-                      <span className="text-xs text-slate-400 py-2">
-                        No hay tareas pendientes en las asignaturas seleccionadas.
-                      </span>
-                    )}
-                  </div>
-                </div>
+              <div className="inline-flex items-center gap-1 p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setTimeBlockMode(true)}
+                  className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    timeBlockMode
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  Cuadrícula Horaria
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTimeBlockMode(false)}
+                  className={`px-2.5 py-1 rounded-md font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    !timeBlockMode
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  Por Días
+                </button>
               </div>
             </div>
-          )}
+          </div>
+
+          {/* (Bandeja de Temas y Tareas compartida se muestra arriba tanto en Semanal como en Mensual) */}
 
           {timeBlockMode ? (
-            /* WEEKLY TIME BLOCKING TIMELINE VIEW + SPACED REPETITION ROW */
+            /* WEEKLY TIME BLOCKING TIMELINE VIEW (56px hour rail + 7 clean equal day columns) */
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xs overflow-x-auto">
-              <div className="min-w-[880px]">
-                {/* Header with week days (Also drop targets for moving to a day) */}
-                <div className="grid grid-cols-8 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 text-xs">
-                  <div className="p-3 text-slate-400 font-bold text-center border-r border-slate-200 dark:border-slate-800">
-                    Hora / Día
+              <div className="min-w-[980px]">
+                {/* Header fijo de días */}
+                <div className="grid grid-cols-[56px_repeat(7,minmax(130px,1fr))] border-b border-slate-200 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-800/60 sticky top-0 z-10 backdrop-blur-xs">
+                  <div className="py-3 px-1.5 text-[10px] font-semibold text-slate-400 text-right border-r border-slate-200 dark:border-slate-800 flex items-center justify-end">
+                    Hora
                   </div>
                   {weekDates.map((dateStr) => {
                     const d = parseLocalDate(dateStr);
                     const dayName = d.toLocaleDateString('es-ES', { weekday: 'short' });
                     const isToday = dateStr === todayStr;
+                    const isSelectedDay = dateStr === selectedDayStr;
                     const sessions = showStudyLayer ? sessionsByDate[dateStr] || [] : [];
                     const srList = showRepasoLayer ? srReviewsByDate[dateStr] || [] : [];
-                    const blocked = getEffectiveBlockedForDate(dateStr);
                     const totalStudyHours =
                       Math.round(
                         sessions.reduce((acc, s) => acc + s.durationHours, 0) * 10
@@ -4802,35 +7656,45 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           setDragOverSlot(null);
                           handleDropCalendarItem(dateStr);
                         }}
-                        className={`p-3 text-center cursor-pointer transition-colors border-r border-slate-200 dark:border-slate-800 last:border-r-0 ${
+                        className={`px-2.5 py-2.5 cursor-pointer transition-colors border-r border-slate-200 dark:border-slate-800 last:border-r-0 flex flex-col items-center gap-1 ${
                           isHeaderDrop
                             ? 'bg-indigo-100 dark:bg-indigo-950/70 ring-2 ring-inset ring-indigo-500'
                             : isToday
-                            ? 'bg-blue-50/70 dark:bg-blue-950/30 font-bold'
-                            : ''
+                            ? 'bg-blue-50/80 dark:bg-blue-950/35'
+                            : isSelectedDay
+                            ? 'bg-slate-100/70 dark:bg-slate-800/80'
+                            : 'hover:bg-slate-100/50 dark:hover:bg-slate-800/40'
                         }`}
                       >
-                        <div className="uppercase text-[10px] tracking-wider text-slate-500 font-bold">
-                          {dayName}
+                        <div className="flex items-center gap-1.5">
+                          <span className="uppercase text-[10px] tracking-wider text-slate-500 dark:text-slate-400 font-bold">
+                            {dayName}
+                          </span>
+                          <span
+                            className={`w-6 h-6 rounded-full inline-flex items-center justify-center text-xs font-bold font-mono-numbers ${
+                              isToday
+                                ? 'bg-blue-600 text-white'
+                                : 'text-slate-900 dark:text-white'
+                            }`}
+                          >
+                            {d.getDate()}
+                          </span>
                         </div>
-                        <div className="text-sm font-bold text-slate-900 dark:text-white font-mono-numbers mt-0.5">
-                          {d.getDate()}
-                        </div>
-                        <div className="flex items-center justify-center flex-wrap gap-1.5 mt-1 text-[10px] text-slate-400">
-                          {totalStudyHours > 0 && (
-                            <span className="text-blue-700 dark:text-blue-400 font-semibold">
+                        <div className="text-[10px] font-mono-numbers text-slate-500 dark:text-slate-400 h-4 flex items-center gap-1.5">
+                          {totalStudyHours > 0 ? (
+                            <span className="font-semibold text-blue-700 dark:text-blue-400">
                               {totalStudyHours}h
                             </span>
+                          ) : (
+                            <span>0h</span>
                           )}
                           {srList.length > 0 && (
-                            <span className="text-indigo-700 dark:text-indigo-400 font-semibold">
-                              🧠 {srList.length}
-                            </span>
-                          )}
-                          {blocked.length > 0 && (
-                            <span className="text-amber-700 font-semibold">
-                              🚫 {blocked.length}
-                            </span>
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span className="font-semibold text-indigo-700 dark:text-indigo-400">
+                                {srList.length} rep.
+                              </span>
+                            </>
                           )}
                         </div>
                       </div>
@@ -4838,27 +7702,36 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                   })}
                 </div>
 
-                {/* Dedicated Spaced Repetition SM-2 Row + Tasks at the Top of the Weekly Grid */}
+                {/* Franja Superior Ordenada: Todo el día (Exámenes, Repasos sin hora y Tareas sin hora) */}
                 {(showRepasoLayer || showExamsTasksLayer) && (
-                  <div className="grid grid-cols-8 border-b border-indigo-100 dark:border-indigo-900/50 bg-indigo-50/30 dark:bg-indigo-950/20">
-                    <div className="p-2.5 text-center text-[10px] font-bold text-indigo-700 dark:text-indigo-300 border-r border-slate-200 dark:border-slate-800 flex flex-col items-center justify-center gap-1.5">
-                      <Brain className="w-3.5 h-3.5" />
-                      <span>Repasos y Tareas</span>
-                      <span className="text-[9px] font-normal text-indigo-600/80 dark:text-indigo-300/80 leading-tight">
-                        Arrastra a cualquier día u hora
+                  <div className="grid grid-cols-[56px_repeat(7,minmax(130px,1fr))] border-b border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-900/40">
+                    <div className="p-2 text-right border-r border-slate-200 dark:border-slate-800 flex flex-col items-end justify-center gap-1">
+                      <span className="text-[10px] font-semibold text-slate-500 leading-tight">
+                        Hitos
                       </span>
                       <button
                         type="button"
                         onClick={handleFindFreeSlotsForAllReviews}
-                        className="mt-0.5 px-2 py-1 rounded-md bg-purple-600 hover:bg-purple-700 text-white font-bold text-[9px] inline-flex items-center gap-1 cursor-pointer shadow-2xs"
+                        className="p-1 rounded-md text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-950/60 cursor-pointer"
+                        title="Ubicar automáticamente los repasos pendientes en horas libres"
                       >
-                        <Wand2 className="w-2.5 h-2.5" />
-                        <span>Buscar hueco</span>
+                        <Wand2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
                     {weekDates.map((dateStr) => {
-                      const srList = showRepasoLayer ? srReviewsByDate[dateStr] || [] : [];
-                      const dayTasks = showExamsTasksLayer ? tasksByDate[dateStr] || [] : [];
+                      const isToday = dateStr === todayStr;
+                      const unscheduledSR = showRepasoLayer
+                        ? (srReviewsByDate[dateStr] || []).filter(
+                            ({ analysis }) => !getReviewScheduledTime(analysis.topic, dateStr)
+                          )
+                        : [];
+                      const unscheduledTasks = showExamsTasksLayer
+                        ? (tasksByDate[dateStr] || []).filter(
+                            ({ task }) => !(task.scheduledTime || task.startTime)
+                          )
+                        : [];
+                      const dayExams = showExamsTasksLayer ? examsByDate[dateStr] || [] : [];
+
                       return (
                         <div
                           key={dateStr}
@@ -4872,12 +7745,1309 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             setDragOverSlot(null);
                             handleDropCalendarItem(dateStr);
                           }}
-                          className="p-1.5 border-r border-slate-100 dark:border-slate-800 last:border-r-0 space-y-1.5"
+                          className={`p-1.5 border-r border-slate-200/70 dark:border-slate-800 last:border-r-0 space-y-1 min-h-[42px] ${
+                            isToday ? 'bg-blue-50/20 dark:bg-blue-950/10' : ''
+                          }`}
                         >
-                          {srList.map(({ analysis, milestone }) => {
-                            const scheduledHour = getReviewScheduledTime(
-                              analysis.topic,
-                              dateStr
+                          {/* Exámenes del día */}
+                          {dayExams.map((ex, idx) => (
+                            <div
+                              key={`wk-ex-${idx}`}
+                              className="px-2 py-1 rounded-md bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-[10px] text-rose-900 dark:text-rose-200 font-semibold truncate"
+                              title={`Examen: ${ex.exam.title}`}
+                            >
+                              Examen: {ex.exam.title}
+                            </div>
+                          ))}
+
+                          {/* Repasos SM-2 sin hora fija asignada */}
+                          {unscheduledSR.map(({ analysis, milestone }) => (
+                            <div
+                              key={`${analysis.topic.id}-${milestone.cycle}`}
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = 'move';
+                                const payload: DraggedCalendarItem = {
+                                  kind: 'spaced_review',
+                                  subjectId: analysis.subject.id,
+                                  topicId: analysis.topic.id,
+                                  cycle: milestone.cycle,
+                                  sourceDateStr: dateStr,
+                                  topicTitle: analysis.topic.title,
+                                  subjectName: analysis.subject.name,
+                                  label: milestone.label,
+                                };
+                                setDraggedItem(payload);
+                                setDraggedReview(payload);
+                              }}
+                              onDragEnd={() => {
+                                setDraggedItem(null);
+                                setDraggedReview(null);
+                                setDragOverSlot(null);
+                              }}
+                              className="px-2 py-1 rounded-md bg-white dark:bg-slate-800 border border-indigo-200 dark:border-indigo-800 hover:border-indigo-400 text-[10px] space-y-1 cursor-grab active:cursor-grabbing"
+                              title="Arrastra a una hora o asigna hueco libre"
+                            >
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="font-bold text-indigo-700 dark:text-indigo-300 font-mono-numbers truncate">
+                                  {milestone.label}
+                                </span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleFindFreeSlotForSingleReview(analysis, dateStr);
+                                    }}
+                                    className="text-purple-600 hover:text-purple-800 dark:text-purple-400 cursor-pointer"
+                                    title="Buscar hora libre"
+                                  >
+                                    <Clock className="w-3 h-3" />
+                                  </button>
+                                  {milestone.status !== 'completed' ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRecordReview(analysis, 'bien')}
+                                      className="text-emerald-600 hover:text-emerald-800 font-bold cursor-pointer"
+                                      title="Marcar repaso completado"
+                                    >
+                                      <Check className="w-3 h-3" />
+                                    </button>
+                                  ) : (
+                                    <Check className="w-3 h-3 text-emerald-600" />
+                                  )}
+                                </div>
+                              </div>
+                              <div className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                                {analysis.topic.title}
+                              </div>
+                            </div>
+                          ))}
+
+                          {/* Tareas del día sin hora asignada */}
+                          {unscheduledTasks.map(({ task, subjectId, subjectName }) => (
+                            <div
+                              key={task.id}
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = 'move';
+                                setDraggedItem({
+                                  kind: 'task',
+                                  subjectId,
+                                  taskId: task.id,
+                                  taskTitle: task.title,
+                                  subjectName,
+                                  sourceDateStr: dateStr,
+                                });
+                              }}
+                              onDragEnd={() => {
+                                setDraggedItem(null);
+                                setDragOverSlot(null);
+                              }}
+                              className="px-2 py-1 rounded-md bg-teal-50/80 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 text-[10px] text-teal-900 dark:text-teal-200 flex items-center justify-between gap-1 cursor-grab active:cursor-grabbing"
+                              title="Arrastra esta tarea a una hora concreta del calendario"
+                            >
+                              <span className={`truncate font-medium ${task.completed ? 'line-through opacity-60' : ''}`}>
+                                {task.title}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Filas Horarias Alineadas con Bloques Continuos Multi-Hora */}
+                {(() => {
+                  const HOUR_ROW_HEIGHT = 68;
+                  const minHour = timelineHours[0] ?? 8;
+                  const maxHourEnd = (timelineHours[timelineHours.length - 1] ?? 22) + 1;
+                  const timelineStartMin = minHour * 60;
+                  const timelineEndMin = maxHourEnd * 60;
+                  const totalTimelineHeight = timelineHours.length * HOUR_ROW_HEIGHT;
+
+                  const parseTimeStrToMinutes = (
+                    tStr: string | undefined,
+                    fallbackMin: number
+                  ): number => {
+                    if (!tStr || !tStr.includes(':')) return fallbackMin;
+                    const [hStr, mStr] = tStr.split(':');
+                    const h = parseInt(hStr, 10);
+                    const m = parseInt(mStr, 10);
+                    if (Number.isNaN(h)) return fallbackMin;
+                    return Math.max(0, Math.min(24 * 60, h * 60 + (Number.isNaN(m) ? 0 : m)));
+                  };
+
+                  type WeeklyTimedItem =
+                    | {
+                        id: string;
+                        kind: 'blocked';
+                        startMin: number;
+                        endMin: number;
+                        clampedStartMin: number;
+                        clampedEndMin: number;
+                        colIndex: number;
+                        totalCols: number;
+                        blockedItem: EffectiveBlockedCalendarItem;
+                      }
+                    | {
+                        id: string;
+                        kind: 'session';
+                        startMin: number;
+                        endMin: number;
+                        clampedStartMin: number;
+                        clampedEndMin: number;
+                        colIndex: number;
+                        totalCols: number;
+                        session: ScheduledStudySession;
+                        effectiveStart: string;
+                        effectiveEnd: string;
+                      }
+                    | {
+                        id: string;
+                        kind: 'review';
+                        startMin: number;
+                        endMin: number;
+                        clampedStartMin: number;
+                        clampedEndMin: number;
+                        colIndex: number;
+                        totalCols: number;
+                        review: {
+                          analysis: TopicReviewAnalysis;
+                          milestone: ProjectedReviewMilestone;
+                        };
+                        revTime: string;
+                      }
+                    | {
+                        id: string;
+                        kind: 'task';
+                        startMin: number;
+                        endMin: number;
+                        clampedStartMin: number;
+                        clampedEndMin: number;
+                        colIndex: number;
+                        totalCols: number;
+                        taskEntry: (typeof tasksByDate)[string][number];
+                        taskTime: string;
+                        syncedTaskBlock?: EffectiveBlockedCalendarItem;
+                      };
+
+                  const assignOverlapColumns = (items: WeeklyTimedItem[]): WeeklyTimedItem[] => {
+                    if (items.length === 0) return items;
+                    const sorted = [...items].sort((a, b) => {
+                      if (a.clampedStartMin !== b.clampedStartMin) {
+                        return a.clampedStartMin - b.clampedStartMin;
+                      }
+                      return b.clampedEndMin - a.clampedEndMin;
+                    });
+
+                    // Agrupar en clústeres conexos de solapamiento
+                    const clusters: WeeklyTimedItem[][] = [];
+                    let currentCluster: WeeklyTimedItem[] = [];
+                    let clusterMaxEnd = -1;
+
+                    sorted.forEach((item) => {
+                      if (currentCluster.length === 0 || item.clampedStartMin < clusterMaxEnd) {
+                        currentCluster.push(item);
+                        clusterMaxEnd = Math.max(clusterMaxEnd, item.clampedEndMin);
+                      } else {
+                        clusters.push(currentCluster);
+                        currentCluster = [item];
+                        clusterMaxEnd = item.clampedEndMin;
+                      }
+                    });
+                    if (currentCluster.length > 0) clusters.push(currentCluster);
+
+                    clusters.forEach((cluster) => {
+                      const colEndMins: number[] = [];
+                      cluster.forEach((item) => {
+                        let assignedCol = colEndMins.findIndex(
+                          (endM) => endM <= item.clampedStartMin
+                        );
+                        if (assignedCol === -1) {
+                          assignedCol = colEndMins.length;
+                          colEndMins.push(item.clampedEndMin);
+                        } else {
+                          colEndMins[assignedCol] = item.clampedEndMin;
+                        }
+                        item.colIndex = assignedCol;
+                      });
+                      const totalCols = Math.max(1, colEndMins.length);
+                      cluster.forEach((item) => {
+                        item.totalCols = totalCols;
+                      });
+                    });
+
+                    return sorted;
+                  };
+
+                  return (
+                    <div className="grid grid-cols-[56px_repeat(7,minmax(130px,1fr))]">
+                      {/* Columna izquierda de horas */}
+                      <div
+                        className="border-r border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-900/40 divide-y divide-slate-100 dark:divide-slate-800/80 select-none"
+                        style={{ height: `${totalTimelineHeight}px` }}
+                      >
+                        {timelineHours.map((hour) => {
+                          const hourStr = `${hour.toString().padStart(2, '0')}:00`;
+                          return (
+                            <div
+                              key={hour}
+                              className="py-2 pr-2.5 text-right text-[11px] font-mono-numbers text-slate-400 dark:text-slate-500 box-border"
+                              style={{ height: `${HOUR_ROW_HEIGHT}px` }}
+                            >
+                              {hourStr}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* 7 Columnas de días con bloques continuos posicionados */}
+                      {weekDates.map((dateStr) => {
+                        const isToday = dateStr === todayStr;
+                        const sessions = showStudyLayer ? sessionsByDate[dateStr] || [] : [];
+                        const blocked = getEffectiveBlockedForDate(dateStr);
+
+                        const dayReviews = showRepasoLayer
+                          ? (srReviewsByDate[dateStr] || [])
+                              .map((entry) => ({
+                                ...entry,
+                                revTime: getReviewScheduledTime(entry.analysis.topic, dateStr),
+                              }))
+                              .filter((entry): entry is typeof entry & { revTime: string } =>
+                                Boolean(entry.revTime)
+                              )
+                          : [];
+
+                        const dayTasks = showExamsTasksLayer
+                          ? (tasksByDate[dateStr] || [])
+                              .map((entry) => ({
+                                entry,
+                                taskTime: entry.task.scheduledTime || entry.task.startTime,
+                              }))
+                              .filter(
+                                (x): x is typeof x & { taskTime: string } => Boolean(x.taskTime)
+                              )
+                          : [];
+
+                        // Deduplicar bloqueos vinculados a sesiones, tareas o repasos ya representados
+                        const filteredBlocked = blocked.filter((b) => {
+                          const renderedAsSession = sessions.some(
+                            (s) =>
+                              b.linkedTopicId === s.topicId ||
+                              b.id === `block-topic-${s.topicId}`
+                          );
+                          if (renderedAsSession) return false;
+
+                          const renderedAsTask = dayTasks.some(
+                            ({ entry }) =>
+                              b.linkedTaskId === entry.task.id ||
+                              b.id === `block-task-${entry.task.id}`
+                          );
+                          if (renderedAsTask) return false;
+
+                          const renderedAsReview = dayReviews.some(
+                            ({ analysis }) =>
+                              (b.linkedTopicId === analysis.topic.id &&
+                                b.linkedItemType === 'review') ||
+                              b.id === `block-review-${analysis.topic.id}`
+                          );
+                          if (renderedAsReview) return false;
+
+                          return true;
+                        });
+
+                        const rawItems: WeeklyTimedItem[] = [];
+
+                        filteredBlocked.forEach((b) => {
+                          const sMin = parseTimeStrToMinutes(b.startTime, timelineStartMin);
+                          const eMinRaw = parseTimeStrToMinutes(
+                            b.endTime,
+                            sMin + Math.max(30, Math.round((b.durationHours || 1) * 60))
+                          );
+                          const eMin = Math.max(sMin + 30, eMinRaw);
+                          const clampedStartMin = Math.max(timelineStartMin, sMin);
+                          const clampedEndMin = Math.min(timelineEndMin, eMin);
+                          if (clampedEndMin <= clampedStartMin) return;
+
+                          rawItems.push({
+                            id: `blk-${b.id}`,
+                            kind: 'blocked',
+                            startMin: sMin,
+                            endMin: eMin,
+                            clampedStartMin,
+                            clampedEndMin,
+                            colIndex: 0,
+                            totalCols: 1,
+                            blockedItem: b,
+                          });
+                        });
+
+                        sessions.forEach((sess) => {
+                          if (!sess.startTime) return;
+                          const effectiveStart = sess.startTime;
+                          const effectiveEnd =
+                            sess.endTime ||
+                            calculateAutoEndTime(effectiveStart, sess.durationHours);
+                          const sMin = parseTimeStrToMinutes(effectiveStart, timelineStartMin);
+                          const eMin = Math.max(
+                            sMin + 30,
+                            parseTimeStrToMinutes(
+                              effectiveEnd,
+                              sMin + Math.max(30, Math.round((sess.durationHours || 1) * 60))
+                            )
+                          );
+                          const clampedStartMin = Math.max(timelineStartMin, sMin);
+                          const clampedEndMin = Math.min(timelineEndMin, eMin);
+                          if (clampedEndMin <= clampedStartMin) return;
+
+                          rawItems.push({
+                            id: `sess-${sess.id}`,
+                            kind: 'session',
+                            startMin: sMin,
+                            endMin: eMin,
+                            clampedStartMin,
+                            clampedEndMin,
+                            colIndex: 0,
+                            totalCols: 1,
+                            session: sess,
+                            effectiveStart,
+                            effectiveEnd,
+                          });
+                        });
+
+                        dayReviews.forEach(({ analysis, milestone, revTime }) => {
+                          const sMin = parseTimeStrToMinutes(revTime, timelineStartMin);
+                          const eMin = sMin + 45;
+                          const clampedStartMin = Math.max(timelineStartMin, sMin);
+                          const clampedEndMin = Math.min(timelineEndMin, eMin);
+                          if (clampedEndMin <= clampedStartMin) return;
+
+                          rawItems.push({
+                            id: `rev-${analysis.topic.id}-${milestone.cycle}`,
+                            kind: 'review',
+                            startMin: sMin,
+                            endMin: eMin,
+                            clampedStartMin,
+                            clampedEndMin,
+                            colIndex: 0,
+                            totalCols: 1,
+                            review: { analysis, milestone },
+                            revTime,
+                          });
+                        });
+
+                        dayTasks.forEach(({ entry, taskTime }) => {
+                          const sMin = parseTimeStrToMinutes(taskTime, timelineStartMin);
+                          const durMins = Math.max(30, entry.task.durationMinutes || 60);
+                          const eMin = entry.task.endTime
+                            ? Math.max(
+                                sMin + 30,
+                                parseTimeStrToMinutes(entry.task.endTime, sMin + durMins)
+                              )
+                            : sMin + durMins;
+                          const clampedStartMin = Math.max(timelineStartMin, sMin);
+                          const clampedEndMin = Math.min(timelineEndMin, eMin);
+                          if (clampedEndMin <= clampedStartMin) return;
+
+                          const syncedTaskBlock = blocked.find(
+                            (b) =>
+                              b.linkedTaskId === entry.task.id ||
+                              b.id === `block-task-${entry.task.id}`
+                          );
+
+                          rawItems.push({
+                            id: `tsk-${entry.task.id}`,
+                            kind: 'task',
+                            startMin: sMin,
+                            endMin: eMin,
+                            clampedStartMin,
+                            clampedEndMin,
+                            colIndex: 0,
+                            totalCols: 1,
+                            taskEntry: entry,
+                            taskTime,
+                            syncedTaskBlock,
+                          });
+                        });
+
+                        const positionedItems = assignOverlapColumns(rawItems);
+
+                        const resolveDropHourFromEvent = (
+                          e: React.DragEvent<HTMLDivElement>
+                        ): number => {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const relY = Math.max(0, Math.min(rect.height - 1, e.clientY - rect.top));
+                          return Math.max(
+                            minHour,
+                            Math.min(
+                              minHour + timelineHours.length - 1,
+                              minHour + Math.floor(relY / HOUR_ROW_HEIGHT)
+                            )
+                          );
+                        };
+
+                        return (
+                          <div
+                            key={dateStr}
+                            onDragOver={(e) => {
+                              if (!draggedItem && !draggedReview) return;
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                              const targetHour = resolveDropHourFromEvent(e);
+                              const nextSlotKey = `${dateStr}-${targetHour}`;
+                              if (dragOverSlot !== nextSlotKey) {
+                                setDragOverSlot(nextSlotKey);
+                              }
+                            }}
+                            onDragLeave={(e) => {
+                              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                if (dragOverSlot?.startsWith(`${dateStr}-`)) {
+                                  setDragOverSlot(null);
+                                }
+                              }
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              const targetHour = resolveDropHourFromEvent(e);
+                              const targetHourStr = `${String(targetHour).padStart(2, '0')}:00`;
+                              setDragOverSlot(null);
+                              handleDropCalendarItem(dateStr, targetHourStr);
+                            }}
+                            className={`relative border-r border-slate-100 dark:border-slate-800/80 last:border-r-0 ${
+                              isToday ? 'bg-blue-50/15 dark:bg-blue-950/10' : ''
+                            }`}
+                            style={{ height: `${totalTimelineHeight}px` }}
+                          >
+                            {/* Rejilla horaria de fondo (huecos libres + drop targets) */}
+                            <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                              {timelineHours.map((hour) => {
+                                const hourStr = `${hour.toString().padStart(2, '0')}:00`;
+                                const slotKey = `${dateStr}-${hour}`;
+                                const isDragOver = dragOverSlot === slotKey;
+                                const hourStartMin = hour * 60;
+                                const hourEndMin = (hour + 1) * 60;
+                                const isHourCovered = positionedItems.some(
+                                  (it) =>
+                                    it.clampedStartMin < hourEndMin &&
+                                    it.clampedEndMin > hourStartMin
+                                );
+
+                                return (
+                                  <div
+                                    key={hour}
+                                    onClick={() => {
+                                      if (!isHourCovered) {
+                                        setSelectedDayStr(dateStr);
+                                        setBlockedDate(dateStr);
+                                        setBlockedStartTime(hourStr);
+                                        setBlockedEndTime(
+                                          `${String(Math.min(23, hour + 1)).padStart(2, '0')}:00`
+                                        );
+                                        setBlockedModalMode('on_the_fly');
+                                        setShowAddBlockedModal(true);
+                                      }
+                                    }}
+                                    className={`px-1.5 relative group transition-colors box-border flex items-center justify-center ${
+                                      isDragOver
+                                        ? 'bg-indigo-100/80 dark:bg-indigo-950/65 ring-2 ring-inset ring-indigo-500 z-20'
+                                        : !isHourCovered
+                                        ? 'hover:bg-slate-50/80 dark:hover:bg-slate-800/35 cursor-pointer'
+                                        : ''
+                                    }`}
+                                    style={{ height: `${HOUR_ROW_HEIGHT}px` }}
+                                  >
+                                    {isDragOver && (
+                                      <div className="text-[10px] font-bold text-indigo-700 dark:text-indigo-200 px-2 py-0.5 rounded bg-white/95 dark:bg-slate-900/95 border border-indigo-400 shadow-2xs pointer-events-none">
+                                        Soltar a las {hourStr}
+                                      </div>
+                                    )}
+
+                                    {!isHourCovered && !isDragOver && (
+                                      <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            openAddTopicSlotModalForDate(dateStr, hourStr);
+                                          }}
+                                          className="px-2 py-1 rounded-md bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-blue-400 text-[10px] font-semibold text-blue-700 dark:text-blue-300 shadow-2xs cursor-pointer"
+                                          title={`Añadir un tema en este hueco (${hourStr})`}
+                                        >
+                                          + Tema
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setSelectedDayStr(dateStr);
+                                            setBlockedDate(dateStr);
+                                            setBlockedStartTime(hourStr);
+                                            setBlockedEndTime(
+                                              `${String(Math.min(23, hour + 1)).padStart(2, '0')}:00`
+                                            );
+                                            setBlockedModalMode('on_the_fly');
+                                            setShowAddBlockedModal(true);
+                                          }}
+                                          className="px-2 py-1 rounded-md bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-amber-400 text-[10px] font-semibold text-slate-600 dark:text-slate-300 shadow-2xs cursor-pointer"
+                                          title={`Bloquear horario (${hourStr})`}
+                                        >
+                                          + Bloque
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Capa de Eventos Posicionados Continuos */}
+                            {positionedItems.map((item) => {
+                              const topPx =
+                                ((item.clampedStartMin - timelineStartMin) / 60) *
+                                  HOUR_ROW_HEIGHT +
+                                2;
+                              const heightPx = Math.max(
+                                32,
+                                ((item.clampedEndMin - item.clampedStartMin) / 60) *
+                                  HOUR_ROW_HEIGHT -
+                                  4
+                              );
+                              const leftPct = (item.colIndex / item.totalCols) * 100;
+                              const widthPct = (1 / item.totalCols) * 100;
+                              const posStyle: React.CSSProperties = {
+                                top: `${topPx}px`,
+                                height: `${heightPx}px`,
+                                left: `calc(${leftPct}% + 4px)`,
+                                width: `calc(${widthPct}% - 8px)`,
+                              };
+                              const dragDisablePointer =
+                                draggedItem || draggedReview ? 'opacity-90' : '';
+                              const durationHoursLabel =
+                                Math.round(((item.endMin - item.startMin) / 60) * 10) / 10;
+
+                              if (item.kind === 'blocked') {
+                                const b = item.blockedItem;
+                                const linkedColor =
+                                  b.linkedSubjectId || b.subjectColor
+                                    ? getSubjectColor(b.linkedSubjectId, b.subjectColor)
+                                    : undefined;
+                                const blkStyle: React.CSSProperties = linkedColor
+                                  ? {
+                                      ...posStyle,
+                                      ...getSubjectBlockStyle(linkedColor, 'session'),
+                                    }
+                                  : posStyle;
+                                return (
+                                  <div
+                                    key={item.id}
+                                    style={blkStyle}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      e.dataTransfer.effectAllowed = 'move';
+                                      setDraggedItem({
+                                        kind: 'blocked_event',
+                                        eventId: b.id,
+                                        title: b.title,
+                                        sourceDateStr: dateStr,
+                                        sourceHourStr: b.startTime,
+                                        durationHours: b.durationHours,
+                                        isWeeklyObligation: b.isWeeklyObligation,
+                                        sourceObligationId: b.sourceObligationId,
+                                      });
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedItem(null);
+                                      setDragOverSlot(null);
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`absolute z-10 px-2.5 py-1.5 rounded-lg border text-xs overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing shadow-2xs ${dragDisablePointer} ${
+                                      linkedColor
+                                        ? 'text-slate-900 dark:text-slate-100'
+                                        : b.isWeeklyObligation || b.isRecurringWeekly
+                                        ? 'bg-slate-100/95 dark:bg-slate-800/95 border-slate-300/80 dark:border-slate-700 text-slate-800 dark:text-slate-100'
+                                        : 'bg-amber-50/95 dark:bg-amber-950/75 border-amber-200 dark:border-amber-800/80 text-amber-950 dark:text-amber-100'
+                                    }`}
+                                    title={`${b.title} (${b.startTime}–${b.endTime})`}
+                                  >
+                                    <div className="space-y-0.5 min-w-0">
+                                      <div className="flex items-start justify-between gap-1 text-[11px] font-semibold">
+                                        <span className="line-clamp-2 leading-snug">{b.title}</span>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteEffectiveBlockedItem(b, dateStr);
+                                          }}
+                                          className="text-slate-400 hover:text-rose-600 cursor-pointer shrink-0 opacity-75 hover:opacity-100 mt-0.5"
+                                          title="Eliminar bloqueo"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                      <div className="text-[10px] font-mono-numbers opacity-75 flex items-center justify-between gap-1">
+                                        <span>
+                                          {b.startTime}–{b.endTime}
+                                        </span>
+                                        {durationHoursLabel > 1 && (
+                                          <span className="font-semibold">{durationHoursLabel}h</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              }
+
+                              if (item.kind === 'session') {
+                                const sess = item.session;
+                                const isExtraSession = sess.id.startsWith('sess-extra-');
+                                const isCompact = heightPx < 60;
+                                const subColor = getSubjectColor(sess.subjectId, sess.subjectColor);
+
+                                return (
+                                  <div
+                                    key={item.id}
+                                    style={{
+                                      ...posStyle,
+                                      ...getSubjectBlockStyle(subColor, 'session'),
+                                    }}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      e.dataTransfer.effectAllowed = 'move';
+                                      setDraggedItem({
+                                        kind: 'topic_session',
+                                        subjectId: sess.subjectId,
+                                        topicId: sess.topicId,
+                                        topicTitle: sess.topicTitle,
+                                        subjectName: sess.subjectName,
+                                        sourceDateStr: dateStr,
+                                        sourceHourStr: item.effectiveStart,
+                                        durationHours: sess.durationHours,
+                                      });
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedItem(null);
+                                      setDragOverSlot(null);
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`absolute z-10 px-2 py-1.5 rounded-lg border text-slate-900 dark:text-slate-100 overflow-hidden flex flex-col justify-between cursor-grab active:cursor-grabbing transition-all shadow-2xs ${dragDisablePointer}`}
+                                    title={`${sess.subjectName}: ${sess.topicTitle} (${item.effectiveStart}–${item.effectiveEnd})`}
+                                  >
+                                    <div className="space-y-0.5 min-w-0">
+                                      <div className="flex items-center justify-between gap-1">
+                                        <span className="text-[10px] font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-1 min-w-0">
+                                          <span
+                                            className="w-2 h-2 rounded-full shrink-0"
+                                            style={{ backgroundColor: subColor }}
+                                          />
+                                          <span className="truncate">{sess.subjectName}</span>
+                                        </span>
+                                        <div className="flex items-center gap-0.5 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleOpenPartialSessionModal(sess);
+                                            }}
+                                            className="px-1 py-0.5 rounded hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 text-[9px] font-bold cursor-pointer"
+                                            title="Marcar como hecho parcialmente y reubicar restante"
+                                          >
+                                            ½
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleCompleteFullStudySession(sess);
+                                            }}
+                                            className="px-1 py-0.5 rounded hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-bold cursor-pointer"
+                                            title="Marcar sesión completada"
+                                          >
+                                            ✓
+                                          </button>
+                                          {isExtraSession && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleRemoveExtraTopicFromDay(
+                                                  sess.subjectId,
+                                                  sess.topicId,
+                                                  dateStr
+                                                );
+                                              }}
+                                              className="p-0.5 text-slate-400 hover:text-rose-600 cursor-pointer"
+                                              title="Quitar sesión de este hueco"
+                                            >
+                                              <X className="w-3 h-3" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      <div
+                                        className={`font-semibold leading-snug text-[11px] ${
+                                          heightPx >= 115
+                                            ? 'line-clamp-3'
+                                            : isCompact
+                                            ? 'truncate'
+                                            : 'line-clamp-2'
+                                        }`}
+                                      >
+                                        {sess.topicTitle}
+                                      </div>
+                                    </div>
+
+                                    {!isCompact && (
+                                      <div className="space-y-0.5 pt-0.5">
+                                        <div className="flex items-center justify-between gap-1 text-[10px] font-mono-numbers text-slate-600 dark:text-slate-300">
+                                          <div className="inline-flex items-center gap-0.5">
+                                            <input
+                                              type="time"
+                                              value={item.effectiveStart}
+                                              onChange={(e) => {
+                                                if (!e.target.value) return;
+                                                handleChangeTopicSessionStartTime(
+                                                  sess.subjectId,
+                                                  sess.topicId,
+                                                  dateStr,
+                                                  e.target.value,
+                                                  sess.durationHours
+                                                );
+                                              }}
+                                              className="bg-transparent font-bold text-slate-800 dark:text-slate-100 focus:outline-none cursor-pointer w-[48px] text-[10px]"
+                                              title="Cambiar hora de inicio"
+                                            />
+                                            <span>–{item.effectiveEnd}</span>
+                                          </div>
+                                          <span className="font-semibold shrink-0">
+                                            {sess.durationHours}h
+                                          </span>
+                                        </div>
+
+                                        {sess.smartGoalAligned && heightPx >= 72 && (
+                                          <div
+                                            className="text-[9px] font-bold text-indigo-700 dark:text-indigo-300 truncate"
+                                            title={sess.alignedSmartGoalTitle || 'Alineado con Objetivo SMART'}
+                                          >
+                                            🎯 SMART{sess.alignedSmartGoalTitle ? `: ${sess.alignedSmartGoalTitle}` : ''}
+                                          </div>
+                                        )}
+
+                                        {sess.isIntradayRescheduled && heightPx >= 82 && (
+                                          <div className="text-[9px] font-medium text-cyan-700 dark:text-cyan-300 truncate">
+                                            Reajustado ({sess.originalStartTime || '08:00'}→
+                                            {item.effectiveStart})
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              }
+
+                              if (item.kind === 'review') {
+                                const { analysis, milestone } = item.review;
+                                const subColor = getSubjectColor(
+                                  analysis.subject.id,
+                                  analysis.subject.color
+                                );
+                                return (
+                                  <div
+                                    key={item.id}
+                                    style={{
+                                      ...posStyle,
+                                      ...getSubjectBlockStyle(subColor, 'review'),
+                                    }}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      e.dataTransfer.effectAllowed = 'move';
+                                      const payload: DraggedCalendarItem = {
+                                        kind: 'spaced_review',
+                                        subjectId: analysis.subject.id,
+                                        topicId: analysis.topic.id,
+                                        cycle: milestone.cycle,
+                                        sourceDateStr: dateStr,
+                                        sourceHourStr: item.revTime,
+                                        topicTitle: analysis.topic.title,
+                                        subjectName: analysis.subject.name,
+                                        label: milestone.label,
+                                      };
+                                      setDraggedItem(payload);
+                                      setDraggedReview(payload);
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedItem(null);
+                                      setDraggedReview(null);
+                                      setDragOverSlot(null);
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className={`absolute z-10 px-2 py-1 rounded-lg border text-slate-900 dark:text-slate-100 overflow-hidden space-y-0.5 cursor-grab active:cursor-grabbing shadow-2xs ${dragDisablePointer}`}
+                                    title="Arrastra para mover de hora o día"
+                                  >
+                                    <div className="flex items-center justify-between gap-1 text-[10px]">
+                                      <span className="font-bold text-slate-800 dark:text-slate-200 font-mono-numbers truncate inline-flex items-center gap-1">
+                                        <span
+                                          className="w-2 h-2 rounded-full shrink-0"
+                                          style={{ backgroundColor: subColor }}
+                                        />
+                                        <span className="truncate">
+                                          {milestone.label} · {item.revTime}
+                                        </span>
+                                      </span>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        {milestone.status !== 'completed' && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleRecordReview(analysis, 'bien');
+                                            }}
+                                            className="text-emerald-600 hover:text-emerald-800 font-bold cursor-pointer"
+                                            title="Marcar repaso completado"
+                                          >
+                                            <Check className="w-3 h-3" />
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleAssignReviewToTimeSlot(
+                                              analysis.subject.id,
+                                              analysis.topic.id,
+                                              dateStr,
+                                              undefined
+                                            );
+                                          }}
+                                          className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                          title="Quitar hora asignada"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <div className="font-semibold leading-tight truncate text-[11px]">
+                                      {analysis.topic.title}
+                                    </div>
+                                  </div>
+                                );
+                              }
+
+                              // item.kind === 'task'
+                              const { task, subjectId, subjectName } = item.taskEntry;
+                              const taskSubColor = getSubjectColor(subjectId);
+                              return (
+                                <div
+                                  key={item.id}
+                                  style={{
+                                    ...posStyle,
+                                    ...getSubjectBlockStyle(taskSubColor, 'task'),
+                                  }}
+                                  draggable
+                                  onDragStart={(e) => {
+                                    e.stopPropagation();
+                                    e.dataTransfer.effectAllowed = 'move';
+                                    setDraggedItem({
+                                      kind: 'task',
+                                      subjectId,
+                                      taskId: task.id,
+                                      taskTitle: task.title,
+                                      subjectName,
+                                      sourceDateStr: dateStr,
+                                      sourceHourStr: item.taskTime,
+                                    });
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedItem(null);
+                                    setDragOverSlot(null);
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className={`absolute z-10 px-2 py-1.5 rounded-lg border text-slate-900 dark:text-slate-100 overflow-hidden space-y-0.5 cursor-grab active:cursor-grabbing shadow-2xs ${dragDisablePointer}`}
+                                  title="Arrastra esta tarea a otra hora o día"
+                                >
+                                  <div className="flex items-center justify-between text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                                    <span className="truncate inline-flex items-center gap-1">
+                                      <span
+                                        className="w-2 h-2 rounded-full shrink-0"
+                                        style={{ backgroundColor: taskSubColor }}
+                                      />
+                                      <span className="truncate">{subjectName}</span>
+                                    </span>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <span className="font-mono-numbers">{item.taskTime}</span>
+                                      {item.syncedTaskBlock && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteEffectiveBlockedItem(item.syncedTaskBlock!, dateStr);
+                                          }}
+                                          className="text-slate-500 hover:text-rose-600 cursor-pointer"
+                                          title="Liberar bloque de tarea"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="font-semibold text-[11px] line-clamp-2 leading-snug">
+                                    {task.title}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
+            /* WEEKLY COLUMN CARDS VIEW (Responsive 1 -> 2 -> 4 -> 7 clean daily agenda columns) */
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
+              {weekDates.map((dateStr) => {
+                const sessions = showStudyLayer ? sessionsByDate[dateStr] || [] : [];
+                const daySR = showRepasoLayer ? srReviewsByDate[dateStr] || [] : [];
+                const dayTasks = showExamsTasksLayer ? tasksByDate[dateStr] || [] : [];
+                const dayExams = showExamsTasksLayer ? examsByDate[dateStr] || [] : [];
+                const dayBlocked = getEffectiveBlockedForDate(dateStr);
+                const d = parseLocalDate(dateStr);
+                const dayName = d.toLocaleDateString('es-ES', { weekday: 'short' });
+                const isToday = dateStr === todayStr;
+                const totalHours = Math.round(sessions.reduce((acc, s) => acc + s.durationHours, 0) * 10) / 10;
+                const isColDrop = dragOverSlot === `weekcol-${dateStr}`;
+                const isDayCompletelyEmpty =
+                  sessions.length === 0 &&
+                  daySR.length === 0 &&
+                  dayTasks.length === 0 &&
+                  dayExams.length === 0 &&
+                  dayBlocked.length === 0;
+
+                return (
+                  <div
+                    key={dateStr}
+                    onDragOver={(e) => {
+                      if (!draggedItem && !draggedReview) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dragOverSlot !== `weekcol-${dateStr}`) {
+                        setDragOverSlot(`weekcol-${dateStr}`);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dragOverSlot === `weekcol-${dateStr}`) {
+                        setDragOverSlot(null);
+                      }
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDragOverSlot(null);
+                      handleDropCalendarItem(dateStr);
+                    }}
+                    className={`bg-white dark:bg-slate-900 rounded-2xl border p-3.5 shadow-2xs flex flex-col justify-between transition-all min-h-[260px] ${
+                      isColDrop
+                        ? 'border-indigo-500 ring-2 ring-indigo-500/30 bg-indigo-50/30'
+                        : isToday
+                        ? 'border-blue-400 dark:border-blue-700 bg-blue-50/15 dark:bg-blue-950/15'
+                        : 'border-slate-200 dark:border-slate-800'
+                    }`}
+                  >
+                    <div className="space-y-3">
+                      {/* Cabecera de Día limpia */}
+                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2.5">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`w-7 h-7 rounded-full inline-flex items-center justify-center text-xs font-bold font-mono-numbers ${
+                              isToday
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white'
+                            }`}
+                          >
+                            {d.getDate()}
+                          </span>
+                          <div>
+                            <span className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200 block leading-none">
+                              {dayName}
+                            </span>
+                            <span className="text-[11px] font-mono-numbers text-slate-500 dark:text-slate-400">
+                              {totalHours > 0 ? `${totalHours}h estudio` : 'Sin estudio'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => openAddTopicSlotModalForDate(dateStr)}
+                            className="p-1 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-950/50 text-slate-400 hover:text-blue-600 cursor-pointer"
+                            title="Añadir tema en un hueco libre"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDayStr(dateStr);
+                              setBlockedDate(dateStr);
+                              setBlockedModalMode('on_the_fly');
+                              setShowAddBlockedModal(true);
+                            }}
+                            className="p-1 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-950/50 text-slate-400 hover:text-amber-600 cursor-pointer"
+                            title="Bloquear horario o añadir compromiso"
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {isDayCompletelyEmpty && (
+                        <div className="py-8 text-center space-y-2">
+                          <p className="text-xs font-medium text-slate-400">Día libre</p>
+                          <button
+                            type="button"
+                            onClick={() => openAddTopicSlotModalForDate(dateStr)}
+                            className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
+                          >
+                            + Añadir tema
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Exámenes */}
+                      {dayExams.length > 0 && (
+                        <div className="space-y-1">
+                          {dayExams.map((ex, i) => (
+                            <div
+                              key={i}
+                              style={getSubjectBlockStyle(
+                                getSubjectColor(ex.subjectId, '#e11d48'),
+                                'exam'
+                              )}
+                              className="px-2.5 py-1.5 border rounded-lg text-xs"
+                            >
+                              <span className="font-bold text-slate-900 dark:text-slate-100 block truncate">
+                                Examen: {ex.exam.title}
+                              </span>
+                              <span className="text-[10px] text-slate-600 dark:text-slate-300">
+                                {ex.subjectName} · {ex.exam.examType}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Compromisos y Bloqueos */}
+                      {dayBlocked.length > 0 && (
+                        <div className="space-y-1">
+                          {dayBlocked.map((b) => {
+                            const linkedColor =
+                              b.linkedSubjectId || b.subjectColor
+                                ? getSubjectColor(b.linkedSubjectId, b.subjectColor)
+                                : undefined;
+                            return (
+                              <div
+                                key={b.id}
+                                draggable
+                                onDragStart={(e) => {
+                                  e.dataTransfer.effectAllowed = 'move';
+                                  setDraggedItem({
+                                    kind: 'blocked_event',
+                                    eventId: b.id,
+                                    title: b.title,
+                                    sourceDateStr: dateStr,
+                                    sourceHourStr: b.startTime,
+                                    durationHours: b.durationHours,
+                                    isWeeklyObligation: b.isWeeklyObligation,
+                                    sourceObligationId: b.sourceObligationId,
+                                  });
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedItem(null);
+                                  setDragOverSlot(null);
+                                }}
+                                style={
+                                  linkedColor
+                                    ? getSubjectBlockStyle(linkedColor, 'session')
+                                    : undefined
+                                }
+                                className={`px-2.5 py-1.5 border rounded-lg text-xs space-y-0.5 cursor-grab active:cursor-grabbing ${
+                                  linkedColor
+                                    ? 'text-slate-900 dark:text-slate-100'
+                                    : 'bg-slate-50 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1 text-slate-800 dark:text-slate-200 font-semibold">
+                                  <span className="truncate">{b.title}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteEffectiveBlockedItem(b, dateStr)}
+                                    className="text-slate-400 hover:text-rose-600 cursor-pointer shrink-0"
+                                    title="Eliminar bloqueo"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono-numbers">
+                                  {b.startTime}–{b.endTime}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Sesiones de estudio */}
+                      {showStudyLayer && sessions.length > 0 && (
+                        <div className="space-y-1.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                          <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                            <span>Estudio ({sessions.length})</span>
+                          </div>
+                          {sessions.map((sess) => {
+                            const effectiveStart = sess.startTime || '09:00';
+                            const effectiveEnd =
+                              sess.endTime ||
+                              calculateAutoEndTime(effectiveStart, sess.durationHours);
+                            const isExtraSession = sess.id.startsWith('sess-extra-');
+                            const subColor = getSubjectColor(sess.subjectId, sess.subjectColor);
+
+                            return (
+                              <div
+                                key={sess.id}
+                                draggable
+                                onDragStart={(e) => {
+                                  e.dataTransfer.effectAllowed = 'move';
+                                  setDraggedItem({
+                                    kind: 'topic_session',
+                                    subjectId: sess.subjectId,
+                                    topicId: sess.topicId,
+                                    topicTitle: sess.topicTitle,
+                                    subjectName: sess.subjectName,
+                                    sourceDateStr: dateStr,
+                                    sourceHourStr: effectiveStart,
+                                    durationHours: sess.durationHours,
+                                  });
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedItem(null);
+                                  setDragOverSlot(null);
+                                }}
+                                style={getSubjectBlockStyle(subColor, 'session')}
+                                className="p-2.5 rounded-xl border text-xs space-y-1.5 cursor-grab active:cursor-grabbing transition-colors"
+                              >
+                                <div className="flex items-center justify-between gap-1 text-[10px]">
+                                  <span className="font-semibold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-1">
+                                    <span
+                                      className="w-2 h-2 rounded-full shrink-0"
+                                      style={{ backgroundColor: subColor }}
+                                    />
+                                    <span className="truncate">{sess.subjectName}</span>
+                                  </span>
+                                  <span className="font-mono-numbers text-slate-700 dark:text-slate-200 font-semibold shrink-0">
+                                    {sess.durationHours}h
+                                  </span>
+                                </div>
+
+                                <div className="font-semibold leading-snug text-slate-900 dark:text-white text-xs">
+                                  {sess.topicTitle}
+                                </div>
+
+                                {sess.smartGoalAligned && (
+                                  <div
+                                    className="text-[10px] font-bold text-indigo-700 dark:text-indigo-300 truncate"
+                                    title={sess.alignedSmartGoalTitle || 'Alineado con Objetivo SMART'}
+                                  >
+                                    🎯 SMART{sess.alignedSmartGoalTitle ? `: ${sess.alignedSmartGoalTitle}` : ''}
+                                  </div>
+                                )}
+
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center justify-between gap-1 text-[10px] font-mono-numbers text-slate-500"
+                                >
+                                  <div className="inline-flex items-center gap-0.5">
+                                    <input
+                                      type="time"
+                                      value={effectiveStart}
+                                      onChange={(e) => {
+                                        if (!e.target.value) return;
+                                        handleChangeTopicSessionStartTime(
+                                          sess.subjectId,
+                                          sess.topicId,
+                                          dateStr,
+                                          e.target.value,
+                                          sess.durationHours
+                                        );
+                                      }}
+                                      className="bg-transparent font-bold text-blue-700 dark:text-blue-300 focus:outline-none cursor-pointer w-[50px]"
+                                      title="Hora de inicio"
+                                    />
+                                    <span>–{effectiveEnd}</span>
+                                  </div>
+
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenPartialSessionModal(sess)}
+                                      className="px-1.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 text-[10px] font-bold cursor-pointer"
+                                      title="Marcar como hecho parcialmente y reubicar lo que falte"
+                                    >
+                                      ½
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCompleteFullStudySession(sess)}
+                                      className="px-1.5 py-0.5 rounded bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 text-[10px] font-bold cursor-pointer"
+                                      title="Marcar completado"
+                                    >
+                                      ✓
+                                    </button>
+                                    {isExtraSession && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleRemoveExtraTopicFromDay(
+                                            sess.subjectId,
+                                            sess.topicId,
+                                            dateStr
+                                          )
+                                        }
+                                        className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                        title="Quitar tema extra"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {sess.isIntradayRescheduled && (
+                                  <div className="text-[10px] font-medium text-cyan-700 dark:text-cyan-300 font-mono-numbers">
+                                    Reajustado ({sess.originalStartTime || '08:00'}→{effectiveStart})
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Repasos SM-2 */}
+                      {showRepasoLayer && daySR.length > 0 && (
+                        <div className="space-y-1.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                          <span className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-400 block">
+                            Repasos ({daySR.length})
+                          </span>
+                          {daySR.map(({ analysis, milestone }) => {
+                            const subColor = getSubjectColor(
+                              analysis.subject.id,
+                              analysis.subject.color
                             );
                             return (
                               <div
@@ -4903,865 +9073,43 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                   setDraggedReview(null);
                                   setDragOverSlot(null);
                                 }}
-                                className="p-1.5 rounded-lg bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 hover:border-indigo-400 text-[10px] shadow-2xs space-y-1 cursor-grab active:cursor-grabbing transition-all"
-                                title="Arrastra este repaso a otro día o a una hora concreta del calendario inferior"
+                                style={getSubjectBlockStyle(subColor, 'review')}
+                                className="px-2.5 py-1.5 rounded-lg border text-xs space-y-0.5 cursor-grab active:cursor-grabbing"
                               >
-                                <div className="flex items-center justify-between gap-1 font-mono-numbers">
-                                  <span className="font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-0.5">
-                                    <GripVertical className="w-3 h-3 text-indigo-400 shrink-0" />
-                                    {milestone.label}
+                                <div className="flex items-center justify-between gap-1">
+                                  <span className="text-[10px] font-bold text-slate-800 dark:text-slate-200 font-mono-numbers inline-flex items-center gap-1">
+                                    <span
+                                      className="w-2 h-2 rounded-full shrink-0"
+                                      style={{ backgroundColor: subColor }}
+                                    />
+                                    <span>{milestone.label}</span>
                                   </span>
-                                  {milestone.status !== 'completed' ? (
+                                  {milestone.status !== 'completed' && (
                                     <button
                                       type="button"
                                       onClick={() => handleRecordReview(analysis, 'bien')}
-                                      className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-bold text-[9px] hover:bg-emerald-700 cursor-pointer"
+                                      className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer"
                                     >
                                       ✓ Hecho
                                     </button>
-                                  ) : (
-                                    <span className="text-emerald-600 font-bold">✓</span>
                                   )}
                                 </div>
-                                <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                                <div className="font-semibold text-slate-900 dark:text-white truncate">
                                   {analysis.topic.title}
                                 </div>
-                                <div className="flex items-center justify-between gap-1 pt-0.5">
-                                  <select
-                                    value={scheduledHour || ''}
-                                    onChange={(e) =>
-                                      handleAssignReviewToTimeSlot(
-                                        analysis.subject.id,
-                                        analysis.topic.id,
-                                        dateStr,
-                                        e.target.value || undefined
-                                      )
-                                    }
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="text-[9px] bg-indigo-50 dark:bg-slate-800 text-indigo-800 dark:text-indigo-300 rounded px-1 py-0.5 border border-indigo-200 dark:border-slate-700 font-mono-numbers focus:outline-none w-full"
-                                  >
-                                    <option value="">Sin hora</option>
-                                    {timelineHours.map((h) => {
-                                      const hLabel = `${String(h).padStart(2, '0')}:00`;
-                                      return (
-                                        <option key={h} value={hLabel}>
-                                          🕒 {hLabel}
-                                        </option>
-                                      );
-                                    })}
-                                  </select>
-                                  {!scheduledHour && (
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleFindFreeSlotForSingleReview(analysis, dateStr);
-                                      }}
-                                      className="px-1 py-0.5 rounded bg-purple-100 hover:bg-purple-200 text-purple-800 font-bold text-[9px] shrink-0 cursor-pointer"
-                                    >
-                                      ⚡
-                                    </button>
-                                  )}
+                                <div className="text-[10px] text-slate-600 dark:text-slate-300 truncate">
+                                  {analysis.subject.name}
                                 </div>
                               </div>
                             );
                           })}
-
-                          {/* Tasks in top row (draggable to any day or hour) */}
-                          {dayTasks.map(({ task, subjectId, subjectName }) => (
-                            <div
-                              key={task.id}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.effectAllowed = 'move';
-                                setDraggedItem({
-                                  kind: 'task',
-                                  subjectId,
-                                  taskId: task.id,
-                                  taskTitle: task.title,
-                                  subjectName,
-                                  sourceDateStr: dateStr,
-                                  sourceHourStr: task.scheduledTime || task.startTime,
-                                });
-                              }}
-                              onDragEnd={() => {
-                                setDraggedItem(null);
-                                setDragOverSlot(null);
-                              }}
-                              className="p-1.5 rounded-lg bg-teal-50/90 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800 text-[10px] space-y-0.5 cursor-grab active:cursor-grabbing"
-                              title="Arrastra esta tarea a otro día o a una hora concreta inferior"
-                            >
-                              <div className="flex items-center justify-between gap-1">
-                                <span className="font-bold text-teal-800 dark:text-teal-200 inline-flex items-center gap-0.5 truncate">
-                                  <GripVertical className="w-2.5 h-2.5 text-teal-500 shrink-0" />
-                                  ✓ Tarea
-                                </span>
-                                {(task.scheduledTime || task.startTime) && (
-                                  <span className="font-mono-numbers text-[9px] text-teal-700">
-                                    {task.scheduledTime || task.startTime}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">
-                                {task.title}
-                              </div>
-                            </div>
-                          ))}
-
-                          {srList.length === 0 && dayTasks.length === 0 && (
-                            <span className="text-[10px] text-slate-400 block text-center py-2">
-                              —
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* Vertical time rows (Universal Drop targets for Topics, Reviews, Tasks & Blocked Plans) */}
-                <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {timelineHours.map((hour) => {
-                    const hourStr = `${hour.toString().padStart(2, '0')}:00`;
-
-                    return (
-                      <div key={hour} className="grid grid-cols-8 min-h-[70px]">
-                        <div className="p-2.5 text-center text-[11px] font-mono-numbers font-medium text-slate-400 border-r border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/30">
-                          {hourStr}
-                        </div>
-
-                        {weekDates.map((dateStr) => {
-                          const slotKey = `${dateStr}-${hour}`;
-                          const isDragOver = dragOverSlot === slotKey;
-
-                          const sessions = showStudyLayer
-                            ? sessionsByDate[dateStr] || []
-                            : [];
-                          const blocked = getEffectiveBlockedForDate(dateStr);
-                          const dayReviewsAtHour = showRepasoLayer
-                            ? (srReviewsByDate[dateStr] || []).filter(({ analysis }) => {
-                                const revTime = getReviewScheduledTime(
-                                  analysis.topic,
-                                  dateStr
-                                );
-                                if (!revTime) return false;
-                                return parseInt(revTime.split(':')[0], 10) === hour;
-                              })
-                            : [];
-                          const dayTasksAtHour = showExamsTasksLayer
-                            ? (tasksByDate[dateStr] || []).filter(({ task }) => {
-                                const taskTime = task.scheduledTime || task.startTime;
-                                if (!taskTime) return false;
-                                return parseInt(taskTime.split(':')[0], 10) === hour;
-                              })
-                            : [];
-
-                          const currentSessionsAtHour = sessions.filter((s) => {
-                            if (!s.startTime) return false;
-                            const sHour = parseInt(s.startTime.split(':')[0], 10);
-                            return sHour === hour;
-                          });
-
-                          // Filter out blocked events that are already rendered in this exact cell as a Topic Session, Task, or Review
-                          const currentBlockedList = blocked.filter((b) => {
-                            const sH = parseInt(b.startTime.split(':')[0], 10);
-                            const eH = parseInt(b.endTime.split(':')[0], 10);
-                            const inHourRange = hour >= sH && hour < Math.max(sH + 1, eH);
-                            if (!inHourRange) return false;
-
-                            const renderedAsSession = currentSessionsAtHour.some(
-                              (s) =>
-                                b.linkedTopicId === s.topicId ||
-                                b.id === `block-topic-${s.topicId}`
-                            );
-                            if (renderedAsSession) return false;
-
-                            const renderedAsTask = dayTasksAtHour.some(
-                              ({ task }) =>
-                                b.linkedTaskId === task.id ||
-                                b.id === `block-task-${task.id}`
-                            );
-                            if (renderedAsTask) return false;
-
-                            const renderedAsReview = dayReviewsAtHour.some(
-                              ({ analysis }) =>
-                                (b.linkedTopicId === analysis.topic.id &&
-                                  b.linkedItemType === 'review') ||
-                                b.id === `block-review-${analysis.topic.id}`
-                            );
-                            if (renderedAsReview) return false;
-
-                            return true;
-                          });
-
-                          return (
-                            <div
-                              key={dateStr}
-                              onDragOver={(e) => {
-                                if (!draggedItem && !draggedReview) return;
-                                e.preventDefault();
-                                e.dataTransfer.dropEffect = 'move';
-                                if (dragOverSlot !== slotKey) {
-                                  setDragOverSlot(slotKey);
-                                }
-                              }}
-                              onDragLeave={() => {
-                                if (dragOverSlot === slotKey) {
-                                  setDragOverSlot(null);
-                                }
-                              }}
-                              onDrop={(e) => {
-                                e.preventDefault();
-                                setDragOverSlot(null);
-                                handleDropCalendarItem(dateStr, hourStr);
-                              }}
-                              onClick={() => {
-                                if (
-                                  currentBlockedList.length === 0 &&
-                                  currentSessionsAtHour.length === 0 &&
-                                  dayReviewsAtHour.length === 0 &&
-                                  dayTasksAtHour.length === 0
-                                ) {
-                                  setSelectedDayStr(dateStr);
-                                  setBlockedDate(dateStr);
-                                  setBlockedStartTime(hourStr);
-                                  setBlockedEndTime(
-                                    `${String(Math.min(23, hour + 1)).padStart(2, '0')}:00`
-                                  );
-                                  setBlockedModalMode('on_the_fly');
-                                  setShowAddBlockedModal(true);
-                                }
-                              }}
-                              className={`p-1 border-r border-slate-100 dark:border-slate-800 last:border-r-0 relative transition-all space-y-1 group ${
-                                isDragOver
-                                  ? 'bg-indigo-100/70 dark:bg-indigo-950/60 ring-2 ring-inset ring-indigo-500'
-                                  : 'hover:bg-slate-50/60 cursor-pointer'
-                              }`}
-                              title="Arrastra aquí un tema, repaso, tarea o plan, o haz clic en un hueco vacío para bloquear un plan sobre la marcha"
-                            >
-                              {isDragOver && (
-                                <div className="text-[9px] font-bold text-indigo-700 dark:text-indigo-300 text-center py-1 border border-dashed border-indigo-400 rounded-lg bg-white/80 dark:bg-slate-900/80">
-                                  Soltar a las {hourStr}
-                                </div>
-                              )}
-
-                              {currentBlockedList.map((currentBlocked) => (
-                                <div
-                                  key={currentBlocked.id}
-                                  draggable
-                                  onDragStart={(e) => {
-                                    e.stopPropagation();
-                                    e.dataTransfer.effectAllowed = 'move';
-                                    setDraggedItem({
-                                      kind: 'blocked_event',
-                                      eventId: currentBlocked.id,
-                                      title: currentBlocked.title,
-                                      sourceDateStr: dateStr,
-                                      sourceHourStr: currentBlocked.startTime,
-                                      durationHours: currentBlocked.durationHours,
-                                      isWeeklyObligation: currentBlocked.isWeeklyObligation,
-                                      sourceObligationId: currentBlocked.sourceObligationId,
-                                    });
-                                  }}
-                                  onDragEnd={() => {
-                                    setDraggedItem(null);
-                                    setDragOverSlot(null);
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                  className={`p-2 rounded-xl border text-xs shadow-2xs space-y-0.5 cursor-grab active:cursor-grabbing ${
-                                    currentBlocked.isWeeklyObligation || currentBlocked.isRecurringWeekly
-                                      ? 'bg-slate-100/95 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100'
-                                      : 'bg-amber-50/90 border-amber-200 text-amber-950'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between text-[10px] font-bold">
-                                    <span className="truncate inline-flex items-center gap-0.5">
-                                      <GripVertical className="w-3 h-3 opacity-60 shrink-0" />
-                                      {currentBlocked.isWeeklyObligation || currentBlocked.isRecurringWeekly
-                                        ? '🔁'
-                                        : '🚫'}{' '}
-                                      {currentBlocked.title}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDeleteEffectiveBlockedItem(currentBlocked);
-                                      }}
-                                      className="text-slate-400 hover:text-rose-600 cursor-pointer"
-                                      title="Eliminar bloqueo"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                  </div>
-                                  <div className="text-[9px] font-mono-numbers opacity-80">
-                                    {currentBlocked.startTime} - {currentBlocked.endTime}
-                                  </div>
-                                </div>
-                              ))}
-
-                              {currentSessionsAtHour.map((currentSession) => {
-                                const effectiveStart = currentSession.startTime || hourStr;
-                                const effectiveEnd =
-                                  currentSession.endTime ||
-                                  calculateAutoEndTime(effectiveStart, currentSession.durationHours);
-                                const isExtraSession = currentSession.id.startsWith('sess-extra-');
-
-                                return (
-                                  <div
-                                    key={currentSession.id}
-                                    draggable
-                                    onDragStart={(e) => {
-                                      e.stopPropagation();
-                                      e.dataTransfer.effectAllowed = 'move';
-                                      setDraggedItem({
-                                        kind: 'topic_session',
-                                        subjectId: currentSession.subjectId,
-                                        topicId: currentSession.topicId,
-                                        topicTitle: currentSession.topicTitle,
-                                        subjectName: currentSession.subjectName,
-                                        sourceDateStr: dateStr,
-                                        sourceHourStr: effectiveStart,
-                                        durationHours: currentSession.durationHours,
-                                      });
-                                    }}
-                                    onDragEnd={() => {
-                                      setDraggedItem(null);
-                                      setDragOverSlot(null);
-                                    }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className={`p-2 rounded-xl border text-xs shadow-2xs space-y-1 cursor-grab active:cursor-grabbing ${
-                                      currentSession.type === 'repaso_espaciado'
-                                        ? 'bg-purple-50/90 border-purple-200 text-purple-950'
-                                        : 'bg-blue-50/90 border-blue-200 text-blue-950'
-                                    }`}
-                                    title="Arrastra este tema a otra hora o cambia su hora de inicio aquí"
-                                  >
-                                    <div className="flex items-center justify-between text-[10px]">
-                                      <span className="font-bold truncate max-w-[85px] inline-flex items-center gap-0.5">
-                                        <GripVertical className="w-3 h-3 text-blue-400 shrink-0" />
-                                        {currentSession.subjectName}
-                                      </span>
-                                      <div className="flex items-center gap-1">
-                                        <span className="font-mono-numbers text-blue-700 font-semibold">
-                                          {currentSession.durationHours}h
-                                        </span>
-                                        {isExtraSession && (
-                                          <button
-                                            type="button"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleRemoveExtraTopicFromDay(
-                                                currentSession.subjectId,
-                                                currentSession.topicId,
-                                                dateStr
-                                              );
-                                            }}
-                                            className="text-slate-400 hover:text-rose-600 cursor-pointer"
-                                            title="Quitar tema extra de este hueco"
-                                          >
-                                            <X className="w-3 h-3" />
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-                                    <div className="font-semibold leading-tight line-clamp-1 text-[11px]">
-                                      {currentSession.topicTitle}
-                                    </div>
-                                    <div className="flex items-center justify-between gap-1 bg-white/80 px-1.5 py-0.5 rounded border border-blue-200/70 text-[9px] font-mono-numbers">
-                                      <input
-                                        type="time"
-                                        value={effectiveStart}
-                                        onChange={(e) => {
-                                          if (!e.target.value) return;
-                                          handleChangeTopicSessionStartTime(
-                                            currentSession.subjectId,
-                                            currentSession.topicId,
-                                            dateStr,
-                                            e.target.value,
-                                            currentSession.durationHours
-                                          );
-                                        }}
-                                        className="bg-transparent font-bold text-blue-800 focus:outline-none cursor-pointer w-[54px]"
-                                        title="Cambiar hora de inicio (fin se calcula solo)"
-                                      />
-                                      <span className="text-slate-600">→ {effectiveEnd}</span>
-                                    </div>
-                                    {currentSession.pagesAllocation && (
-                                      <div className="text-[9px] text-blue-700 truncate">
-                                        📖 {currentSession.pagesAllocation}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-
-                              {/* Spaced Repetition Reviews Placed at this Concrete Hour */}
-                              {dayReviewsAtHour.map(({ analysis, milestone }) => (
-                                <div
-                                  key={`slot-${analysis.topic.id}-${milestone.cycle}`}
-                                  draggable
-                                  onDragStart={(e) => {
-                                    e.stopPropagation();
-                                    e.dataTransfer.effectAllowed = 'move';
-                                    const payload: DraggedCalendarItem = {
-                                      kind: 'spaced_review',
-                                      subjectId: analysis.subject.id,
-                                      topicId: analysis.topic.id,
-                                      cycle: milestone.cycle,
-                                      sourceDateStr: dateStr,
-                                      sourceHourStr: hourStr,
-                                      topicTitle: analysis.topic.title,
-                                      subjectName: analysis.subject.name,
-                                      label: milestone.label,
-                                    };
-                                    setDraggedItem(payload);
-                                    setDraggedReview(payload);
-                                  }}
-                                  onDragEnd={() => {
-                                    setDraggedItem(null);
-                                    setDraggedReview(null);
-                                    setDragOverSlot(null);
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="p-2 rounded-xl bg-indigo-50/95 dark:bg-indigo-950/70 border border-indigo-300 dark:border-indigo-700 text-indigo-950 dark:text-indigo-100 text-xs shadow-2xs space-y-1 cursor-grab active:cursor-grabbing"
-                                  title="Arrastra para mover de hora o día"
-                                >
-                                  <div className="flex items-center justify-between gap-1 text-[10px]">
-                                    <span className="font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-0.5 truncate">
-                                      <GripVertical className="w-3 h-3 text-indigo-400 shrink-0" />
-                                      🧠 {milestone.label} · {hourStr}
-                                    </span>
-                                    <div className="flex items-center gap-1 shrink-0">
-                                      {milestone.status !== 'completed' && (
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleRecordReview(analysis, 'bien');
-                                          }}
-                                          className="px-1 py-0.5 rounded bg-emerald-600 text-white font-bold text-[8px] hover:bg-emerald-700 cursor-pointer"
-                                        >
-                                          ✓
-                                        </button>
-                                      )}
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleAssignReviewToTimeSlot(
-                                            analysis.subject.id,
-                                            analysis.topic.id,
-                                            dateStr,
-                                            undefined
-                                          );
-                                        }}
-                                        className="text-indigo-400 hover:text-rose-600 cursor-pointer"
-                                      >
-                                        <X className="w-3 h-3" />
-                                      </button>
-                                    </div>
-                                  </div>
-                                  <div className="font-semibold leading-tight line-clamp-1 text-[11px]">
-                                    {analysis.topic.title}
-                                  </div>
-                                  <div className="text-[9px] text-indigo-700 dark:text-indigo-300 truncate">
-                                    {analysis.subject.name}
-                                  </div>
-                                </div>
-                              ))}
-
-                              {/* Tasks Assigned to this Concrete Hour */}
-                              {dayTasksAtHour.map(({ task, subjectId, subjectName }) => {
-                                const syncedTaskBlock = blocked.find(
-                                  (b) =>
-                                    b.linkedTaskId === task.id ||
-                                    b.id === `block-task-${task.id}`
-                                );
-
-                                return (
-                                  <div
-                                    key={`taskslot-${task.id}`}
-                                    draggable
-                                    onDragStart={(e) => {
-                                      e.stopPropagation();
-                                      e.dataTransfer.effectAllowed = 'move';
-                                      setDraggedItem({
-                                        kind: 'task',
-                                        subjectId,
-                                        taskId: task.id,
-                                        taskTitle: task.title,
-                                        subjectName,
-                                        sourceDateStr: dateStr,
-                                        sourceHourStr: hourStr,
-                                      });
-                                    }}
-                                    onDragEnd={() => {
-                                      setDraggedItem(null);
-                                      setDragOverSlot(null);
-                                    }}
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="p-2 rounded-xl bg-teal-50/95 border border-teal-300 text-teal-950 text-xs shadow-2xs space-y-0.5 cursor-grab active:cursor-grabbing"
-                                    title="Arrastra esta tarea a otra hora o día"
-                                  >
-                                    <div className="flex items-center justify-between text-[10px] font-bold text-teal-800">
-                                      <span className="truncate inline-flex items-center gap-0.5">
-                                        <GripVertical className="w-3 h-3 text-teal-500 shrink-0" />
-                                        ✓ {subjectName}
-                                      </span>
-                                      <div className="flex items-center gap-1">
-                                        <span className="font-mono-numbers">{hourStr}</span>
-                                        {syncedTaskBlock && (
-                                          <button
-                                            type="button"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleDeleteEffectiveBlockedItem(syncedTaskBlock);
-                                            }}
-                                            className="text-teal-600 hover:text-rose-600 cursor-pointer"
-                                            title="Liberar bloque de tarea en blockedEvents"
-                                          >
-                                            <X className="w-3 h-3" />
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-                                    <div className="font-semibold text-[11px] truncate">
-                                      {task.title}
-                                    </div>
-                                    {syncedTaskBlock && (
-                                      <div className="text-[9px] font-bold text-amber-800 bg-amber-100/80 px-1 py-0.2 rounded truncate font-mono-numbers">
-                                        🔒 Bloqueado {syncedTaskBlock.startTime}–{syncedTaskBlock.endTime}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* WEEKLY COLUMN CARDS VIEW (UNIFIED STUDY + SPACED REPETITION + TASKS, ALL DRAGGABLE) */
-            <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
-              {weekDates.map((dateStr) => {
-                const sessions = showStudyLayer ? sessionsByDate[dateStr] || [] : [];
-                const daySR = showRepasoLayer ? srReviewsByDate[dateStr] || [] : [];
-                const dayTasks = showExamsTasksLayer ? tasksByDate[dateStr] || [] : [];
-                const dayExams = showExamsTasksLayer ? examsByDate[dateStr] || [] : [];
-                const dayBlocked = getEffectiveBlockedForDate(dateStr);
-                const d = parseLocalDate(dateStr);
-                const dayName = d.toLocaleDateString('es-ES', { weekday: 'short' });
-                const isToday = dateStr === todayStr;
-                const totalHours = sessions.reduce((acc, s) => acc + s.durationHours, 0);
-                const isColDrop = dragOverSlot === `weekcol-${dateStr}`;
-
-                return (
-                  <div
-                    key={dateStr}
-                    onDragOver={(e) => {
-                      if (!draggedItem && !draggedReview) return;
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = 'move';
-                      if (dragOverSlot !== `weekcol-${dateStr}`) {
-                        setDragOverSlot(`weekcol-${dateStr}`);
-                      }
-                    }}
-                    onDragLeave={() => {
-                      if (dragOverSlot === `weekcol-${dateStr}`) {
-                        setDragOverSlot(null);
-                      }
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setDragOverSlot(null);
-                      handleDropCalendarItem(dateStr);
-                    }}
-                    className={`bg-white dark:bg-slate-900 rounded-2xl border p-4 shadow-2xs flex flex-col justify-between transition-all ${
-                      isColDrop
-                        ? 'border-indigo-500 ring-2 ring-indigo-500/30 bg-indigo-50/30'
-                        : isToday
-                        ? 'border-blue-500 ring-2 ring-blue-500/20'
-                        : 'border-slate-200 dark:border-slate-800'
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2 mb-3">
-                        <div>
-                          <span className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                            {dayName}
-                          </span>
-                          <div className="text-sm font-bold font-mono-numbers text-slate-900 dark:text-white">
-                            {d.getDate()}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          {totalHours > 0 && (
-                            <span className="text-xs font-bold font-mono-numbers text-blue-700 bg-blue-50 px-2 py-0.5 rounded-lg">
-                              {Math.round(totalHours * 10) / 10}h
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedDayStr(dateStr);
-                              setBlockedDate(dateStr);
-                              setBlockedModalMode('on_the_fly');
-                              setShowAddBlockedModal(true);
-                            }}
-                            className="p-1 rounded-lg hover:bg-amber-50 text-slate-400 hover:text-amber-600 cursor-pointer"
-                            title="Añadir plan sobre la marcha en este día"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Blocked events / Weekly routines */}
-                      {dayBlocked.length > 0 && (
-                        <div className="mb-3 space-y-1">
-                          {dayBlocked.map((b) => (
-                            <div
-                              key={b.id}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.effectAllowed = 'move';
-                                setDraggedItem({
-                                  kind: 'blocked_event',
-                                  eventId: b.id,
-                                  title: b.title,
-                                  sourceDateStr: dateStr,
-                                  sourceHourStr: b.startTime,
-                                  durationHours: b.durationHours,
-                                  isWeeklyObligation: b.isWeeklyObligation,
-                                  sourceObligationId: b.sourceObligationId,
-                                });
-                              }}
-                              onDragEnd={() => {
-                                setDraggedItem(null);
-                                setDragOverSlot(null);
-                              }}
-                              className="p-2 bg-amber-50 border border-amber-200 rounded-xl text-xs space-y-0.5 cursor-grab active:cursor-grabbing"
-                            >
-                              <div className="flex items-center justify-between text-amber-900 font-bold">
-                                <span className="truncate">
-                                  {b.isWeeklyObligation ? '🔁' : '🚫'} {b.title}
-                                </span>
-                                <button
-                                  onClick={() => handleDeleteEffectiveBlockedItem(b)}
-                                  className="text-amber-400 hover:text-rose-600 cursor-pointer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                              <div className="text-[10px] text-amber-700 font-mono-numbers">
-                                {b.startTime} - {b.endTime}
-                              </div>
-                            </div>
-                          ))}
                         </div>
                       )}
 
-                      {/* Exams */}
-                      {dayExams.length > 0 && (
-                        <div className="mb-3 space-y-1">
-                          {dayExams.map((ex, i) => (
-                            <div
-                              key={i}
-                              className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-xs"
-                            >
-                              <span className="font-bold text-rose-900">
-                                🎯 {ex.exam.title}
-                              </span>
-                              <div className="text-[10px] text-rose-700 font-semibold uppercase">
-                                Examen {ex.exam.examType}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Study Plan Sessions (Draggable + Editable Start Time) */}
-                      {showStudyLayer && (
-                        <div className="space-y-2 mb-3">
-                          <div className="flex items-center justify-between gap-1">
-                            <span className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
-                              Plan de Estudio ({sessions.length})
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => openAddTopicSlotModalForDate(dateStr)}
-                              className="px-1.5 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-bold inline-flex items-center gap-0.5 cursor-pointer"
-                              title="Añadir un tema en un hueco libre de este día"
-                            >
-                              <Plus className="w-2.5 h-2.5" />
-                              <span>Tema</span>
-                            </button>
-                          </div>
-                          {sessions.map((sess) => {
-                            const effectiveStart = sess.startTime || '09:00';
-                            const effectiveEnd =
-                              sess.endTime ||
-                              calculateAutoEndTime(effectiveStart, sess.durationHours);
-                            const isExtraSession = sess.id.startsWith('sess-extra-');
-
-                            return (
-                              <div
-                                key={sess.id}
-                                draggable
-                                onDragStart={(e) => {
-                                  e.dataTransfer.effectAllowed = 'move';
-                                  setDraggedItem({
-                                    kind: 'topic_session',
-                                    subjectId: sess.subjectId,
-                                    topicId: sess.topicId,
-                                    topicTitle: sess.topicTitle,
-                                    subjectName: sess.subjectName,
-                                    sourceDateStr: dateStr,
-                                    sourceHourStr: effectiveStart,
-                                    durationHours: sess.durationHours,
-                                  });
-                                }}
-                                onDragEnd={() => {
-                                  setDraggedItem(null);
-                                  setDragOverSlot(null);
-                                }}
-                                className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-xs space-y-1.5 cursor-grab active:cursor-grabbing hover:border-blue-400"
-                                title="Cambia la hora de inicio o arrastra este tema a otro día"
-                              >
-                                <div className="flex items-center justify-between text-[11px]">
-                                  <span className="font-bold text-slate-800 dark:text-slate-200 truncate inline-flex items-center gap-0.5">
-                                    <GripVertical className="w-3 h-3 text-blue-400 shrink-0" />
-                                    {sess.subjectName}
-                                  </span>
-                                  <div className="flex items-center gap-1">
-                                    <span className="font-mono-numbers text-blue-700 dark:text-blue-400 font-semibold">
-                                      {sess.durationHours}h
-                                    </span>
-                                    {isExtraSession && (
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          handleRemoveExtraTopicFromDay(
-                                            sess.subjectId,
-                                            sess.topicId,
-                                            dateStr
-                                          )
-                                        }
-                                        className="text-slate-400 hover:text-rose-600 cursor-pointer"
-                                        title="Quitar tema extra"
-                                      >
-                                        <Trash2 className="w-3 h-3" />
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="font-medium leading-snug text-slate-900 dark:text-white">
-                                  {sess.topicTitle}
-                                </div>
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="flex items-center justify-between gap-1 bg-white dark:bg-slate-900 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[10px] font-mono-numbers"
-                                >
-                                  <input
-                                    type="time"
-                                    value={effectiveStart}
-                                    onChange={(e) => {
-                                      if (!e.target.value) return;
-                                      handleChangeTopicSessionStartTime(
-                                        sess.subjectId,
-                                        sess.topicId,
-                                        dateStr,
-                                        e.target.value,
-                                        sess.durationHours
-                                      );
-                                    }}
-                                    className="bg-transparent font-bold text-blue-700 dark:text-blue-300 focus:outline-none cursor-pointer"
-                                    title="Hora de inicio"
-                                  />
-                                  <span className="text-slate-500">→ {effectiveEnd}</span>
-                                </div>
-                                {sess.pagesAllocation && (
-                                  <div className="text-[10px] text-blue-700 bg-white/70 px-1.5 py-0.5 rounded border border-blue-100 flex items-center gap-1 font-mono-numbers">
-                                    <FileText className="w-3 h-3 text-blue-500 shrink-0" />
-                                    <span>{sess.pagesAllocation}</span>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {/* Spaced Repetition SM-2 Reviews in Weekly Column (Draggable) */}
-                      {showRepasoLayer && daySR.length > 0 && (
-                        <div className="space-y-2 mb-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-                          <span className="text-[11px] font-bold text-indigo-700 dark:text-indigo-400 flex items-center gap-1">
-                            <Brain className="w-3 h-3" />
-                            <span>Repasos SM-2 ({daySR.length})</span>
-                          </span>
-                          {daySR.map(({ analysis, milestone }) => (
-                            <div
-                              key={`${analysis.topic.id}-${milestone.cycle}`}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.effectAllowed = 'move';
-                                const payload: DraggedCalendarItem = {
-                                  kind: 'spaced_review',
-                                  subjectId: analysis.subject.id,
-                                  topicId: analysis.topic.id,
-                                  cycle: milestone.cycle,
-                                  sourceDateStr: dateStr,
-                                  topicTitle: analysis.topic.title,
-                                  subjectName: analysis.subject.name,
-                                  label: milestone.label,
-                                };
-                                setDraggedItem(payload);
-                                setDraggedReview(payload);
-                              }}
-                              onDragEnd={() => {
-                                setDraggedItem(null);
-                                setDraggedReview(null);
-                                setDragOverSlot(null);
-                              }}
-                              className="p-2 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50/50 dark:bg-indigo-950/30 text-xs space-y-1 cursor-grab active:cursor-grabbing hover:border-indigo-400"
-                              title="Arrastra este repaso a otro día de la semana"
-                            >
-                              <div className="flex items-center justify-between">
-                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-200 font-mono-numbers inline-flex items-center gap-0.5">
-                                  <GripVertical className="w-2.5 h-2.5 text-indigo-400 shrink-0" />
-                                  {milestone.label}
-                                </span>
-                                {milestone.status !== 'completed' && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRecordReview(analysis, 'bien')}
-                                    className="text-[10px] font-bold text-emerald-700 hover:underline cursor-pointer"
-                                  >
-                                    ✓ Repasado
-                                  </button>
-                                )}
-                              </div>
-                              <div className="font-semibold text-slate-900 dark:text-white">
-                                {analysis.topic.title}
-                              </div>
-                              <div className="text-[10px] text-slate-500 truncate">
-                                {analysis.subject.name}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Tasks (Draggable) */}
+                      {/* Tareas */}
                       {dayTasks.length > 0 && (
                         <div className="space-y-1.5 pt-2 border-t border-slate-100 dark:border-slate-800">
-                          <span className="text-[11px] font-bold text-slate-600 block">
+                          <span className="text-[11px] font-semibold text-slate-500 block">
                             Tareas ({dayTasks.length})
                           </span>
                           {dayTasks.map(({ task, subjectId, subjectName }) => (
@@ -5784,10 +9132,9 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                 setDraggedItem(null);
                                 setDragOverSlot(null);
                               }}
-                              className="flex items-start gap-1.5 p-1.5 rounded-lg hover:bg-slate-50 cursor-grab active:cursor-grabbing text-xs border border-transparent hover:border-slate-200"
-                              title="Arrastra esta tarea a otro día de la semana"
+                              style={getSubjectBlockStyle(getSubjectColor(subjectId), 'task')}
+                              className="flex items-start gap-1.5 px-2 py-1 rounded-lg border cursor-grab active:cursor-grabbing text-xs"
                             >
-                              <GripVertical className="w-3 h-3 text-slate-400 mt-0.5 shrink-0" />
                               <input
                                 type="checkbox"
                                 checked={task.completed}
@@ -5816,7 +9163,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* VIEW 3: DAILY UNIFIED CALENDAR */}
       {calendarView === 'daily' && (
@@ -5977,13 +9325,26 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           setDraggedReview(null);
                           setDragOverSlot(null);
                         }}
-                        className="p-4 rounded-2xl border border-indigo-200 dark:border-indigo-800 hover:border-indigo-400 bg-indigo-50/40 dark:bg-indigo-950/20 flex flex-col justify-between gap-3 cursor-grab active:cursor-grabbing transition-all"
+                        style={getSubjectBlockStyle(
+                          getSubjectColor(analysis.subject.id, analysis.subject.color),
+                          'review'
+                        )}
+                        className="p-4 rounded-2xl border flex flex-col justify-between gap-3 cursor-grab active:cursor-grabbing transition-all"
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div>
                             <div className="flex items-center gap-1.5 flex-wrap">
-                              <GripVertical className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                              <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                              <GripVertical className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span
+                                className="w-2.5 h-2.5 rounded-full shrink-0"
+                                style={{
+                                  backgroundColor: getSubjectColor(
+                                    analysis.subject.id,
+                                    analysis.subject.color
+                                  ),
+                                }}
+                              />
+                              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
                                 {analysis.subject.name}
                               </span>
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200 font-mono-numbers">
@@ -6092,11 +9453,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                         setDraggedItem(null);
                         setDragOverSlot(null);
                       }}
-                      className="p-4 rounded-2xl border border-teal-200 dark:border-teal-800 bg-teal-50/40 dark:bg-teal-950/20 flex items-center justify-between gap-3 cursor-grab active:cursor-grabbing"
+                      style={getSubjectBlockStyle(getSubjectColor(subjectId), 'task')}
+                      className="p-4 rounded-2xl border flex items-center justify-between gap-3 cursor-grab active:cursor-grabbing"
                       title="Arrastra esta tarea a una hora concreta inferior o a otro día de la semana arriba"
                     >
                       <div className="flex items-start gap-2.5">
-                        <GripVertical className="w-4 h-4 text-teal-500 mt-0.5 shrink-0" />
+                        <GripVertical className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                         <input
                           type="checkbox"
                           checked={task.completed}
@@ -6242,93 +9604,116 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                           </div>
                         )}
 
-                        {blkList.map((blk) => (
-                          <div
-                            key={blk.id}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = 'move';
-                              setDraggedItem({
-                                kind: 'blocked_event',
-                                eventId: blk.id,
-                                title: blk.title,
-                                sourceDateStr: selectedDayStr,
-                                sourceHourStr: blk.startTime,
-                                durationHours: blk.durationHours,
-                                isWeeklyObligation: blk.isWeeklyObligation,
-                                sourceObligationId: blk.sourceObligationId,
-                              });
-                            }}
-                            onDragEnd={() => {
-                              setDraggedItem(null);
-                              setDragOverSlot(null);
-                            }}
-                            className="p-4 bg-amber-50 border border-amber-200 rounded-xl text-xs space-y-2 cursor-grab active:cursor-grabbing"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <GripVertical className="w-4 h-4 text-amber-500" />
-                                <span className="px-2 py-0.5 rounded font-bold uppercase text-[10px] bg-amber-200 text-amber-900">
-                                  {blk.isWeeklyObligation || blk.isRecurringWeekly
-                                    ? '🔁 Fijo Semanal'
-                                    : '🚫 Plan Bloqueado'}
-                                </span>
-                                <h5 className="font-bold text-slate-900 text-sm">{blk.title}</h5>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteEffectiveBlockedItem(blk)}
-                                className="text-amber-500 hover:text-rose-600 cursor-pointer"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                            <div className="flex items-center gap-4 text-slate-600 font-mono-numbers pl-6">
-                              <span>
-                                Horario: {blk.startTime} - {blk.endTime}
-                              </span>
-                              {blk.notes && <span>· {blk.notes}</span>}
-                            </div>
-                          </div>
-                        ))}
-
-                        {sessionsAtHour.map((sess) => (
-                          <div
-                            key={sess.id}
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = 'move';
-                              setDraggedItem({
-                                kind: 'topic_session',
-                                subjectId: sess.subjectId,
-                                topicId: sess.topicId,
-                                topicTitle: sess.topicTitle,
-                                subjectName: sess.subjectName,
-                                sourceDateStr: selectedDayStr,
-                                sourceHourStr: sess.startTime || hourStr,
-                                durationHours: sess.durationHours,
-                              });
-                            }}
-                            onDragEnd={() => {
-                              setDraggedItem(null);
-                              setDragOverSlot(null);
-                            }}
-                            className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing ${
-                              sess.type === 'repaso_espaciado'
-                                ? 'bg-purple-50/70 border-purple-200 text-purple-950'
-                                : 'bg-blue-50/70 border-blue-200 text-blue-950'
-                            }`}
-                            title="Arrastra este tema a otra hora o a otro día de la tira superior"
-                          >
-                            <div className="space-y-1.5">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <GripVertical className="w-4 h-4 text-blue-500 shrink-0" />
-                                <span className="font-bold text-slate-900">{sess.subjectName}</span>
-                                <span>·</span>
-                                <div
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="inline-flex items-center gap-1.5 bg-white px-2 py-0.5 rounded-lg border border-blue-200 font-mono-numbers text-xs"
+                        {blkList.map((blk) => {
+                          const linkedColor =
+                            blk.linkedSubjectId || blk.subjectColor
+                              ? getSubjectColor(blk.linkedSubjectId, blk.subjectColor)
+                              : undefined;
+                          return (
+                            <div
+                              key={blk.id}
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = 'move';
+                                setDraggedItem({
+                                  kind: 'blocked_event',
+                                  eventId: blk.id,
+                                  title: blk.title,
+                                  sourceDateStr: selectedDayStr,
+                                  sourceHourStr: blk.startTime,
+                                  durationHours: blk.durationHours,
+                                  isWeeklyObligation: blk.isWeeklyObligation,
+                                  sourceObligationId: blk.sourceObligationId,
+                                });
+                              }}
+                              onDragEnd={() => {
+                                setDraggedItem(null);
+                                setDragOverSlot(null);
+                              }}
+                              style={
+                                linkedColor
+                                  ? getSubjectBlockStyle(linkedColor, 'session')
+                                  : undefined
+                              }
+                              className={`p-4 border rounded-xl text-xs space-y-2 cursor-grab active:cursor-grabbing ${
+                                linkedColor
+                                  ? 'text-slate-900 dark:text-slate-100'
+                                  : 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <GripVertical className="w-4 h-4 text-amber-500" />
+                                  <span className="px-2 py-0.5 rounded font-bold uppercase text-[10px] bg-amber-200 text-amber-900">
+                                    {blk.isWeeklyObligation || blk.isRecurringWeekly
+                                      ? '🔁 Fijo Semanal'
+                                      : '🚫 Plan Bloqueado'}
+                                  </span>
+                                  <h5 className="font-bold text-slate-900 dark:text-white text-sm">
+                                    {blk.title}
+                                  </h5>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteEffectiveBlockedItem(blk, selectedDayStr)}
+                                  className="text-slate-400 hover:text-rose-600 cursor-pointer"
+                                  title="Eliminar bloqueo"
                                 >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-4 text-slate-600 dark:text-slate-300 font-mono-numbers pl-6">
+                                <span>
+                                  Horario: {blk.startTime} - {blk.endTime}
+                                </span>
+                                {blk.notes && <span>· {blk.notes}</span>}
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {sessionsAtHour.map((sess) => {
+                          const subColor = getSubjectColor(sess.subjectId, sess.subjectColor);
+                          return (
+                            <div
+                              key={sess.id}
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = 'move';
+                                setDraggedItem({
+                                  kind: 'topic_session',
+                                  subjectId: sess.subjectId,
+                                  topicId: sess.topicId,
+                                  topicTitle: sess.topicTitle,
+                                  subjectName: sess.subjectName,
+                                  sourceDateStr: selectedDayStr,
+                                  sourceHourStr: sess.startTime || hourStr,
+                                  durationHours: sess.durationHours,
+                                });
+                              }}
+                              onDragEnd={() => {
+                                setDraggedItem(null);
+                                setDragOverSlot(null);
+                              }}
+                              style={getSubjectBlockStyle(subColor, 'session')}
+                              className="p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing text-slate-900 dark:text-slate-100"
+                              title="Arrastra este tema a otra hora o a otro día de la tira superior"
+                            >
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <GripVertical className="w-4 h-4 text-slate-400 shrink-0" />
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                                    style={{ backgroundColor: subColor }}
+                                  />
+                                  <span className="font-bold text-slate-900 dark:text-white">
+                                    {sess.subjectName}
+                                  </span>
+                                  <span>·</span>
+                                  <div
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="inline-flex items-center gap-1.5 bg-white dark:bg-slate-900 px-2 py-0.5 rounded-lg border border-slate-200 dark:border-slate-700 font-mono-numbers text-xs"
+                                  >
                                   <span className="text-[10px] font-bold text-slate-500">Inicio:</span>
                                   <input
                                     type="time"
@@ -6382,19 +9767,60 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                   Guía: {sess.pagesAllocation}
                                 </div>
                               )}
+                              {(sess.isIntradayRescheduled || sess.isPartialRemainder) && (
+                                <div className="flex flex-wrap items-center gap-1.5 pl-6">
+                                  {sess.isIntradayRescheduled && (
+                                    <span className="px-2 py-0.5 rounded-md bg-cyan-100 text-cyan-800 text-[10px] font-bold">
+                                      🔄 Reajustado durante el día ({sess.originalStartTime || '08:00'} → {sess.startTime || hourStr})
+                                    </span>
+                                  )}
+                                  {sess.isPartialRemainder && (
+                                    <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                      ⚡ Restante parcial ({sess.partialHoursCompleted}h ya completadas)
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             </div>
 
-                            {onStartPomodoro && (
+                            <div className="flex flex-wrap items-center gap-2 self-start sm:self-center shrink-0">
                               <button
-                                onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
-                                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer self-start sm:self-center shrink-0"
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenPartialSessionModal(sess);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer shadow-2xs"
+                                title="Marcar sesión como hecha parcialmente y reubicar lo que falte en otro hueco libre"
                               >
-                                <Play className="w-3.5 h-3.5" />
-                                <span>Iniciar Pomodoro</span>
+                                <span>½ Hecho parcial</span>
                               </button>
-                            )}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCompleteFullStudySession(sess);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl transition-colors cursor-pointer shadow-2xs"
+                                title="Marcar sesión como completada"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Hecho</span>
+                              </button>
+                              {onStartPomodoro && (
+                                <button
+                                  type="button"
+                                  onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer"
+                                >
+                                  <Play className="w-3.5 h-3.5" />
+                                  <span>Iniciar Pomodoro</span>
+                                </button>
+                              )}
+                            </div>
                           </div>
-                        ))}
+                          );
+                        })}
 
                         {/* Spaced Repetition Reviews Dropped/Assigned to this Concrete Hour */}
                         {reviewsAtHour.map(({ analysis, milestone }) => (
@@ -6422,12 +9848,25 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                               setDraggedReview(null);
                               setDragOverSlot(null);
                             }}
-                            className="p-4 rounded-xl bg-indigo-50/90 dark:bg-indigo-950/60 border border-indigo-300 dark:border-indigo-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing"
+                            style={getSubjectBlockStyle(
+                              getSubjectColor(analysis.subject.id, analysis.subject.color),
+                              'review'
+                            )}
+                            className="p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing"
                           >
                             <div className="space-y-1">
                               <div className="flex items-center gap-2 flex-wrap">
-                                <GripVertical className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                                <span className="px-2 py-0.5 rounded bg-indigo-600 text-white font-bold text-[10px] font-mono-numbers">
+                                <GripVertical className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                                  style={{
+                                    backgroundColor: getSubjectColor(
+                                      analysis.subject.id,
+                                      analysis.subject.color
+                                    ),
+                                  }}
+                                />
+                                <span className="px-2 py-0.5 rounded bg-slate-900 dark:bg-slate-700 text-white font-bold text-[10px] font-mono-numbers">
                                   🧠 Repaso {milestone.label} · {hourStr}
                                 </span>
                                 <span className="font-bold text-slate-900 dark:text-white">
@@ -6508,10 +9947,11 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                               setDraggedItem(null);
                               setDragOverSlot(null);
                             }}
-                            className="p-4 rounded-xl bg-teal-50/90 border border-teal-300 flex items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing"
+                            style={getSubjectBlockStyle(getSubjectColor(subjectId), 'task')}
+                            className="p-4 rounded-xl border flex items-center justify-between gap-3 text-xs cursor-grab active:cursor-grabbing"
                           >
                             <div className="flex items-center gap-2.5">
-                              <GripVertical className="w-4 h-4 text-teal-500" />
+                              <GripVertical className="w-4 h-4 text-slate-400" />
                               <input
                                 type="checkbox"
                                 checked={task.completed}
@@ -6521,10 +9961,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                                 className="w-4 h-4 text-teal-600 rounded border-slate-300"
                               />
                               <div>
-                                <span className="text-[10px] font-bold text-teal-700 uppercase">
+                                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300 uppercase">
                                   ✓ Tarea · {subjectName} · {hourStr}
                                 </span>
-                                <h5 className="text-sm font-bold text-slate-900">{task.title}</h5>
+                                <h5 className="text-sm font-bold text-slate-900 dark:text-white">
+                                  {task.title}
+                                </h5>
                               </div>
                             </div>
                           </div>
@@ -6654,18 +10096,55 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             <span>Guía de lectura: {sess.pagesAllocation}</span>
                           </div>
                         )}
+                        {(sess.isIntradayRescheduled || sess.isPartialRemainder) && (
+                          <div className="flex flex-wrap items-center gap-1.5 pl-6 mt-1">
+                            {sess.isIntradayRescheduled && (
+                              <span className="px-2 py-0.5 rounded-md bg-cyan-100 text-cyan-800 text-[11px] font-bold">
+                                🔄 Reajustado durante el día ({sess.originalStartTime || '08:00'} → {effectiveStart})
+                              </span>
+                            )}
+                            {sess.isPartialRemainder && (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[11px] font-bold">
+                                ⚡ Restante parcial ({sess.partialHoursCompleted}h ya completadas)
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
 
-                      {onStartPomodoro && (
+                      <div className="flex flex-wrap items-center gap-2 self-start sm:self-center shrink-0">
                         <button
                           type="button"
-                          onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
-                          className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors whitespace-nowrap self-start sm:self-center cursor-pointer"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenPartialSessionModal(sess);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold rounded-xl shadow-xs transition-colors whitespace-nowrap cursor-pointer"
                         >
-                          <Play className="w-3.5 h-3.5" />
-                          <span>Iniciar Pomodoro</span>
+                          <span>½ Hecho parcial</span>
                         </button>
-                      )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCompleteFullStudySession(sess);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold rounded-xl shadow-xs transition-colors whitespace-nowrap cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Hecho</span>
+                        </button>
+                        {onStartPomodoro && (
+                          <button
+                            type="button"
+                            onClick={() => onStartPomodoro(sess.subjectId, sess.topicId)}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>Iniciar Pomodoro</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -7030,21 +10509,28 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
             </div>
 
             <form onSubmit={handleConfirmAddExtraTopicToDay} className="p-6 space-y-4">
-              <div className="flex items-center justify-between gap-2 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl p-3">
-                <div className="text-xs text-blue-900 dark:text-blue-200">
-                  <span className="font-bold block">¿Quieres avanzar el siguiente tema pendiente?</span>
-                  <span className="text-[11px] text-blue-700 dark:text-blue-300">
-                    La app puede preseleccionarte el próximo tema sin estudiar o puedes elegir cualquiera.
-                  </span>
+              <div className="bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-blue-900 dark:text-blue-200">
+                    <span className="font-bold block">¿Quieres avanzar el siguiente tema pendiente?</span>
+                    <span className="text-[11px] text-blue-700 dark:text-blue-300">
+                      Pulsa para alternar entre los próximos temas pendientes por orden de prioridad (% nota final).
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSuggestNextPendingTopicForSlot}
+                    className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 active:scale-95 text-white text-[11px] font-bold shrink-0 inline-flex items-center gap-1 cursor-pointer transition-all shadow-2xs"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    <span>Sugerir siguiente</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleSuggestNextPendingTopicForSlot}
-                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold shrink-0 inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <Wand2 className="w-3.5 h-3.5" />
-                  <span>Sugerir siguiente</span>
-                </button>
+                {suggestedTopicFeedback && (
+                  <div className="text-[11px] font-semibold text-indigo-900 dark:text-indigo-200 bg-white/90 dark:bg-slate-900/80 border border-indigo-200 dark:border-indigo-800 rounded-lg px-2.5 py-1.5">
+                    {suggestedTopicFeedback}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -7090,9 +10576,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                         subObj.topics.find((t) => !t.studiedAt && t.status !== 'estudiado') ||
                         subObj.topics[0];
                       setExtraTopicId(firstPending.id);
-                      setExtraTopicPagesCount(
-                        getDefaultPagesForTopic(firstPending, extraTopicDate)
-                      );
+                      applyTopicSelectionForFreeSlot(nextSubId, firstPending, extraTopicDate);
                     }
                   }}
                   className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100"
@@ -7116,11 +10600,7 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                     setExtraTopicId(nextTopicId);
                     const subObj = subjects.find((s) => s.id === extraTopicSubjectId);
                     const topObj = subObj?.topics.find((t) => t.id === nextTopicId);
-                    if (topObj) {
-                      setExtraTopicPagesCount(
-                        getDefaultPagesForTopic(topObj, extraTopicDate)
-                      );
-                    }
+                    applyTopicSelectionForFreeSlot(extraTopicSubjectId, topObj, extraTopicDate);
                   }}
                   className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100"
                 >
@@ -7172,6 +10652,14 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                 const remainingPages = Math.max(1, totalTopicPages - readPages);
                 const sliderMax = Math.max(15, remainingPages, extraTopicPagesCount);
 
+                const existingPlanned =
+                  chosenSub && chosenTopic
+                    ? getPlannedSessionsForTopic(chosenSub.id, chosenTopic.id)
+                    : [];
+                const hasPriorExtra =
+                  Object.keys(chosenTopic?.extraStudySessionsByDate || {}).length > 0;
+                const isAlreadyPlannedTopic = existingPlanned.length > 0 || hasPriorExtra;
+
                 const safePages = Math.max(1, Math.round(extraTopicPagesCount || 1));
                 const durationMins = Math.max(5, Math.round(safePages * minsPerPage));
                 const durationHoursRounded = Math.round((durationMins / 60) * 100) / 100;
@@ -7184,6 +10672,48 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
 
                 return (
                   <div className="space-y-3">
+                    {isAlreadyPlannedTopic && (
+                      <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/35 border border-amber-300 dark:border-amber-800 space-y-2">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                          <div className="text-[11px] text-amber-900 dark:text-amber-200 leading-snug">
+                            <strong className="block font-extrabold">
+                              Este tema ya estaba planeado anteriormente ({existingPlanned.length > 0 ? `${existingPlanned.length} sesión(es)` : 'en otro hueco'})
+                            </strong>
+                            {existingPlanned.length > 0 && (
+                              <span className="text-amber-800 dark:text-amber-300 block mt-0.5">
+                                Plan previo:{' '}
+                                {existingPlanned
+                                  .slice(0, 3)
+                                  .map((s) => `${formatReadableDate(s.date)} (${s.startTime || '—'})`)
+                                  .join(' · ')}
+                                {existingPlanned.length > 3 ? ` (+${existingPlanned.length - 3} más)` : ''}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <label className="flex items-center gap-2 text-[11px] font-bold text-amber-950 dark:text-amber-100 cursor-pointer bg-white/75 dark:bg-slate-900/60 px-2.5 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800/70">
+                          <input
+                            type="checkbox"
+                            checked={replaceExistingPlanOnAdd}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setReplaceExistingPlanOnAdd(checked);
+                              setExtraTopicPagesCount(
+                                checked
+                                  ? getFullTopicPagesForSlot(chosenTopic)
+                                  : getDefaultPagesForTopic(chosenTopic, extraTopicDate)
+                              );
+                            }}
+                            className="rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                          />
+                          <span>
+                            Modificar todo el plan de este tema (mover sus {remainingPages} págs. aquí y recalcular el calendario)
+                          </span>
+                        </label>
+                      </div>
+                    )}
+
                     {/* Selector interactivo de Número de Páginas a Estudiar */}
                     <div className="p-3.5 rounded-xl bg-blue-50/60 dark:bg-slate-800/80 border border-blue-200/80 dark:border-slate-700 space-y-2.5">
                       <div className="flex items-center justify-between gap-2">
@@ -7308,8 +10838,18 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                   type="submit"
                   className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold rounded-xl shadow-xs inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Añadir Tema ({extraTopicPagesCount} págs.)</span>
+                  {replaceExistingPlanOnAdd &&
+                  getPlannedSessionsForTopic(extraTopicSubjectId, extraTopicId).length > 0 ? (
+                    <>
+                      <RotateCw className="w-3.5 h-3.5" />
+                      <span>Modificar Todo el Tema ({extraTopicPagesCount} págs.)</span>
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Añadir Tema ({extraTopicPagesCount} págs.)</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -7317,7 +10857,363 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         </div>
       )}
 
-      {/* Modal de exportación .ICS para sincronizar con Google Calendar o Apple Calendar */}
+      {/* MODAL: MARCAR SESIÓN COMO HECHA PARCIALMENTE Y REUBICAR LO QUE FALTE EN OTRO HUECO LIBRE */}
+      {partialModalSession && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl max-w-xl w-full overflow-hidden max-h-[92vh] flex flex-col">
+            <div className="px-6 py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-indigo-600 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <Clock className="w-5 h-5 shrink-0" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold">
+                    Marcar Sesión como «Hecha Parcialmente»
+                  </h3>
+                  <p className="text-[11px] text-amber-100">
+                    Guarda lo que ya has avanzado hoy y reubica automáticamente lo que te falte en otro hueco libre
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPartialModalSession(null)}
+                className="p-1 rounded-lg hover:bg-white/15 text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleConfirmPartialSessionCompletion}
+              className="p-5 sm:p-6 space-y-4 overflow-y-auto"
+            >
+              {/* Resumen de la sesión actual */}
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 space-y-1">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span
+                    className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded text-white"
+                    style={{ backgroundColor: partialModalSession.subjectColor || '#3b82f6' }}
+                  >
+                    {partialModalSession.subjectName}
+                  </span>
+                  <span className="text-xs font-mono-numbers font-bold text-slate-600 dark:text-slate-300">
+                    📅 {formatReadableDate(partialModalSession.date)} · {partialModalSession.startTime} – {partialModalSession.endTime} ({partialModalSession.durationHours}h totales)
+                  </span>
+                </div>
+                <div className="text-sm font-extrabold text-slate-900 dark:text-white pt-1">
+                  {partialModalSession.topicTitle}
+                </div>
+                {partialModalSession.pagesAllocation && (
+                  <div className="text-xs text-blue-700 dark:text-blue-300 font-semibold">
+                    📄 Previsto en esta sesión: {partialModalSession.pagesAllocation} ({partialTotalSessionPages} págs.)
+                  </div>
+                )}
+              </div>
+
+              {/* Selector rápido de % completado */}
+              <div className="space-y-2">
+                <label className="block text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                  1. ¿Cuánto has podido completar de esta sesión?
+                </label>
+
+                <div className="grid grid-cols-4 gap-2">
+                  {[25, 50, 75, 85].map((pct) => {
+                    const totalH = Math.max(0.5, partialModalSession.durationHours || 1.5);
+                    const calcDoneH = Math.max(0.25, Math.round(totalH * (pct / 100) * 4) / 4);
+                    const calcDoneP = Math.max(
+                      1,
+                      Math.min(partialTotalSessionPages - 1, Math.round(partialTotalSessionPages * (pct / 100)))
+                    );
+                    return (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => {
+                          setPartialCompletedPct(pct);
+                          setPartialCompletedHours(calcDoneH);
+                          setPartialCompletedPages(calcDoneP);
+                        }}
+                        className={`py-2 px-3 rounded-xl border text-xs font-extrabold transition-all cursor-pointer font-mono-numbers ${
+                          partialCompletedPct === pct
+                            ? 'bg-amber-500 text-white border-amber-500 shadow-xs'
+                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-amber-400'
+                        }`}
+                      >
+                        {pct}% hecho
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div className="p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800/70">
+                    <label className="block text-[11px] font-bold text-emerald-900 dark:text-emerald-200 mb-1">
+                      Horas ya realizadas hoy
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="0.25"
+                        min="0.25"
+                        max={Math.max(0.25, (partialModalSession.durationHours || 1.5) - 0.25)}
+                        value={partialCompletedHours}
+                        onChange={(e) => {
+                          const val = Math.max(0.25, parseFloat(e.target.value) || 0.25);
+                          const totalH = Math.max(0.5, partialModalSession.durationHours || 1.5);
+                          const clamped = Math.min(totalH - 0.25, val);
+                          setPartialCompletedHours(clamped);
+                          setPartialCompletedPct(Math.round((clamped / totalH) * 100));
+                        }}
+                        className="w-24 text-sm font-mono-numbers font-extrabold bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 rounded-lg px-2.5 py-1 text-emerald-800 dark:text-emerald-200"
+                      />
+                      <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                        de {partialModalSession.durationHours}h
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800/70">
+                    <label className="block text-[11px] font-bold text-blue-900 dark:text-blue-200 mb-1">
+                      Páginas ya estudiadas hoy
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="1"
+                        min="1"
+                        max={Math.max(1, partialTotalSessionPages - 1)}
+                        value={partialCompletedPages}
+                        onChange={(e) => {
+                          const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                          setPartialCompletedPages(
+                            Math.min(Math.max(1, partialTotalSessionPages - 1), val)
+                          );
+                        }}
+                        className="w-24 text-sm font-mono-numbers font-extrabold bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-700 rounded-lg px-2.5 py-1 text-blue-800 dark:text-blue-200"
+                      />
+                      <span className="text-xs font-semibold text-blue-800 dark:text-blue-300">
+                        de {partialTotalSessionPages} págs.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Resumen de lo que falta por hacer */}
+              {(() => {
+                const totalH = Math.max(0.5, partialModalSession.durationHours || 1.5);
+                const remH = Math.max(
+                  0.5,
+                  Math.round((totalH - Math.min(totalH - 0.25, partialCompletedHours)) * 10) / 10
+                );
+                const remPages = Math.max(1, partialTotalSessionPages - partialCompletedPages);
+                const autoEnd = calculateAutoEndTime(partialRelocateStartTime || '17:00', remH);
+
+                return (
+                  <div className="space-y-3">
+                    <div className="p-3.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 flex items-center justify-between gap-3">
+                      <div>
+                        <span className="text-[11px] font-extrabold uppercase tracking-wider text-amber-800 dark:text-amber-300 block">
+                          ⚡ Parte pendiente a reubicar en otro hueco libre
+                        </span>
+                        <span className="text-xs text-slate-700 dark:text-slate-200 font-semibold">
+                          Te faltan <strong>{remH}h</strong> ({remPages} {remPages === 1 ? 'página' : 'páginas'}) para terminar esta sesión
+                        </span>
+                      </div>
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-600 text-white font-mono-numbers font-extrabold text-xs shrink-0">
+                        Faltan {remH}h · {remPages}p
+                      </span>
+                    </div>
+
+                    {/* Huecos libres encontrados automáticamente por la aplicación */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                        2. Huecos libres encontrados por la aplicación para realizar lo que te falta:
+                      </label>
+
+                      {partialSessionSuggestedSlots.length > 0 && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {partialSessionSuggestedSlots.map((slot, idx) => {
+                            const isSelected =
+                              partialRelocateDate === slot.date &&
+                              partialRelocateStartTime === slot.startTime;
+                            return (
+                              <button
+                                key={`${slot.date}_${slot.startTime}_${idx}`}
+                                type="button"
+                                onClick={() => {
+                                  setPartialRelocateDate(slot.date);
+                                  setPartialRelocateStartTime(slot.startTime);
+                                }}
+                                className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-2 ${
+                                  isSelected
+                                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                    : 'bg-slate-50 dark:bg-slate-800/80 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                                }`}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-xs font-extrabold truncate flex items-center gap-1">
+                                    <span>{idx === 0 ? '⭐ Recomendado:' : '📅'}</span>
+                                    <span>{slot.dayLabel}</span>
+                                  </div>
+                                  <div
+                                    className={`text-[11px] font-mono-numbers font-semibold ${
+                                      isSelected ? 'text-indigo-100' : 'text-slate-500 dark:text-slate-400'
+                                    }`}
+                                  >
+                                    Hueco libre: {slot.startTime} → {slot.endTime} ({slot.durationHours}h)
+                                  </div>
+                                </div>
+                                {isSelected && (
+                                  <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Selector manual por si prefiere otro día u hora */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+                            Fecha para realizar lo que falta
+                          </label>
+                          <input
+                            type="date"
+                            value={partialRelocateDate}
+                            onChange={(e) => setPartialRelocateDate(e.target.value)}
+                            className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 font-semibold text-slate-800 dark:text-slate-100"
+                            required
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+                            Hora de inicio ({partialRelocateStartTime} → {autoEnd})
+                          </label>
+                          <input
+                            type="time"
+                            value={partialRelocateStartTime}
+                            onChange={(e) => setPartialRelocateStartTime(e.target.value)}
+                            className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 font-mono-numbers font-bold text-indigo-700 dark:text-indigo-300"
+                            required
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setPartialModalSession(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-slate-900 cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-indigo-600 hover:from-amber-600 hover:to-indigo-700 text-white text-xs font-extrabold rounded-xl shadow-xs inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Guardar Avance Parcial y Reubicar Restante</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de confirmación antes de eliminar bloques automatizados / recurrentes */}
+      {pendingDeleteAutomatedBlock && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setPendingDeleteAutomatedBlock(null)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl max-w-md w-full overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 flex items-start justify-between gap-3 bg-amber-50/70 dark:bg-amber-950/30">
+              <div className="flex items-start gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 shrink-0 mt-0.5">
+                  <Repeat className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    Este bloque está automatizado semanalmente
+                  </h4>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">
+                    «{pendingDeleteAutomatedBlock.title}» ({pendingDeleteAutomatedBlock.startTime}–
+                    {pendingDeleteAutomatedBlock.endTime})
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingDeleteAutomatedBlock(null)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                ¿Ha surgido un imprevisto puntual y quieres quitar únicamente este día, o prefieres
+                eliminar toda la automatización semanal del calendario?
+              </p>
+
+              <div className="space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExcludeSingleDayFromAutomatedBlock(pendingDeleteAutomatedBlock)
+                  }
+                  className="w-full p-3.5 rounded-xl border-2 border-indigo-500/80 bg-indigo-50/80 hover:bg-indigo-100/80 dark:bg-indigo-950/40 dark:hover:bg-indigo-950/70 text-left transition-all cursor-pointer"
+                >
+                  <div className="text-xs font-extrabold text-indigo-900 dark:text-indigo-200">
+                    📅 Quitar solo el día{' '}
+                    {formatReadableDate(
+                      pendingDeleteAutomatedBlock.date || selectedDayStr || todayStr
+                    )}
+                  </div>
+                  <div className="text-[11px] text-indigo-700 dark:text-indigo-300 mt-0.5">
+                    Ideal por un imprevisto puntual: mantiene intacta tu automatización el resto de
+                    semanas.
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => executeDeleteWholeAutomatedBlock(pendingDeleteAutomatedBlock)}
+                  className="w-full p-3.5 rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50/70 hover:bg-rose-100/80 dark:bg-rose-950/30 dark:hover:bg-rose-950/60 text-left transition-all cursor-pointer"
+                >
+                  <div className="text-xs font-extrabold text-rose-800 dark:text-rose-200">
+                    🗑️ Eliminar toda la automatización semanal
+                  </div>
+                  <div className="text-[11px] text-rose-700 dark:text-rose-300 mt-0.5">
+                    Borra todas las repeticiones futuras de «{pendingDeleteAutomatedBlock.title}».
+                  </div>
+                </button>
+              </div>
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setPendingDeleteAutomatedBlock(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de exportación .ICS y .CSV para sincronizar con Google Calendar, Outlook o Apple Calendar */}
       <IcsCalendarExportModal
         isOpen={showIcsExportModal}
         onClose={() => setShowIcsExportModal(false)}
@@ -7326,6 +11222,8 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
         blockedEvents={blockedEvents}
         precomputedStudySessions={allGeneratedSessions}
         initialSubjectFilterId={selectedSubjectId}
+        initialHorizonDays={icsExportPreset.horizonDays}
+        initialWeekRange={icsExportPreset.weekRange}
       />
     </div>
   );

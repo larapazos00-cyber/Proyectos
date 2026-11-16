@@ -27,8 +27,8 @@ const ai = new GoogleGenAI({
 });
 
 // Helper for model & automatic multi-model fallback on 503/429 spikes
-const GEMINI_MODEL = 'gemini-3.1-flash-lite';
-const FALLBACK_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+const GEMINI_MODEL = 'gemini-3.8-flash';
+const FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
 const keyPointsSummaryCache = new Map<string, any>();
 const quizGenerationCache = new Map<string, any>();
 const cornellStructureCache = new Map<string, any>();
@@ -52,15 +52,15 @@ function isTransientOverload(err: any): boolean {
 
 async function generateContentWithFallback(params: any) {
   let lastError: any = null;
+  const sanitizedConfig = { ...(params?.config || {}) };
+  delete sanitizedConfig.temperature;
   for (let i = 0; i < FALLBACK_MODELS.length; i++) {
     const modelName = FALLBACK_MODELS[i];
     try {
       return await ai.models.generateContent({
         ...params,
         model: modelName,
-        config: {
-          ...(params?.config || {}),
-        },
+        config: sanitizedConfig,
       });
     } catch (err: any) {
       lastError = err;
@@ -272,46 +272,59 @@ Cada tarjeta debe cumplir rigurosamente:
   }
 });
 
-// 2.1 Extracción automática de términos clave de apuntes Cornell y generación de flashcards con caso de aplicación
+// 2.1 Extracción automática de conceptos clave de apuntes Cornell y generación de mazo de flashcards con definiciones, ejemplos prácticos y situaciones de uso real
 app.post('/api/gemini/extract-cornell-flashcards', async (req: Request, res: Response) => {
   try {
     const {
+      subjectName = 'Asignatura Universitaria',
       topicTitle = 'Tema de Estudio',
       notesContent = '',
       cues = [],
+      keyPoints = [],
       summary = '',
       selectedTerms = [],
       count = 6,
     } = req.body;
 
-    const cuesText = Array.isArray(cues) && cues.length > 0
-      ? `\nColumna de ideas clave y preguntas (Cues):\n- ${cues.join('\n- ')}`
-      : '';
+    const cuesText =
+      Array.isArray(cues) && cues.length > 0
+        ? `\nConceptos clave y preguntas detonadoras de la columna izquierda (Cues Cornell):\n- ${cues.join('\n- ')}`
+        : '';
+    const keyPointsText =
+      Array.isArray(keyPoints) && keyPoints.length > 0
+        ? `\nPuntos clave extraídos de los apuntes:\n- ${keyPoints
+            .map((kp: any) =>
+              typeof kp === 'string' ? kp : `${kp.title || ''}: ${kp.detail || ''}`
+            )
+            .join('\n- ')}`
+        : '';
     const summaryText = summary
-      ? `\nResumen final del método Cornell:\n"""${summary}"""`
+      ? `\nResumen inferior del método Cornell:\n"""${summary}"""`
       : '';
 
-    const termsConstraint = Array.isArray(selectedTerms) && selectedTerms.length > 0
-      ? `\nTérminos prioritarios seleccionados por el estudiante a incluir obligatoriamente:\n- ${selectedTerms.join('\n- ')}`
-      : '';
+    const termsConstraint =
+      Array.isArray(selectedTerms) && selectedTerms.length > 0
+        ? `\nConceptos clave seleccionados prioritariamente para convertir en el mazo de flashcards:\n- ${selectedTerms.join('\n- ')}`
+        : '';
 
     const prompt = `Actúa como un profesor universitario experto en pedagogía y metodología Active Recall.
-Tu objetivo es analizar minuciosamente todo el cuerpo de las notas de método Cornell sobre el tema "${topicTitle}" para extraer los términos técnicos y conceptos clave esenciales, y generar flashcards de estudio de alto rendimiento.
+Tu objetivo es tomar los conceptos clave extraídos de las notas de método Cornell sobre "${topicTitle}" (Asignatura: "${subjectName}") y generar automáticamente un mazo completo de flashcards de alto rendimiento.
 
-Notas de método Cornell completas del estudiante:
+Contenido de las notas Cornell del estudiante:
 """
 ${notesContent || topicTitle}
-"""${cuesText}${summaryText}${termsConstraint}
+"""${cuesText}${keyPointsText}${summaryText}${termsConstraint}
 
-Instrucciones pedagógicas rigurosas:
-1. Extrae los términos, entidades, mecanismos y conceptos clave más importantes del texto completo.
-2. Genera exactamente ${count} flashcards de estudio siguiendo esta estructura obligatoria:
-   - "term": Nombre exacto y claro del concepto o término clave (ejemplo: "Potencial de reposo", "Inhibidor competitivo", "Fosfofructoquinasa-1").
-   - "definition": Definición teórica concisa, precisa y rigurosa (2-3 frases) explicando su fundamento conceptual.
-   - "practicalCase": Un caso de aplicación práctica, clínica o experimental breve (1-2 frases) que demuestre cómo se manifiesta o para qué se utiliza este concepto en la práctica real.
-   - "hint": Una pista nemotécnica o dato activador para facilitar el Active Recall si el estudiante duda.
-   - "conceptTag": Subárea o categoría temática del concepto.
-3. El idioma debe ser rigurosamente en español técnico impecable.`;
+Instrucciones pedagógicas obligatorias:
+1. Toma los conceptos clave de las notas Cornell (priorizando la columna de Cues, puntos clave y términos seleccionados) y devuelve en "extractedTerms" la lista de conceptos clave detectados.
+2. Genera exactamente ${count} flashcards de estudio siguiendo esta estructura obligatoria para cada concepto clave:
+   - "term": Nombre exacto y claro del concepto clave extraído de las notas Cornell.
+   - "definition": Definición teórica concisa, rigurosa y clara (2-3 frases) que explique qué es y cuál es su fundamento académico.
+   - "practicalExample": Un ejemplo práctico concreto e ilustrativo (1-2 frases) que demuestre paso a paso cómo funciona, cómo se calcula o cómo se ejemplifica este concepto.
+   - "realWorldScenario": Una situación de uso real (1-2 frases) en un contexto profesional, clínico, industrial, empresarial o de la vida real donde el estudiante vería o aplicaría este concepto.
+   - "hint": Una pista nemotécnica o pregunta guía breve para activar la memoria sin revelar la respuesta completa.
+   - "conceptTag": Categoría o subtema al que pertenece el concepto.
+3. Redacta todo en español académico claro, directo y preciso.`;
 
     let parsedData: any = null;
     try {
@@ -326,7 +339,7 @@ Instrucciones pedagógicas rigurosas:
               extractedTerms: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: 'Lista de términos clave detectados en las notas Cornell',
+                description: 'Lista de conceptos clave extraídos de las notas Cornell',
               },
               flashcards: {
                 type: Type.ARRAY,
@@ -335,11 +348,19 @@ Instrucciones pedagógicas rigurosas:
                   properties: {
                     term: { type: Type.STRING },
                     definition: { type: Type.STRING },
-                    practicalCase: { type: Type.STRING },
+                    practicalExample: { type: Type.STRING },
+                    realWorldScenario: { type: Type.STRING },
                     hint: { type: Type.STRING },
                     conceptTag: { type: Type.STRING },
                   },
-                  required: ['term', 'definition', 'practicalCase', 'hint', 'conceptTag'],
+                  required: [
+                    'term',
+                    'definition',
+                    'practicalExample',
+                    'realWorldScenario',
+                    'hint',
+                    'conceptTag',
+                  ],
                 },
               },
             },
@@ -349,30 +370,56 @@ Instrucciones pedagógicas rigurosas:
       });
       parsedData = JSON.parse(response.text || '{"extractedTerms":[],"flashcards":[]}');
     } catch (aiErr: any) {
-      console.warn('Fallback activated for /api/gemini/extract-cornell-flashcards:', aiErr?.message || aiErr);
+      console.warn(
+        'Fallback activated for /api/gemini/extract-cornell-flashcards:',
+        aiErr?.message || aiErr
+      );
     }
 
-    if (!parsedData || !Array.isArray(parsedData.flashcards) || parsedData.flashcards.length === 0) {
+    if (
+      !parsedData ||
+      !Array.isArray(parsedData.flashcards) ||
+      parsedData.flashcards.length === 0
+    ) {
       const rawLines = String(notesContent || summary || topicTitle)
         .split(/\n+/)
         .map((l) => l.replace(/^[#*\->\d.\s]+/, '').trim())
         .filter((l) => l.length > 10);
+
+      const kpTitles = Array.isArray(keyPoints)
+        ? keyPoints
+            .map((kp: any) => (typeof kp === 'string' ? kp : kp?.title))
+            .filter(Boolean)
+        : [];
+
       const termsSource =
         Array.isArray(selectedTerms) && selectedTerms.length > 0
           ? selectedTerms
           : Array.isArray(cues) && cues.length > 0
-          ? cues
-          : rawLines.slice(0, Number(count) || 6).map((l) => l.split(/[:.;,-]/)[0].trim().slice(0, 50));
+          ? [...cues, ...kpTitles]
+          : kpTitles.length > 0
+          ? kpTitles
+          : rawLines
+              .slice(0, Number(count) || 6)
+              .map((l) => l.split(/[:.;,-]/)[0].trim().slice(0, 55));
 
       const total = Math.max(1, Math.min(15, Number(count) || 6));
       const fallbackCards = Array.from({ length: total }, (_, idx) => {
-        const termName = termsSource[idx % Math.max(1, termsSource.length)] || `${topicTitle} - Concepto ${idx + 1}`;
-        const contextSentence = rawLines[idx % Math.max(1, rawLines.length)] || `Concepto fundamental dentro del estudio de ${topicTitle}.`;
+        const termName =
+          termsSource[idx % Math.max(1, termsSource.length)] ||
+          `${topicTitle} - Concepto Clave ${idx + 1}`;
+        const contextSentence =
+          rawLines[idx % Math.max(1, rawLines.length)] ||
+          `Concepto fundamental dentro del bloque "${topicTitle}" en ${subjectName}.`;
+        const practicalExample = `Ejemplo práctico: Al analizar un ejercicio de "${topicTitle}", se aplica "${termName}" para estructurar y demostrar el mecanismo principal paso a paso.`;
+        const realWorldScenario = `Situación de uso real: En el ejercicio profesional de ${subjectName}, "${termName}" se emplea para diagnosticar, optimizar o resolver casos reales basados en evidencia.`;
         return {
           term: termName,
-          definition: `${contextSentence}. Constituye un eje estructural del bloque "${topicTitle}" para el dominio técnico de la asignatura.`,
-          practicalCase: `En un supuesto práctico o de examen sobre ${topicTitle}, permite identificar y justificar rigurosamente el comportamiento de "${termName}".`,
-          hint: `Conecta este término con la idea central de ${topicTitle}.`,
+          definition: `${contextSentence}. Constituye un principio esencial de "${topicTitle}" que define su funcionamiento y relación con el resto del temario.`,
+          practicalExample,
+          realWorldScenario,
+          practicalCase: `${practicalExample} ${realWorldScenario}`,
+          hint: `Relaciona "${termName}" con el mecanismo central de ${topicTitle}.`,
           conceptTag: topicTitle,
         };
       });
@@ -380,12 +427,31 @@ Instrucciones pedagógicas rigurosas:
         extractedTerms: fallbackCards.map((c) => c.term),
         flashcards: fallbackCards,
       };
+    } else {
+      parsedData.flashcards = parsedData.flashcards.map((card: any) => {
+        const practicalExample =
+          card.practicalExample ||
+          card.practicalCase ||
+          `Aplicación directa de ${card.term} en un caso práctico de ${topicTitle}.`;
+        const realWorldScenario =
+          card.realWorldScenario ||
+          `Uso profesional de ${card.term} en escenarios reales de ${subjectName}.`;
+        return {
+          ...card,
+          practicalExample,
+          realWorldScenario,
+          practicalCase:
+            card.practicalCase || `${practicalExample}\n\n🌍 Situación real: ${realWorldScenario}`,
+        };
+      });
     }
 
     res.json({ success: true, data: parsedData });
   } catch (error: any) {
     console.error('Error in /api/gemini/extract-cornell-flashcards:', error);
-    res.status(500).json({ error: error.message || 'Error al extraer términos y generar flashcards.' });
+    res
+      .status(500)
+      .json({ error: error.message || 'Error al extraer términos y generar flashcards.' });
   }
 });
 
@@ -528,6 +594,41 @@ function buildQuizFallback(
       };
     }
 
+    if (examType === 'verdadero_falso') {
+      const isTrueStatement = idx % 2 === 0;
+      const statementText = isTrueStatement
+        ? `En relación con "${topicObj.title}" (${subtopicFocus}): ${coreStatement.replace(/\.$/, '')}.`
+        : `En relación con "${topicObj.title}", el concepto de "${subtopicFocus}" actúa de forma completamente independiente e inversa a las condiciones principales del sistema, careciendo de vínculo funcional con el resto del tema.`;
+
+      const correctOptionIndex = isTrueStatement ? 0 : 1;
+      return {
+        id: `q-vf-${idx + 1}`,
+        questionType: 'verdadero_falso',
+        prompt: statementText,
+        options: ['Verdadero', 'Falso'],
+        correctOptionIndex,
+        explanation: isTrueStatement
+          ? `VERDADERO: La afirmación recoge fielmente el fundamento de "${subtopicFocus}" dentro de "${topicObj.title}": ${coreStatement}`
+          : `FALSO: La afirmación es incorrecta porque "${subtopicFocus}" sí está estrechamente integrado en "${topicObj.title}". En realidad: ${coreStatement}`,
+        optionExplanations: [
+          isTrueStatement
+            ? `CORRECTA (Verdadero): Coincide con la definición y los apuntes de "${subtopicFocus}".`
+            : `INCORRECTA (Verdadero): La proposición invierte el sentido real de "${subtopicFocus}".`,
+          !isTrueStatement
+            ? `CORRECTA (Falso): Detecta correctamente la contradicción conceptual planteada en el enunciado.`
+            : `INCORRECTA (Falso): El enunciado sí era verdadero según el temario de "${topicObj.title}".`,
+        ],
+        keyPoints: [
+          `Veracidad conceptual sobre ${subtopicFocus}`,
+          `Fundamento en ${topicObj.title}`,
+        ],
+        rubricCriteria: [
+          'Identificación correcta de Verdadero o Falso (60%)',
+          'Comprensión de la justificación conceptual (40%)',
+        ],
+      };
+    }
+
     if (examType === 'preguntas_cortas') {
       return {
         id: `q-${idx + 1}`,
@@ -666,6 +767,8 @@ app.post('/api/gemini/generate-quiz', async (req: Request, res: Response) => {
     let examInstructions = '';
     if (examType === 'test') {
       examInstructions = `Genera preguntas tipo test de opción múltiple (4 opciones A, B, C, D), índice correcto (0-3), "explanation" concisa (1-2 frases) y "optionExplanations" con 4 textos breves y directos (1 frase por opción indicando por qué acierta o falla).`;
+    } else if (examType === 'verdadero_falso') {
+      examInstructions = `Genera afirmaciones académicas rigurosas de Verdadero o Falso sobre los apuntes. Para cada pregunta, "options" DEBE ser exactamente ["Verdadero", "Falso"], "correctOptionIndex" debe ser 0 (si es Verdadero) o 1 (si es Falso), "explanation" debe justificar con precisión por qué es verdadero o falso según el temario, y "optionExplanations" debe tener 2 frases explicando la opción Verdadero y la opción Falso.`;
     } else if (examType === 'oral') {
       examInstructions = `Genera preguntas para examen oral. Incluye puntos clave indispensables ("keyPoints") y criterios breves de fluidez.`;
     } else if (examType === 'preguntas_cortas') {
@@ -1023,57 +1126,218 @@ Estructura requerida:
   }
 });
 
-// 4.2 Evaluación de Explicación Oral por Audio (Técnica Feynman)
+// 4.2 Speech-to-Text (Transcripción de Explicaciones Orales con gemini-3.5-transcribe)
+app.post('/api/gemini/speech-to-text', async (req: Request, res: Response) => {
+  try {
+    const {
+      audioBase64,
+      mimeType = 'audio/webm',
+      concept = '',
+      subjectName = '',
+      clientTranscriptFallback = '',
+    } = req.body;
+
+    if (!audioBase64 && !clientTranscriptFallback) {
+      res.status(400).json({ error: 'Se requiere el audio grabado para transcribir.' });
+      return;
+    }
+
+    if (!audioBase64 && clientTranscriptFallback) {
+      res.json({
+        success: true,
+        data: {
+          transcription: String(clientTranscriptFallback).trim(),
+          modelUsed: 'web-speech-api',
+        },
+      });
+      return;
+    }
+
+    const cleanBase64 = String(audioBase64).replace(/^data:[^;]+;base64,/, '');
+    const contextHint = concept
+      ? ` El audio es una explicación académica en español sobre "${concept}"${
+          subjectName ? ` de la asignatura "${subjectName}"` : ''
+        }.`
+      : ' El audio es una explicación académica en español.';
+
+    let transcriptionText = '';
+    try {
+      const transcribeResp = await ai.models.generateContent({
+        model: 'gemini-3.5-transcribe',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || 'audio/webm',
+                data: cleanBase64,
+              },
+            },
+            {
+              text: `Transcribe este audio de forma exacta, íntegra y fiel en español.${contextHint} Devuelve únicamente el texto transcrito con puntuación natural, sin comentarios adicionales.`,
+            },
+          ],
+        },
+      });
+      transcriptionText = (transcribeResp.text || '').trim();
+    } catch (transcribeErr) {
+      // Fallback al modelo multimodal principal si gemini-3.5-transcribe no está disponible temporalmente
+      const fallbackResp = await generateContentWithFallback({
+        model: GEMINI_MODEL,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || 'audio/webm',
+                data: cleanBase64,
+              },
+            },
+            {
+              text: `Transcribe exactamente lo que dice el estudiante en este audio en español.${contextHint} Devuelve solo la transcripción textual.`,
+            },
+          ],
+        },
+      });
+      transcriptionText = (fallbackResp.text || '').trim();
+    }
+
+    if (!transcriptionText && clientTranscriptFallback) {
+      transcriptionText = String(clientTranscriptFallback).trim();
+    }
+
+    res.json({
+      success: true,
+      data: {
+        transcription: transcriptionText,
+        modelUsed: 'gemini-3.5-transcribe',
+      },
+    });
+  } catch (error: any) {
+    console.error('Error in /api/gemini/speech-to-text:', error);
+    const fallbackText = String(req.body?.clientTranscriptFallback || '').trim();
+    if (fallbackText) {
+      res.json({
+        success: true,
+        data: {
+          transcription: fallbackText,
+          modelUsed: 'fallback-transcript',
+        },
+      });
+      return;
+    }
+    res.status(500).json({
+      error: error.message || 'Error al convertir la explicación oral en texto mediante Speech-to-Text.',
+    });
+  }
+});
+
+// 4.2b Evaluación de Explicación Oral por Audio: Speech-to-Text + Análisis Gemini de Conceptos Mal Entendidos (Técnica Feynman)
 app.post('/api/gemini/evaluate-audio-feynman', async (req: Request, res: Response) => {
   try {
     const {
       concept,
+      subtopics = [],
+      subjectName = '',
       audioBase64,
       mimeType = 'audio/webm',
+      liveTranscript = '',
       targetAudience = 'un estudiante o principiante',
       referenceContent = '',
     } = req.body;
-    if (!audioBase64) {
-      res.status(400).json({ error: 'Falta la grabación o archivo de audio.' });
+
+    if (!audioBase64 && !liveTranscript) {
+      res.status(400).json({ error: 'Falta la grabación de audio o transcripción oral.' });
       return;
     }
 
-    const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '');
+    const cleanBase64 = audioBase64 ? String(audioBase64).replace(/^data:[^;]+;base64,/, '') : '';
+
+    // Paso 1: Convertir la explicación oral en texto mediante gemini-3.5-transcribe (Speech-to-Text)
+    let speechToTextTranscript = String(liveTranscript || '').trim();
+    if (cleanBase64) {
+      try {
+        const sttResponse = await ai.models.generateContent({
+          model: 'gemini-3.5-transcribe',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'audio/webm',
+                  data: cleanBase64,
+                },
+              },
+              {
+                text: `Transcribe de manera íntegra, literal y precisa esta explicación oral en español sobre "${concept}". Devuelve únicamente la transcripción.`,
+              },
+            ],
+          },
+        });
+        const sttText = (sttResponse.text || '').trim();
+        if (sttText.length >= speechToTextTranscript.length * 0.6) {
+          speechToTextTranscript = sttText;
+        }
+      } catch (_) {
+        // Si falla el paso dedicado de STT, el análisis multimodal inferior transcribirá directamente el audio
+      }
+    }
+
+    const subtopicsBlock =
+      Array.isArray(subtopics) && subtopics.length > 0
+        ? `\nSubtemas del programa oficial: ${subtopics.join(', ')}`
+        : '';
+
     const refBlock = referenceContent
-      ? `\nMaterial de referencia del tema para verificar precisión:\n"""${String(referenceContent).slice(0, 10000)}"""`
+      ? `\nMaterial de referencia del temario y apuntes para verificar precisión conceptual:\n"""${String(referenceContent).slice(0, 12000)}"""`
       : '';
 
-    const prompt = `Escucha atentamente este audio donde un estudiante explica con sus propias palabras el concepto: "${concept}".
-Aplica con rigor y empatía pedagógica la Técnica de Feynman para analizar si su explicación es SIMPLE y PRECISA, ofreciendo correcciones específicas si detectas conceptos mal explicados.
-Audiencia objetivo a la que se dirige: "${targetAudience}".${refBlock}
+    const sttBlock = speechToTextTranscript
+      ? `\nTranscripción Speech-to-Text obtenida de la explicación oral del estudiante:\n"""${speechToTextTranscript}"""`
+      : '';
+
+    const prompt = `Actúa como un mentor experto en la Técnica de Feynman y profesor de "${subjectName || 'la asignatura'}".
+El estudiante acaba de realizar una EXPLICACIÓN ORAL sobre el tema/concepto: "${concept}".${subtopicsBlock}
+Audiencia objetivo a la que se dirige: "${targetAudience}".${sttBlock}${refBlock}
+
+Tu misión es:
+1. Confirmar o completar la transcripción exacta de la explicación oral ("transcription").
+2. Analizar a fondo la calidad de la explicación aplicando la Técnica de Feynman (Simplicidad + Precisión).
+3. Identificar AUTOMÁTICAMENTE todos los CONCEPTOS MAL ENTENDIDOS, confusiones conceptuales, relaciones causa-efecto erróneas, imprecisiones o tecnicismos mal empleados por el estudiante ("corrections").
 
 Devuelve un JSON con:
-1. "transcription": Transcripción textual exacta y completa de lo que el estudiante dijo en el audio.
-2. "simplicityScore" (0 a 100): Puntuación de simplicidad, claridad y ausencia de tecnicismos oscuros.
+1. "transcription": Transcripción textual completa y fiel de la explicación oral del estudiante.
+2. "simplicityScore" (0 a 100): Claridad, naturalidad oral, sencillez expositiva y uso de ejemplos comprensibles.
 3. "clarityScore" (0 a 100): Equivalente a simplicityScore.
-4. "accuracyScore" (0 a 100): Puntuación de precisión conceptual y rigor académico.
-5. "overallScore" (0 a 100): Puntuación global combinada.
-6. "corrections": Lista de correcciones para cualquier concepto mal explicado, erróneo, impreciso o confuso detectado en el audio ({ concept, userMistake, correction, severity: "error_conceptual" | "imprecision" | "exceso_jerga" }).
-7. "strengths": Lista de 2 a 4 puntos bien explicados por el estudiante.
-8. "identifiedJargon": Lista de términos técnicos rebuscados que empleó sin explicar en términos sencillos.
-9. "conceptualGaps": Lagunas conceptuales o aspectos clave que omitió.
-10. "intuitiveAnalogies": 2 analogías cotidianas y visuales para redondear la comprensión.
-11. "improvedDraft": Una versión modelo mejorada explicada de forma simple y precisa según el método Feynman.
-12. "followUpQuestions": 2 preguntas para comprobar si ha comprendido las correcciones.
-13. "feedback": Comentario constructivo sobre la simplicidad, precisión y soltura de su explicación.`;
+4. "accuracyScore" (0 a 100): Rigor académico y ausencia de errores conceptuales frente al temario real.
+5. "overallScore" (0 a 100): Puntuación global combinada del reto oral Feynman.
+6. "oralDeliveryFeedback": Evaluación específica de la expresión oral (estructura del discurso hablado, ritmo, claridad al conectar ideas y seguridad conceptual).
+7. "corrections": Lista detallada de CONCEPTOS MAL ENTENDIDOS o explicados de forma confusa/inexacta detectados automáticamente (incluye entre 1 y 5 elementos si hay cualquier error, confusión o idea incompleta). Cada elemento debe incluir:
+   - "concept": Nombre del concepto mal entendido o explicado de forma imprecisa.
+   - "userMistake": Qué dijo exactamente el estudiante en su explicación oral y por qué demuestra un malentendido, confusión o falta de claridad.
+   - "correction": Explicación corregida, sencilla, intuitiva y 100% rigurosa según el método Feynman.
+   - "severity": "error_conceptual" (concepto mal entendido o falso), "imprecision" (idea incompleta o ambigua) o "exceso_jerga" (repite tecnicismos sin explicar su significado real).
+8. "strengths": Lista de 2 a 4 aciertos o conceptos que el estudiante explicó muy bien oralmente.
+9. "identifiedJargon": Lista de términos técnicos empleados sin explicar en lenguaje llano.
+10. "conceptualGaps": Lagunas de conocimiento o subtemas del temario que olvidó mencionar en su exposición oral.
+11. "deepDiveSuggestions": 2 a 3 recomendaciones prácticas para corregir los conceptos mal entendidos.
+12. "intuitiveAnalogies": 2 analogías cotidianas y memorables para interiorizar los conceptos corregidos.
+13. "improvedDraft": Guion o explicación modelo ideal (2-3 párrafos) explicada de forma simple y magistral.
+14. "followUpQuestions": 2 o 3 preguntas socráticas directas sobre los conceptos mal entendidos para verificar que el estudiante los ha corregido.
+15. "feedback": Diagnóstico pedagógico global sobre su explicación oral y los conceptos mal entendidos detectados.`;
+
+    const contentParts: any[] = [];
+    if (cleanBase64) {
+      contentParts.push({
+        inlineData: {
+          data: cleanBase64,
+          mimeType: mimeType || 'audio/webm',
+        },
+      });
+    }
+    contentParts.push({ text: prompt });
 
     const response = await generateContentWithFallback({
       model: GEMINI_MODEL,
       contents: {
-        parts: [
-          {
-            inlineData: {
-              data: cleanBase64,
-              mimeType,
-            },
-          },
-          { text: prompt },
-        ],
+        parts: contentParts,
       },
       config: {
         responseMimeType: 'application/json',
@@ -1085,6 +1349,7 @@ Devuelve un JSON con:
             clarityScore: { type: Type.INTEGER },
             accuracyScore: { type: Type.INTEGER },
             overallScore: { type: Type.INTEGER },
+            oralDeliveryFeedback: { type: Type.STRING },
             corrections: {
               type: Type.ARRAY,
               items: {
@@ -1098,6 +1363,7 @@ Devuelve un JSON con:
                 required: ['concept', 'userMistake', 'correction', 'severity'],
               },
             },
+            deepDiveSuggestions: { type: Type.ARRAY, items: { type: Type.STRING } },
             strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
             identifiedJargon: { type: Type.ARRAY, items: { type: Type.STRING } },
             conceptualGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
@@ -1112,7 +1378,9 @@ Devuelve un JSON con:
             'clarityScore',
             'accuracyScore',
             'overallScore',
+            'oralDeliveryFeedback',
             'corrections',
+            'deepDiveSuggestions',
             'strengths',
             'identifiedJargon',
             'conceptualGaps',
@@ -1126,14 +1394,305 @@ Devuelve un JSON con:
     });
 
     const parsed = JSON.parse(response.text || '{}');
+    if (speechToTextTranscript && (!parsed.transcription || parsed.transcription.length < speechToTextTranscript.length)) {
+      parsed.transcription = speechToTextTranscript;
+    }
     res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Error in /api/gemini/evaluate-audio-feynman:', error);
-    res.status(500).json({ error: error.message || 'Error al evaluar el audio de Feynman.' });
+    res.status(500).json({ error: error.message || 'Error al evaluar la explicación oral de Feynman.' });
   }
 });
 
-// 4.3 Estructurar y Enriquecer Apuntes de un Tema
+// 4.3 Estructurar y Enriquecer Apuntes de un Tema (Espacio ilimitado + Detección profunda de Indicios y Conceptos Clave)
+function extractDeepAcademicInsightsFromNotes(
+  effectiveTitle: string,
+  effectiveNotes: string,
+  subjectName: string
+): {
+  keyTerms: Array<{
+    term: string;
+    definition: string;
+    category: string;
+    semanticLevel: string;
+    parentConcept?: string;
+    importance: 'alta' | 'media' | 'baja';
+  }>;
+  cues: string[];
+  headings: string[];
+} {
+  const rawLines = effectiveNotes
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const keyTerms: Array<{
+    term: string;
+    definition: string;
+    category: string;
+    semanticLevel: string;
+    parentConcept?: string;
+    importance: 'alta' | 'media' | 'baja';
+  }> = [];
+  const seenTerms = new Set<string>();
+  const headings: string[] = [];
+  const cues: string[] = [];
+  const seenCues = new Set<string>();
+  let currentMacroHeading = effectiveTitle;
+
+  const inferSemanticLevel = (
+    category: string,
+    defText: string,
+    isHeadingBased = false
+  ): string => {
+    if (isHeadingBased || /Apartado Principal|Bloque Conceptual|Macro/i.test(category)) {
+      return 'Nivel 1 · Macro-concepto';
+    }
+    if (
+      /Mecanismo|Proceso|Clasificación|Etapa|Relación|Función/i.test(category) ||
+      /causa|produce|provoca|proceso|etapa|fase|regula|permite|interviene/i.test(defText)
+    ) {
+      return 'Nivel 2 · Mecanismo/Proceso';
+    }
+    return 'Nivel 3 · Micro-concepto/Detalle';
+  };
+
+  const addKeyTerm = (
+    rawTerm: string,
+    rawDef: string,
+    category = 'Concepto Clave',
+    importance: 'alta' | 'media' | 'baja' = 'alta',
+    explicitSemanticLevel?: string,
+    parentConcept?: string
+  ) => {
+    const cleanTerm = rawTerm
+      .replace(/^[-•*0-9.)#>\s]+/, '')
+      .replace(/\*+/g, '')
+      .replace(/:$/, '')
+      .trim();
+    const cleanDef = rawDef
+      .replace(/^[-•*:\s]+/, '')
+      .replace(/\*+/g, '')
+      .trim();
+    if (
+      cleanTerm.length < 2 ||
+      cleanTerm.length > 85 ||
+      cleanDef.length < 10 ||
+      /^(tema|asignatura|subtemas|página|pagina|bloque|sección|seccion|resumen)$/i.test(cleanTerm)
+    ) {
+      return;
+    }
+    const keyLower = cleanTerm.toLowerCase();
+    if (seenTerms.has(keyLower)) return;
+    seenTerms.add(keyLower);
+    const semanticLevel =
+      explicitSemanticLevel || inferSemanticLevel(category, cleanDef, false);
+    keyTerms.push({
+      term: cleanTerm,
+      definition: cleanDef,
+      category,
+      semanticLevel,
+      parentConcept: parentConcept || currentMacroHeading,
+      importance,
+    });
+  };
+
+  const addCue = (question: string) => {
+    const q = question.trim();
+    if (!q || q.length < 12) return;
+    const norm = q.toLowerCase();
+    if (seenCues.has(norm)) return;
+    seenCues.add(norm);
+    cues.push(q);
+  };
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+
+    // 1. Detect Markdown or numbered headings (Nivel 1: Macro-conceptos)
+    if (/^#{1,4}\s+/.test(line)) {
+      const h = line.replace(/^#{1,4}\s+/, '').replace(/\*+/g, '').trim();
+      if (h.length > 2 && h.length < 100) {
+        headings.push(h);
+        currentMacroHeading = h;
+        const nextLine = rawLines[i + 1] || '';
+        if (nextLine && !/^#{1,4}\s+/.test(nextLine) && nextLine.length > 25) {
+          addKeyTerm(
+            h,
+            nextLine,
+            'Macro-concepto / Eje',
+            'alta',
+            'Nivel 1 · Macro-concepto',
+            effectiveTitle
+          );
+        }
+      }
+      continue;
+    }
+
+    const isShortTitleLine =
+      line.length > 3 &&
+      line.length < 80 &&
+      !line.endsWith('.') &&
+      (line.endsWith(':') || /^[0-9]+(\.[0-9]+)*[.)]\s+[A-ZÁÉÍÓÚÑ]/.test(line));
+
+    if (isShortTitleLine) {
+      const h = line.replace(/:$/, '').replace(/^[0-9]+(\.[0-9]+)*[.)]\s*/, '').replace(/\*+/g, '').trim();
+      if (h.length > 2) {
+        headings.push(h);
+        currentMacroHeading = h;
+        const nextLine = rawLines[i + 1] || '';
+        if (nextLine && nextLine.length > 20 && !nextLine.endsWith(':')) {
+          addKeyTerm(
+            h,
+            nextLine,
+            'Macro-concepto / Bloque',
+            'alta',
+            'Nivel 1 · Macro-concepto',
+            effectiveTitle
+          );
+        }
+      }
+      continue;
+    }
+
+    // 2. Detect explicit "**Término**: definición" or "Término: definición" or "Término - definición"
+    const cleanLine = line.replace(/^[-•*0-9.)\s]+/, '').trim();
+    const boldMatch = cleanLine.match(/^\*\*([^*]{2,65})\*\*\s*[:–—-]\s*(.+)$/);
+    if (boldMatch) {
+      const semLvl = inferSemanticLevel('Definición Clave', boldMatch[2], false);
+      addKeyTerm(boldMatch[1], boldMatch[2], 'Definición Clave', 'alta', semLvl, currentMacroHeading);
+      continue;
+    }
+
+    const colonIdx = cleanLine.indexOf(':');
+    if (colonIdx > 2 && colonIdx < 65 && cleanLine.length > colonIdx + 12) {
+      const candidateTerm = cleanLine.slice(0, colonIdx).trim();
+      const candidateDef = cleanLine.slice(colonIdx + 1).trim();
+      if (candidateTerm.split(/\s+/).length <= 8) {
+        const cat =
+          /fórmula|ecuación|cálculo|ley|teorema|regla/i.test(candidateTerm)
+            ? 'Fórmula / Regla'
+            : /tipo|clasificaci|clase|fase|etapa/i.test(candidateTerm)
+            ? 'Clasificación / Etapa'
+            : /función|mecanismo|proceso|efecto|causa/i.test(candidateTerm)
+            ? 'Mecanismo'
+            : 'Definición Clave';
+        const semLvl = inferSemanticLevel(cat, candidateDef, false);
+        addKeyTerm(
+          candidateTerm,
+          candidateDef,
+          cat,
+          keyTerms.length < 5 ? 'alta' : 'media',
+          semLvl,
+          currentMacroHeading
+        );
+        continue;
+      }
+    }
+
+    // 3. Detect natural language definitions ("X se define como Y", "X consiste en Y", "X es el proceso...")
+    const defRegex =
+      /^([A-ZÁÉÍÓÚÑ][^.,:;]{2,55}?)\s+(?:se define como|consiste en|hace referencia a|es el proceso mediante el cual|es un[a]?\s+[a-záéíóúñ]+\s+que|se caracteriza por|permite|regula)\s+(.{15,})$/i;
+    const defMatch = cleanLine.match(defRegex);
+    if (defMatch) {
+      const cat = /proceso|caracteriza|permite|regula/i.test(cleanLine)
+        ? 'Mecanismo / Función'
+        : 'Concepto Nuclear';
+      addKeyTerm(
+        defMatch[1],
+        cleanLine,
+        cat,
+        keyTerms.length < 5 ? 'alta' : 'media',
+        inferSemanticLevel(cat, cleanLine, false),
+        currentMacroHeading
+      );
+      continue;
+    }
+
+    // 4. Detect dash definition "Concepto – explicación"
+    const dashMatch = cleanLine.match(/^([A-ZÁÉÍÓÚÑ][^-–—:]{2,50})\s+[–—-]\s+(.{15,})$/);
+    if (dashMatch && dashMatch[1].split(/\s+/).length <= 7) {
+      addKeyTerm(
+        dashMatch[1],
+        dashMatch[2],
+        'Concepto Clave',
+        'media',
+        inferSemanticLevel('Concepto Clave', dashMatch[2], false),
+        currentMacroHeading
+      );
+    }
+  }
+
+  // If the notes are continuous prose without colons, extract meaningful sentences and their subject noun phrases
+  if (keyTerms.length < 5) {
+    const sentences = effectiveNotes
+      .replace(/\r?\n+/g, ' ')
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.replace(/^[-•*#\s]+/, '').trim())
+      .filter((s) => s.length > 30);
+
+    for (const sentence of sentences) {
+      if (keyTerms.length >= 10) break;
+      const words = sentence.replace(/\*+/g, '').split(/\s+/);
+      const shortTitle = words.slice(0, Math.min(5, words.length)).join(' ').replace(/[,:;.]$/, '');
+      const semLvl =
+        keyTerms.length < 2
+          ? 'Nivel 1 · Macro-concepto'
+          : keyTerms.length < 5
+          ? 'Nivel 2 · Mecanismo/Proceso'
+          : 'Nivel 3 · Micro-concepto/Detalle';
+      addKeyTerm(
+        shortTitle,
+        sentence,
+        keyTerms.length < 3 ? 'Idea Principal' : 'Desarrollo del Tema',
+        keyTerms.length < 3 ? 'alta' : 'media',
+        semLvl,
+        currentMacroHeading
+      );
+    }
+  }
+
+  // Build specific, targeted Active Recall Cues directly from the extracted keyTerms and headings following semantic hierarchy
+  for (const kt of keyTerms) {
+    if (cues.length >= 12) break;
+    const t = kt.term;
+    const dLower = kt.definition.toLowerCase();
+    if (kt.semanticLevel.includes('Nivel 1')) {
+      addCue(`[Macro] ¿Cuál es el principio rector de "${t}" y cómo articula la estructura general de ${effectiveTitle}?`);
+    } else if (dLower.includes('diferencia') || dLower.includes('frente a') || dLower.includes('mientras que')) {
+      addCue(`[Meso] ¿Qué diferencia funcional clave existe en "${t}" y cómo se distingue dentro de ${effectiveTitle}?`);
+    } else if (dLower.includes('fase') || dLower.includes('etapa') || dLower.includes('paso') || kt.category.includes('Clasificación')) {
+      addCue(`[Meso] ¿Cuáles son las fases o etapas secuenciales de "${t}" según los apuntes?`);
+    } else if (dLower.includes('causa') || dLower.includes('produce') || dLower.includes('provoca') || dLower.includes('función') || kt.category.includes('Mecanismo')) {
+      addCue(`[Meso] ¿Qué mecanismo causal explica el funcionamiento de "${t}" y qué efecto produce en ${effectiveTitle}?`);
+    } else if (kt.category.includes('Fórmula')) {
+      addCue(`[Micro] ¿Cuál es la formulación o regla técnica exacta de "${t}" y bajo qué condiciones se aplica?`);
+    } else {
+      addCue(`[Micro] ¿Cómo se define con precisión técnica "${t}" y qué matiz clave aporta en tus apuntes?`);
+    }
+  }
+
+  for (const h of headings) {
+    if (cues.length >= 12) break;
+    if (!h.toLowerCase().includes(effectiveTitle.toLowerCase())) {
+      addCue(`[Macro] ¿Qué conceptos subordinados y mecanismos abarca el eje temático "${h}"?`);
+    }
+  }
+
+  if (cues.length === 0) {
+    addCue(`[Macro] ¿Cuáles son los macro-conceptos y tesis fundamentales de ${effectiveTitle}?`);
+    addCue(`[Meso] ¿Qué mecanismos y relaciones causa-efecto estructuran ${effectiveTitle} en ${subjectName || 'la asignatura'}?`);
+    addCue(`[Micro] ¿Qué definiciones técnicas, fórmulas o excepciones críticas deben dominarse en ${effectiveTitle}?`);
+  }
+
+  return {
+    keyTerms: keyTerms.slice(0, 16),
+    cues: cues.slice(0, 12),
+    headings,
+  };
+}
+
 function buildStructuredTopicNotesFallback(
   effectiveTitle: string,
   effectiveNotes: string,
@@ -1149,10 +1708,21 @@ function buildStructuredTopicNotesFallback(
     .map((p) => p.trim())
     .filter(Boolean);
 
+  const { keyTerms, cues } = extractDeepAcademicInsightsFromNotes(
+    effectiveTitle,
+    effectiveNotes,
+    subjectName
+  );
+
   const formattedSections: string[] = [];
-  formattedSections.push(`# 📚 ${effectiveTitle}`);
-  if (subjectName) {
-    formattedSections.push(`> **Asignatura:** ${subjectName} · *Apuntes estructurados para estudio activo y Método Cornell*`);
+  const firstLineClean = (cleanLines[0] || '').replace(/^#+\s*/, '').replace(/^📚\s*/, '').trim();
+  if (!firstLineClean || firstLineClean.toLowerCase() !== effectiveTitle.toLowerCase()) {
+    formattedSections.push(`# 📚 ${effectiveTitle}`);
+  }
+  if (subjectName && !effectiveNotes.includes('**Asignatura:**')) {
+    formattedSections.push(
+      `> **Asignatura:** ${subjectName} · *Documento estructurado con formato académico enriquecido (100% del contenido conservado)*`
+    );
   }
 
   if (cleanLines.length <= 2 && effectiveNotes.length < 180) {
@@ -1164,37 +1734,51 @@ function buildStructuredTopicNotesFallback(
     let sectionIdx = 1;
     let currentList: string[] = [];
 
+    const flushList = () => {
+      if (currentList.length > 0) {
+        formattedSections.push(currentList.join('\n'));
+        currentList = [];
+      }
+    };
+
     for (const line of cleanLines) {
+      // Skip duplicate summary/header blocks if re-formatting already structured notes
+      if (/^>\s*\*\*Asignatura:\*\*/i.test(line)) {
+        continue;
+      }
+
       if (/^#{1,3}\s+/.test(line)) {
-        if (currentList.length > 0) {
-          formattedSections.push(currentList.join('\n'));
-          currentList = [];
-        }
+        flushList();
         formattedSections.push(line);
         continue;
       }
 
       const isShortHeader =
-        line.length < 75 &&
+        line.length < 85 &&
         !line.endsWith('.') &&
-        (line.endsWith(':') || /^[0-9]+[.)]\s+[A-ZÁÉÍÓÚÑ]/.test(line) || line === line.toUpperCase());
+        (line.endsWith(':') ||
+          /^[0-9]+(\.[0-9]+)*[.)]\s+[A-ZÁÉÍÓÚÑ]/.test(line) ||
+          (line.length > 3 && line === line.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(line)));
 
       if (isShortHeader) {
-        if (currentList.length > 0) {
-          formattedSections.push(currentList.join('\n'));
-          currentList = [];
-        }
-        const cleanHeader = line.replace(/:$/, '').replace(/^[0-9]+[.)]\s*/, '');
+        flushList();
+        const cleanHeader = line
+          .replace(/:$/, '')
+          .replace(/^[0-9]+(\.[0-9]+)*[.)]\s*/, '')
+          .replace(/\*+/g, '')
+          .trim();
         formattedSections.push(`## ${sectionIdx++}. ${cleanHeader}`);
+      } else if (line.startsWith('>')) {
+        flushList();
+        formattedSections.push(line);
       } else {
-        const cleanBullet = line.replace(/^[-•*]\s*/, '');
+        const cleanBullet = line.replace(/^[-•*]\s*/, '').trim();
         const colonIdx = cleanBullet.indexOf(':');
-        if (colonIdx > 2 && colonIdx < 55) {
-          const term = cleanBullet.slice(0, colonIdx).trim();
+        if (colonIdx > 2 && colonIdx < 65 && !cleanBullet.startsWith('**')) {
+          const term = cleanBullet.slice(0, colonIdx).replace(/\*+/g, '').trim();
           const rest = cleanBullet.slice(colonIdx + 1).trim();
           currentList.push(`- **${term}:** ${rest}`);
-        } else if (cleanBullet.length > 140) {
-          // Highlight first key phrase if sentence is long
+        } else if (cleanBullet.length > 130 && !cleanBullet.includes('**')) {
           const sentences = cleanBullet.split(/(?<=[.!?])\s+/);
           if (sentences.length > 1) {
             currentList.push(`- **${sentences[0]}** ${sentences.slice(1).join(' ')}`);
@@ -1207,53 +1791,31 @@ function buildStructuredTopicNotesFallback(
       }
     }
 
-    if (currentList.length > 0) {
-      if (sectionIdx === 1) {
-        formattedSections.push(`## 1. Desarrollo Estructurado del Tema`);
-      }
-      formattedSections.push(currentList.join('\n'));
-    }
+    flushList();
   }
 
-  const keyTerms: Array<{ term: string; definition: string }> = [];
-  for (const line of cleanLines) {
-    const clean = line.replace(/^[-•*0-9.)\s]+/, '');
-    const colonIdx = clean.indexOf(':');
-    if (colonIdx > 2 && colonIdx < 50 && clean.length > colonIdx + 8) {
-      keyTerms.push({
-        term: clean.slice(0, colonIdx).replace(/\*+/g, '').trim(),
-        definition: clean.slice(colonIdx + 1).trim(),
-      });
-      if (keyTerms.length >= 6) break;
-    }
-  }
-
-  if (keyTerms.length > 0) {
-    formattedSections.push(`## 🔑 Términos y Definiciones Clave`);
+  if (keyTerms.length > 0 && !effectiveNotes.includes('🔑 Conceptos y Definiciones Clave')) {
+    formattedSections.push(`## 🔑 Conceptos y Definiciones Clave Detectados`);
     formattedSections.push(
-      keyTerms.map((kt) => `- **${kt.term}:** ${kt.definition}`).join('\n')
+      keyTerms.slice(0, 8).map((kt) => `- **${kt.term}** *(${kt.category})*: ${kt.definition}`).join('\n')
     );
   }
 
-  const firstParagraph = paragraphs[0] || effectiveNotes.slice(0, 350);
+  // Summary preserves full context without arbitrary 280/320 char cuts
+  const firstParagraph = (paragraphs[0] || effectiveNotes).replace(/^#+\s*.*\n?/, '').trim();
   const lastParagraph =
-    paragraphs.length > 1 ? paragraphs[paragraphs.length - 1] : '';
+    paragraphs.length > 1 ? paragraphs[paragraphs.length - 1].replace(/^#+\s*.*\n?/, '').trim() : '';
   const summary = [
-    `Síntesis de "${effectiveTitle}" (${subjectName || 'Asignatura'}): ${firstParagraph.slice(0, 320)}${firstParagraph.length > 320 ? '...' : ''}`,
-    lastParagraph
-      ? `Conclusión y enfoque de examen: ${lastParagraph.slice(0, 280)}${lastParagraph.length > 280 ? '...' : ''}`
+    `Síntesis de "${effectiveTitle}" (${subjectName || 'Asignatura'}): ${firstParagraph}`,
+    lastParagraph && lastParagraph !== firstParagraph
+      ? `Conclusiones y puntos clave: ${lastParagraph}`
+      : keyTerms.length > 0
+      ? `Conceptos esenciales a dominar: ${keyTerms
+          .slice(0, 5)
+          .map((k) => k.term)
+          .join(', ')}.`
       : `Dominar los conceptos estructurados en estos apuntes permite responder con precisión tanto preguntas tipo test como de desarrollo.`,
   ].join('\n\n');
-
-  formattedSections.push(`## 📌 Resumen Ejecutivo para Repaso`);
-  formattedSections.push(`> ${summary.replace(/\n\n/g, '\n>\n> ')}`);
-
-  const cues = [
-    `¿Cuáles son los conceptos y definiciones fundamentales de ${effectiveTitle}?`,
-    ...(keyTerms.slice(0, 3).map((kt) => `¿Qué es y cómo se define "${kt.term}"?`)),
-    `¿Qué mecanismos o relaciones clave explican el funcionamiento de ${effectiveTitle}?`,
-    `¿Cómo se aplica ${effectiveTitle} en un caso práctico o pregunta de examen de ${subjectName || 'la asignatura'}?`,
-  ].slice(0, 6);
 
   return {
     notes: formattedSections.join('\n\n'),
@@ -1266,32 +1828,70 @@ function buildStructuredTopicNotesFallback(
 app.post(['/api/gemini/structure-topic-notes', '/api/gemini/structure-notes'], async (req: Request, res: Response) => {
   const { topicTitle, rawNotes, rawText, subjectName, subtopics, forceRefresh } = req.body || {};
   const effectiveTitle = (topicTitle || 'Apuntes del Tema').trim();
-  const subtopicsList = Array.isArray(subtopics) && subtopics.length > 0 ? `\nSubtemas del programa: ${subtopics.join(', ')}` : '';
-  const effectiveNotes = ((rawNotes || rawText || effectiveTitle) + subtopicsList).trim().slice(0, 12000);
-  const cacheKey = `${subjectName}_${effectiveTitle}_${effectiveNotes.length}_${effectiveNotes.slice(0, 160)}`;
+  const subtopicsList =
+    Array.isArray(subtopics) && subtopics.length > 0
+      ? `\nSubtemas del programa: ${subtopics.join(', ')}`
+      : '';
+  // Respect UNLIMITED space in Cornell Notes: do not truncate the student's notes to 12,000 chars
+  const fullStudentNotes = String(rawNotes || rawText || effectiveTitle).trim();
+  const effectiveNotes = (fullStudentNotes + subtopicsList).trim();
+  const cacheKey = `${subjectName}_${effectiveTitle}_${effectiveNotes.length}_${effectiveNotes.slice(0, 200)}`;
 
   if (!forceRefresh && cornellStructureCache.has(cacheKey)) {
     res.json({ success: true, data: cornellStructureCache.get(cacheKey), cached: true });
     return;
   }
 
-  try {
-    const prompt = `Eres un catedrático experto en el Método Cornell de la Universidad de Cornell.
-Genera una hoja completa del Método Cornell para el tema "${effectiveTitle}" de la asignatura "${subjectName || 'General'}".
-Contenido y apuntes de referencia:
-"""${effectiveNotes}"""
+  // Always extract deterministic deep insights from the full notes as baseline so zero concepts are missed
+  const deepLocalInsights = extractDeepAcademicInsightsFromNotes(
+    effectiveTitle,
+    fullStudentNotes,
+    subjectName || 'General'
+  );
 
-Devuelve en JSON:
-1. "notes": Cuerpo principal de apuntes Cornell en Markdown claro y estructurado (secciones con ##, viñetas explicativas, conceptos en **negrita**, ejemplos y fórmulas si aplica). Si los apuntes de entrada son breves o solo tienen el título/subtemas, desarrolla tú mismo los contenidos fundamentales del tema con rigor académico.
-2. "cues": 5 a 7 preguntas detonadoras (Columna Izquierda Cornell / Active Recall) e ideas clave para autoevaluarse tapando la columna derecha.
-3. "summary": Resumen ejecutivo inferior (Síntesis Cornell de 2 párrafos) con la esencia para repaso rápido antes del examen.
-4. "keyTerms": 5 a 8 términos técnicos clave del tema con su definición concisa.`;
+  try {
+    // UNLIMITED NOTES: pass the entire effectiveNotes without slicing or truncating characters
+    const prompt = `Eres un catedrático experto en neuroeducación, lingüística computacional y el Método Cornell de la Universidad de Cornell.
+Tu objetivo es estructurar los apuntes del tema "${effectiveTitle}" de la asignatura "${subjectName || 'General'}" aplicando un **Enfoque de Extracción de Jerarquía Semántica (Semantic Hierarchy Extraction)** para obtener "conceptos clave" ("keyTerms") e "indicios" ("cues") de máxima precisión.
+
+=== 1. REGLA CRÍTICA DE ESPACIO ILIMITADO EN EL ÁREA DE NOTAS ("notes") ===
+- El área de notas TIENE ESPACIO ILIMITADO (0 límites de caracteres).
+- PROHIBIDO resumir, recortar, omitir o eliminar párrafos, datos, ejemplos, clasificaciones o explicaciones escritas por el estudiante.
+- DEBES conservar el 100% de la información original del estudiante, aplicándole formato Markdown académico estructurado:
+  * Encabezados jerárquicos claros (## 1. Macro-sección, ### 1.1 Subapartado)
+  * Conceptos y términos clave resaltados en **negrita** (**Concepto:** explicación completa)
+  * Listas con viñetas (-) o numeradas para clasificaciones, características y secuencias
+  * Bloques destacados con citas (> 💡 **Síntesis Semántica:** ...) para conclusiones o puntos críticos de examen
+- Si los apuntes de entrada son breves (solo el título o subtemas), desarrolla con rigor académico todos los apartados del tema.
+
+=== 2. ENFOQUE DE EXTRACCIÓN DE JERARQUÍA SEMÁNTICA PARA "keyTerms" (CONCEPTOS CLAVE) E "indicios" ("cues") ===
+Analiza el texto mediante un árbol semántico de 3 niveles de granularidad:
+- **Nivel 1 · Macro-concepto (Tesis y Ejes Estructurales)**: Principios rectores, leyes generales, marcos teóricos o categorías paraguas que vertebran el tema.
+- **Nivel 2 · Mecanismo/Proceso (Nivel Meso — Relaciones Causales y Dinámica)**: Subprocesos, secuencias paso a paso, relaciones causa-efecto, comparaciones funcionales y clasificaciones operativas subordinadas a cada Macro-concepto.
+- **Nivel 3 · Micro-concepto/Detalle (Definiciones Exactas, Fórmulas, Parámetros y Excepciones)**: Términos técnicos específicos, valores críticos, casos límite, fórmulas y matices de examen.
+
+Instrucciones para el JSON de salida:
+A) En "keyTerms": Extrae entre 8 y 15 conceptos clave ordenados jerárquicamente (Nivel 1 → Nivel 2 → Nivel 3). Cada elemento DEBE incluir:
+   - "term": Nombre exacto y riguroso del concepto extraído de los apuntes.
+   - "definition": Definición o explicación completa extraída fielmente de los apuntes, indicando cómo se conecta dentro de la jerarquía del tema.
+   - "semanticLevel": Clasificación estricta en uno de estos 3 valores: "Nivel 1 · Macro-concepto", "Nivel 2 · Mecanismo/Proceso" o "Nivel 3 · Micro-concepto/Detalle".
+   - "parentConcept": El concepto superior o apartado del que depende semánticamente (ej. el nombre del Macro-concepto o título de sección).
+   - "category": Etiqueta académica ("Tesis / Eje", "Mecanismo Causal", "Clasificación", "Definición Técnica", "Fórmula / Evidencia").
+   - "importance": "alta", "media" o "baja".
+B) En "cues" (Indicios y Preguntas Detonadoras): Genera entre 7 y 12 preguntas de Active Recall jerarquizadas que cubran los 3 niveles semánticos:
+   - Antepón la etiqueta de nivel semántico a cada pregunta: "[Macro]", "[Meso]" o "[Micro]".
+   - Preguntas "[Macro]": Evalúan la comprensión global y conexión entre grandes bloques del tema.
+   - Preguntas "[Meso]": Evalúan el porqué, mecanismos de acción, causas-consecuencias y diferencias entre procesos.
+   - Preguntas "[Micro]": Evalúan definiciones exactas, datos críticos, fórmulas y excepciones de los apuntes.
+C) En "summary": Redacta una síntesis ejecutiva integradora (2-3 párrafos) que conecte los Macro-conceptos con sus Mecanismos y Micro-conceptos esenciales.
+
+Contenido íntegro de los apuntes (extensión ilimitada):
+"""${effectiveNotes}"""`;
 
     const response = await generateContentWithFallback({
       model: GEMINI_MODEL,
       contents: prompt,
       config: {
-        temperature: 0.3,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1306,26 +1906,77 @@ Devuelve en JSON:
                 properties: {
                   term: { type: Type.STRING },
                   definition: { type: Type.STRING },
+                  semanticLevel: { type: Type.STRING },
+                  parentConcept: { type: Type.STRING },
+                  category: { type: Type.STRING },
+                  importance: { type: Type.STRING },
                 },
-                required: ['term', 'definition'],
+                required: ['term', 'definition', 'semanticLevel'],
               },
             },
           },
-          required: ['notes', 'cues', 'summary'],
+          required: ['notes', 'cues', 'summary', 'keyTerms'],
         },
       },
     });
 
     const parsed = JSON.parse(response.text || '{}');
-    if (parsed && parsed.notes && Array.isArray(parsed.cues)) {
-      cornellStructureCache.set(cacheKey, parsed);
+    const localFormattedFallback = buildStructuredTopicNotesFallback(
+      effectiveTitle,
+      fullStudentNotes,
+      subjectName || 'General'
+    );
+
+    // Ensure the AI never truncated or shortened long student notes!
+    let finalNotes = String(parsed.notes || '').trim();
+    if (!finalNotes || (fullStudentNotes.length > 500 && finalNotes.length < fullStudentNotes.length * 0.75)) {
+      finalNotes = localFormattedFallback.notes;
     }
-    res.json({ success: true, data: parsed });
+
+    // Merge AI cues with deep local cues so specific questions from the notes are always present
+    const aiCues = Array.isArray(parsed.cues) ? parsed.cues.map(String).filter(Boolean) : [];
+    const mergedCues = Array.from(new Set([...aiCues, ...deepLocalInsights.cues])).slice(0, 14);
+
+    // Merge AI keyTerms with deep local keyTerms preserving semanticLevel & parentConcept
+    const aiKeyTerms = Array.isArray(parsed.keyTerms)
+      ? parsed.keyTerms
+          .filter((kt: any) => kt && kt.term && kt.definition)
+          .map((kt: any) => ({
+            term: String(kt.term).trim(),
+            definition: String(kt.definition).trim(),
+            semanticLevel: kt.semanticLevel
+              ? String(kt.semanticLevel)
+              : 'Nivel 2 · Mecanismo/Proceso',
+            parentConcept: kt.parentConcept ? String(kt.parentConcept) : effectiveTitle,
+            category: kt.category ? String(kt.category) : 'Concepto Clave',
+            importance:
+              kt.importance === 'alta' || kt.importance === 'baja' ? kt.importance : 'media',
+          }))
+      : [];
+
+    const seenTermNames = new Set(aiKeyTerms.map((k: any) => k.term.toLowerCase()));
+    const mergedKeyTerms = [...aiKeyTerms];
+    for (const localKt of deepLocalInsights.keyTerms) {
+      if (!seenTermNames.has(localKt.term.toLowerCase()) && mergedKeyTerms.length < 16) {
+        seenTermNames.add(localKt.term.toLowerCase());
+        mergedKeyTerms.push(localKt);
+      }
+    }
+
+    const finalPayload = {
+      notes: finalNotes,
+      cues: mergedCues.length > 0 ? mergedCues : localFormattedFallback.cues,
+      summary: String(parsed.summary || localFormattedFallback.summary).trim(),
+      keyTerms: mergedKeyTerms.length > 0 ? mergedKeyTerms : localFormattedFallback.keyTerms,
+    };
+
+    cornellStructureCache.set(cacheKey, finalPayload);
+    res.json({ success: true, data: finalPayload });
   } catch (error: any) {
     console.warn('Fallback activated in /api/gemini/structure-topic-notes:', error?.message || error);
     const fallbackData = buildStructuredTopicNotesFallback(
       effectiveTitle,
-      effectiveNotes,
+      fullStudentNotes,
       subjectName || 'General'
     );
     res.json({ success: true, data: fallbackData, fallbackUsed: true });
@@ -1590,6 +2241,102 @@ Responde exclusivamente en español académico claro.`;
   }
 });
 
+// 5.2 Generación de Estructura de Mapa Mental en formato Mermaid.js a partir de los Apuntes del Tema
+app.post('/api/gemini/generate-topic-mermaid-mindmap', async (req: Request, res: Response) => {
+  try {
+    const {
+      topicTitle,
+      topicDescription = '',
+      subtopics = [],
+      subjectName = 'Asignatura',
+      cues = [],
+      notes = '',
+      summary = '',
+    } = req.body;
+
+    if (!topicTitle) {
+      res.status(400).json({ error: 'Se requiere el título del tema (topicTitle).' });
+      return;
+    }
+
+    const formattedSubtopics =
+      Array.isArray(subtopics) && subtopics.length > 0
+        ? `Subtemas del tema: ${subtopics.join(', ')}`
+        : '';
+
+    const formattedCues =
+      Array.isArray(cues) && cues.length > 0
+        ? `Preguntas clave / Cues:\n- ${cues.join('\n- ')}`
+        : '';
+
+    const prompt = `Actúa como un experto en visualización del conocimiento y profesor universitario.
+Genera una estructura de mapa mental completa, clara y pedagógica en formato **Mermaid.js** basada en los apuntes del estudiante para el tema "${topicTitle}" de la asignatura "${subjectName}".
+
+=== CONTENIDO Y APUNTES DEL TEMA ===
+• Tema: ${topicTitle}
+${topicDescription ? `• Descripción: ${topicDescription}\n` : ''}${formattedSubtopics ? `• ${formattedSubtopics}\n` : ''}${formattedCues ? `• ${formattedCues}\n` : ''}
+• Apuntes del tema:
+"""
+${notes || topicDescription || topicTitle}
+"""
+${summary ? `• Resumen del tema:\n"""\n${summary}\n"""` : ''}
+
+=== REGLAS ESTRICTAS PARA EL CÓDIGO MERMAID.JS ("mermaid") ===
+1. Comienza exactamente con \`flowchart LR\` (o \`flowchart TD\`).
+2. Crea un nodo raíz central para el tema (ej: \`root(["🧠 ${topicTitle.replace(/"/g, "'")}"])\`).
+3. Del nodo \`root\` deben partir entre 3 y 6 ramas principales (\`b1\`, \`b2\`, \`b3\`, ...) correspondientes a los bloques conceptuales clave extraídos de los apuntes.
+4. De cada rama principal deben partir entre 2 y 4 subnodos (\`b1_1\`, \`b1_2\`, ...) con conceptos específicos, mecanismos, definiciones, fórmulas o ejemplos presentes en los apuntes.
+5. Usa identificadores estrictamente alfanuméricos simples (ej: \`root\`, \`b1\`, \`b1_1\`, \`b2_1\`).
+6. Envuelve SIEMPRE el texto de cada nodo entre comillas dobles dentro de corchetes o paréntesis: ej. \`b1["Concepto Principal"]\` o \`b1_1("Detalle o definición breve")\`.
+7. NUNCA uses comillas dobles internas dentro del texto de una etiqueta (usa comillas simples si hace falta) ni etiquetas HTML.
+8. Añade conectores con etiquetas breves cuando aporten valor pedagógico, ej: \`root -->|"se divide en"| b1["..."]\`.
+9. Incluye al final definiciones de estilo (\`classDef\`) suaves y elegantes para distinguir el nodo raíz, las ramas principales y los nodos hoja:
+   \`classDef rootStyle fill:#4f46e5,stroke:#3730a3,color:#ffffff,stroke-width:2px,font-weight:bold;\`
+   \`classDef branchStyle fill:#eef2ff,stroke:#6366f1,color:#1e1b4b,stroke-width:1.5px,font-weight:bold;\`
+   \`classDef leafStyle fill:#ffffff,stroke:#cbd5e1,color:#334155,stroke-width:1px;\`
+   Y asígnalos con \`class root rootStyle;\`, \`class b1,b2,... branchStyle;\`, etc.
+10. NO envuelvas el código en bloques markdown (\`\`\`mermaid). Devuelve únicamente el código Mermaid puro en el campo \`mermaid\`.
+
+Devuelve un JSON con:
+- "mermaid": El código Mermaid.js completo y válido.
+- "summary": Síntesis ejecutiva de 2 a 3 frases explicando la estructura del mapa mental generado.`;
+
+    const response = await generateContentWithFallback({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            mermaid: { type: Type.STRING },
+            summary: { type: Type.STRING },
+          },
+          required: ['mermaid', 'summary'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    let cleanMermaid = String(parsed.mermaid || '')
+      .replace(/^```(mermaid)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+    res.json({
+      success: true,
+      data: {
+        mermaid: cleanMermaid,
+        summary: String(parsed.summary || ''),
+      },
+    });
+  } catch (error: any) {
+    console.error('Error in /api/gemini/generate-topic-mermaid-mindmap:', error);
+    res.status(500).json({
+      error: error.message || 'Error al generar el mapa mental Mermaid con IA.',
+    });
+  }
+});
 
 // 6. Análisis de errores pasados para reforzar áreas débiles
 app.post('/api/gemini/analyze-errors', async (req: Request, res: Response) => {
@@ -1765,82 +2512,7 @@ Genera un JSON con los siguientes campos:
   }
 });
 
-// 9. Extracción de Términos Clave desde Notas Cornell y Generación de Flashcards Activas
-app.post('/api/gemini/extract-cornell-flashcards', async (req: Request, res: Response) => {
-  try {
-    const { topicTitle, notesContent, cues = [], summary = '', subjectName, count = 6, selectedTerms } = req.body;
-
-    if (!notesContent && (!cues || cues.length === 0) && !summary) {
-      res.status(400).json({ error: 'Se requiere el contenido de las notas Cornell (cuerpo, notas o resumen).' });
-      return;
-    }
-
-    const cuesText = Array.isArray(cues) && cues.length > 0 ? `\nPreguntas detonadoras / Cues:\n- ${cues.join('\n- ')}` : '';
-    const summaryText = summary ? `\nResumen del estudiante:\n"""${summary}"""` : '';
-    const selectedTermsContext = Array.isArray(selectedTerms) && selectedTerms.length > 0
-      ? `\nPrioriza especialmente los siguientes términos seleccionados por el estudiante: ${selectedTerms.join(', ')}.`
-      : '';
-
-    const prompt = `Actúa como un profesor universitario experto en métodos de aprendizaje activo y Active Recall.
-Tu objetivo es analizar minuciosamente los apuntes del Método Cornell para el tema: "${topicTitle || 'Tema de Estudio'}" (Asignatura: "${subjectName || 'General'}").
-
-Contenido de los apuntes Cornell (cuerpo y notas):
-"""
-${notesContent || ''}
-"""
-${cuesText}
-${summaryText}
-${selectedTermsContext}
-
-Instrucciones pedagógicas:
-1. Identifica los conceptos y términos técnicos clave fundamentales más probables de examen.
-2. Devuelve una lista de términos clave identificados en "extractedTerms" (entre 4 y 12 términos).
-3. Genera un set de ${count || 6} flashcards de alta eficacia para repaso espaciado. Cada flashcard debe estructurarse estrictamente con:
-   - "term": El concepto o término clave (conciso, 1 a 4 palabras).
-   - "definition": Definición precisa, rigurosa y directa al grano (2-4 frases que expliquen su esencia académica sin rodeos).
-   - "practicalCase": Caso de aplicación práctica concreto (un escenario de aplicación real, ejemplo clínico, caso de estudio práctico o problema resuelto donde se aplica este concepto).
-   - "hint": Una pista orientativa breve para ayudar al recuerdo activo sin revelar la respuesta completa.
-   - "conceptTag": Etiqueta temática corta clasificatoria (ej. "Mecanismo", "Fisiología", "Principio Legal", "Diagnóstico", "Fórmula", etc.).`;
-
-    const response = await generateContentWithFallback({
-      model: GEMINI_MODEL,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            extractedTerms: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            flashcards: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  term: { type: Type.STRING },
-                  definition: { type: Type.STRING },
-                  practicalCase: { type: Type.STRING },
-                  hint: { type: Type.STRING },
-                  conceptTag: { type: Type.STRING },
-                },
-                required: ['term', 'definition', 'practicalCase', 'hint', 'conceptTag'],
-              },
-            },
-          },
-          required: ['extractedTerms', 'flashcards'],
-        },
-      },
-    });
-
-    const parsed = JSON.parse(response.text || '{}');
-    res.json({ success: true, data: parsed });
-  } catch (error: any) {
-    console.error('Error in /api/gemini/extract-cornell-flashcards:', error);
-    res.status(500).json({ error: error.message || 'Error al extraer términos y generar flashcards con Gemini.' });
-  }
-});
+// (Ruta unificada en /api/gemini/extract-cornell-flashcards en la sección superior)
 
 // 10. Generación de Resumen Automático y Puntos Clave Editables para Documentos Importados
 function buildDocumentKeyPointsFallback(
@@ -1850,51 +2522,20 @@ function buildDocumentKeyPointsFallback(
   subjectName: string
 ) {
   const effectiveTopic = topicTitle || documentName || 'Tema de Estudio';
-  const lines = sourceText
-    .split(/\r?\n/)
-    .map((l) => l.replace(/^[-•*#\s]+/, '').trim())
-    .filter((l) => l.length > 18);
+  const deepInsights = extractDeepAcademicInsightsFromNotes(
+    effectiveTopic,
+    sourceText,
+    subjectName
+  );
 
-  const sentences = sourceText
-    .replace(/\r?\n+/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 25);
+  const keyPoints = deepInsights.keyTerms.slice(0, 8).map((kt) => ({
+    title: kt.term,
+    detail: kt.definition,
+    category: kt.category || 'Concepto Clave',
+    importance: kt.importance || 'alta',
+  }));
 
-  const candidateBlocks = lines.length >= 4 ? lines : sentences;
-  const categories = [
-    'Definición Clave',
-    'Concepto Fundamental',
-    'Mecanismo / Desarrollo',
-    'Punto de Examen',
-    'Aplicación Práctica',
-    'Síntesis',
-  ];
-
-  const keyPoints = candidateBlocks.slice(0, 6).map((block, idx) => {
-    const colonIdx = block.indexOf(':');
-    let title = '';
-    let detail = block;
-    if (colonIdx > 2 && colonIdx < 60) {
-      title = block.slice(0, colonIdx).replace(/\*+/g, '').trim();
-      detail = block.slice(colonIdx + 1).trim();
-    } else {
-      const words = block.replace(/\*+/g, '').split(/\s+/);
-      title = words.slice(0, 6).join(' ') + (words.length > 6 ? '...' : '');
-      detail = block;
-    }
-    return {
-      title: title || `Punto clave ${idx + 1}: ${effectiveTopic}`,
-      detail:
-        detail.length > 20
-          ? detail
-          : `${detail} — Concepto esencial de ${effectiveTopic} en ${subjectName}.`,
-      category: categories[idx % categories.length],
-      importance: idx < 3 ? 'alta' : idx < 5 ? 'media' : 'baja',
-    };
-  });
-
-  while (keyPoints.length < 5) {
+  while (keyPoints.length < 4) {
     const idx = keyPoints.length;
     keyPoints.push({
       title:
@@ -1904,9 +2545,7 @@ function buildDocumentKeyPointsFallback(
           ? `Conceptos y terminología clave`
           : idx === 2
           ? `Relaciones y mecanismos esenciales`
-          : idx === 3
-          ? `Aplicación práctica y resolución`
-          : `Síntesis para evaluación de ${subjectName}`,
+          : `Aplicación práctica en ${subjectName}`,
       detail:
         idx === 0
           ? `Definición, alcance y estructura vertebral de "${effectiveTopic}" dentro de la asignatura ${subjectName}.`
@@ -1914,27 +2553,30 @@ function buildDocumentKeyPointsFallback(
           ? `Dominar los términos técnicos y distinciones conceptuales recogidos en ${documentName}.`
           : idx === 2
           ? `Comprender las relaciones causa-efecto, procesos y clasificación desarrollados en el tema.`
-          : idx === 3
-          ? `Identificar cómo se plantean los casos prácticos y preguntas frecuentes de examen sobre este bloque.`
-          : `Repasar las conclusiones principales para consolidar la memoria a largo plazo (Active Recall).`,
-      category: categories[idx % categories.length],
+          : `Identificar cómo se plantean los casos prácticos y preguntas frecuentes de examen sobre este bloque.`,
+      category: 'Concepto Fundamental',
       importance: idx < 2 ? 'alta' : 'media',
     });
   }
 
-  const summarySnippet = sentences.slice(0, 3).join(' ');
-  const summary = summarySnippet
-    ? `Resumen ejecutivo de "${effectiveTopic}" (${subjectName}): ${summarySnippet.slice(0, 480)}${summarySnippet.length > 480 ? '...' : ''}\n\nEste bloque sintetiza los ejes fundamentales de ${documentName} para facilitar el repaso activo y la preparación de exámenes.`
-    : `Resumen ejecutivo de "${effectiveTopic}" (${subjectName}): abarca los conceptos nucleares, definiciones técnicas, mecanismos principales y aplicaciones prácticas desarrollados en ${documentName}.`;
+  const sentences = sourceText
+    .replace(/\r?\n+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 25);
 
-  const cues = keyPoints.slice(0, 5).map(
-    (kp) => `¿Cómo explicarías con precisión "${kp.title}" y su importancia en ${effectiveTopic}?`
-  );
+  const summarySnippet = sentences.slice(0, 4).join(' ');
+  const summary = summarySnippet
+    ? `Resumen ejecutivo de "${effectiveTopic}" (${subjectName}): ${summarySnippet}\n\nConceptos clave detectados: ${keyPoints
+        .slice(0, 5)
+        .map((k) => k.title)
+        .join(', ')}.`
+    : `Resumen ejecutivo de "${effectiveTopic}" (${subjectName}): abarca los conceptos nucleares, definiciones técnicas, mecanismos principales y aplicaciones prácticas desarrollados en ${documentName}.`;
 
   return {
     summary,
     keyPoints,
-    cues,
+    cues: deepInsights.cues,
   };
 }
 
@@ -1945,37 +2587,53 @@ app.post('/api/gemini/summarize-document-keypoints', async (req: Request, res: R
     topicTitle = '',
     subjectName = 'Asignatura',
     pageCount = 1,
+    forceRefresh = false,
   } = req.body || {};
 
   const sourceText = (documentContent || topicTitle || documentName || 'Tema académico').trim();
-  const trimmedSource = sourceText.slice(0, 10000);
-  const cacheKey = `${subjectName}|${topicTitle}|${documentName}|${trimmedSource.length}|${trimmedSource.slice(0, 180)}`;
+  const cacheKey = `${subjectName}|${topicTitle}|${documentName}|${sourceText.length}|${sourceText.slice(0, 200)}`;
   const cachedResult = keyPointsSummaryCache.get(cacheKey);
-  if (cachedResult) {
+  if (!forceRefresh && cachedResult) {
     res.json({ success: true, ...cachedResult, data: cachedResult, cached: true });
     return;
   }
 
-  try {
-    const prompt = `Extrae en español un resumen ejecutivo directo (1-2 párrafos breves) y 5 a 6 puntos clave accionables de alto valor para examen:
-- Archivo: "${documentName}" (${pageCount} págs) | Tema: "${topicTitle || documentName}" | Materia: "${subjectName}"
+  const deepInsights = extractDeepAcademicInsightsFromNotes(
+    topicTitle || documentName,
+    sourceText,
+    subjectName
+  );
 
-Contenido:
+  try {
+    const prompt = `Actúa como un experto en lingüística computacional y el Método Cornell universitario.
+Analiza minuciosamente la totalidad de los apuntes/documento del estudiante aplicando un **Enfoque de Extracción de Jerarquía Semántica (Semantic Hierarchy Extraction)** en 3 niveles:
+- **Nivel 1 · Macro-concepto**: Tesis centrales, principios rectores y grandes bloques estructurales del tema.
+- **Nivel 2 · Mecanismo/Proceso**: Relaciones causa-efecto, secuencias operativas, mecanismos de acción y clasificaciones intermedias.
+- **Nivel 3 · Micro-concepto/Detalle**: Definiciones técnicas exactas, fórmulas, parámetros críticos y excepciones de examen.
+
+Contexto:
+- Archivo / Apuntes: "${documentName}" (${pageCount} págs) | Tema: "${topicTitle || documentName}" | Materia: "${subjectName}"
+
+Contenido íntegro de los apuntes (sin límite de caracteres):
 """
-${trimmedSource}
+${sourceText}
 """
 
 JSON requerido:
-1. "summary": Resumen ejecutivo conciso (2-4 oraciones).
-2. "keyPoints": 5 a 6 puntos clave con "title" (3-7 palabras), "detail" (1-2 oraciones claras), "category" ("Definición Clave", "Mecanismo", "Fórmula / Dato", "Pregunta de Examen") e "importance" ("alta", "media", "baja").
-3. "cues": 3 a 4 preguntas de Active Recall.`;
+1. "summary": Resumen ejecutivo claro y completo (2-3 párrafos) sintetizando la jerarquía semántica del texto.
+2. "keyPoints": 8 a 14 conceptos clave extraídos fielmente del texto y estructurados jerárquicamente con:
+   - "title": El término, concepto o apartado exacto de los apuntes.
+   - "detail": La definición, mecanismo, fórmula o explicación completa dada en los apuntes.
+   - "semanticLevel": Uno de "Nivel 1 · Macro-concepto", "Nivel 2 · Mecanismo/Proceso" o "Nivel 3 · Micro-concepto/Detalle".
+   - "parentConcept": El concepto paraguas o eje superior al que se subordina.
+   - "category": "Tesis / Eje", "Mecanismo Causal", "Clasificación", "Definición Clave", "Fórmula / Dato".
+   - "importance": "alta", "media", "baja".
+3. "cues": 8 a 12 preguntas detonadoras de Active Recall ("indicios") prefijadas con su nivel semántico ("[Macro]", "[Meso]", "[Micro]") que evalúen las ideas globales, relaciones causales y definiciones específicas del texto.`;
 
     const response = await generateContentWithFallback({
       model: GEMINI_MODEL,
       contents: prompt,
       config: {
-        thinkingConfig: { thinkingBudget: 0 },
-        temperature: 0.2,
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
@@ -1988,10 +2646,12 @@ JSON requerido:
                 properties: {
                   title: { type: Type.STRING },
                   detail: { type: Type.STRING },
+                  semanticLevel: { type: Type.STRING },
+                  parentConcept: { type: Type.STRING },
                   category: { type: Type.STRING },
                   importance: { type: Type.STRING },
                 },
-                required: ['title', 'detail', 'category', 'importance'],
+                required: ['title', 'detail', 'semanticLevel', 'category', 'importance'],
               },
             },
             cues: {
@@ -2005,8 +2665,34 @@ JSON requerido:
     });
 
     const parsed = JSON.parse(response.text || '{}');
-    keyPointsSummaryCache.set(cacheKey, parsed);
-    res.json({ success: true, ...parsed, data: parsed });
+    const aiKeyPoints = Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [];
+    const seenTitles = new Set(aiKeyPoints.map((kp: any) => String(kp.title || '').toLowerCase()));
+    const mergedKeyPoints = [...aiKeyPoints];
+    for (const localKt of deepInsights.keyTerms) {
+      if (!seenTitles.has(localKt.term.toLowerCase()) && mergedKeyPoints.length < 16) {
+        seenTitles.add(localKt.term.toLowerCase());
+        mergedKeyPoints.push({
+          title: localKt.term,
+          detail: localKt.definition,
+          semanticLevel: localKt.semanticLevel,
+          parentConcept: localKt.parentConcept,
+          category: localKt.category,
+          importance: localKt.importance,
+        });
+      }
+    }
+
+    const aiCues = Array.isArray(parsed.cues) ? parsed.cues.map(String).filter(Boolean) : [];
+    const mergedCues = Array.from(new Set([...aiCues, ...deepInsights.cues])).slice(0, 14);
+
+    const finalResult = {
+      summary: parsed.summary || buildDocumentKeyPointsFallback(documentName, sourceText, topicTitle, subjectName).summary,
+      keyPoints: mergedKeyPoints,
+      cues: mergedCues,
+    };
+
+    keyPointsSummaryCache.set(cacheKey, finalResult);
+    res.json({ success: true, ...finalResult, data: finalResult });
   } catch (error: any) {
     console.warn('Fallback activated in /api/gemini/summarize-document-keypoints:', error?.message || error);
     const fallback = buildDocumentKeyPointsFallback(
@@ -2309,9 +2995,20 @@ Responde íntegramente en español.`;
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.get(['/sw.js', '/manifest.webmanifest', '/registerSW.js'], (req: Request, res: Response, next) => {
+      res.sendFile(path.join(distPath, req.path), (err) => {
+        if (err) next();
+      });
+    });
+    app.get('/workbox-:hash.js', (req: Request, res: Response, next) => {
+      res.sendFile(path.join(distPath, req.path), (err) => {
+        if (err) next();
+      });
+    });
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });
     app.use(vite.middlewares);

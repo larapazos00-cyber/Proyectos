@@ -11,6 +11,10 @@ import {
   Sparkles,
   Award,
   Clock,
+  Pencil,
+  Trash2,
+  Check,
+  X,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Subject, Flashcard, ReviewQuality } from '../types';
@@ -142,6 +146,13 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
   const [sessionCompleted, setSessionCompleted] = useState<boolean>(false);
   const [sessionStartMs, setSessionStartMs] = useState<number>(() => Date.now());
 
+  // Estado de edición en línea de la flashcard actual
+  const [isEditingCard, setIsEditingCard] = useState<boolean>(false);
+  const [editQuestion, setEditQuestion] = useState<string>('');
+  const [editAnswer, setEditAnswer] = useState<string>('');
+  const [editHint, setEditHint] = useState<string>('');
+  const [editConceptTag, setEditConceptTag] = useState<string>('');
+
   // Reiniciar cola al cambiar de asignatura o alcance del mazo
   const startNewQuickfireRun = useCallback(
     (scopeOverride?: 'pending' | 'all', customCards?: Flashcard[]) => {
@@ -156,6 +167,7 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
       setCurrentIndex(0);
       setIsFlipped(false);
       setShowHint(false);
+      setIsEditingCard(false);
       setSessionResults([]);
       setStreak(0);
       setSessionCompleted(false);
@@ -175,6 +187,7 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
     setCurrentIndex(0);
     setIsFlipped(false);
     setShowHint(false);
+    setIsEditingCard(false);
     setSessionResults([]);
     setStreak(0);
     setSessionCompleted(false);
@@ -182,6 +195,95 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
   }, [currentSubject?.id]);
 
   const currentCard = sessionQueue[currentIndex];
+
+  // Iniciar edición de la flashcard actual
+  const handleStartEditCard = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!currentCard) return;
+    setEditQuestion(currentCard.concept || currentCard.question || '');
+    setEditAnswer(currentCard.definition || currentCard.answer || '');
+    setEditHint(currentCard.hint || '');
+    setEditConceptTag(currentCard.conceptTag || '');
+    setIsEditingCard(true);
+  };
+
+  // Guardar cambios de la flashcard actual
+  const handleSaveEditCard = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!currentCard || !currentSubject) return;
+    const trimmedQ = editQuestion.trim();
+    const trimmedA = editAnswer.trim();
+    if (!trimmedQ || !trimmedA) return;
+
+    const updatedCard: Flashcard = {
+      ...currentCard,
+      question: trimmedQ,
+      answer: trimmedA,
+      concept: currentCard.concept ? trimmedQ : undefined,
+      definition: currentCard.definition ? trimmedA : undefined,
+      hint: editHint.trim() || undefined,
+      conceptTag: editConceptTag.trim() || currentCard.conceptTag,
+    };
+
+    // Actualizar en la cola activa
+    setSessionQueue((prev) =>
+      prev.map((c, idx) => (idx === currentIndex ? updatedCard : c))
+    );
+
+    // Persistir en la asignatura
+    if (onUpdateSubject) {
+      const baseList =
+        currentSubject.flashcards && currentSubject.flashcards.length > 0
+          ? currentSubject.flashcards
+          : allCards;
+
+      const existsInList = baseList.some((c) => c.id === updatedCard.id);
+      const updatedFlashcards = existsInList
+        ? baseList.map((c) => (c.id === updatedCard.id ? updatedCard : c))
+        : [...baseList, updatedCard];
+
+      onUpdateSubject({
+        ...currentSubject,
+        flashcards: updatedFlashcards,
+      });
+    }
+
+    setIsEditingCard(false);
+  };
+
+  // Eliminar la flashcard actual durante el repaso
+  const handleDeleteCurrentCard = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!currentCard || !currentSubject) return;
+
+    const deletingId = currentCard.id;
+    const nextQueue = sessionQueue.filter((_, idx) => idx !== currentIndex);
+
+    // Persistir eliminación en la asignatura
+    if (onUpdateSubject) {
+      const baseList =
+        currentSubject.flashcards && currentSubject.flashcards.length > 0
+          ? currentSubject.flashcards
+          : allCards;
+
+      const updatedFlashcards = baseList.filter((c) => c.id !== deletingId);
+      onUpdateSubject({
+        ...currentSubject,
+        flashcards: updatedFlashcards,
+      });
+    }
+
+    setSessionQueue(nextQueue);
+    setIsEditingCard(false);
+    setIsFlipped(false);
+    setShowHint(false);
+
+    if (nextQueue.length === 0) {
+      setSessionCompleted(true);
+    } else if (currentIndex >= nextQueue.length) {
+      setSessionCompleted(true);
+    }
+  };
 
   // Calificar tarjeta actual con algoritmo SM-2 y pasar inmediatamente a la siguiente
   const handleRateCard = useCallback(
@@ -295,7 +397,7 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
   // Atajos de teclado rápidos: Espacio/Enter para voltear, 1-4 para calificar
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (sessionCompleted || !currentCard) return;
+      if (sessionCompleted || !currentCard || isEditingCard) return;
       if (
         document.activeElement?.tagName === 'INPUT' ||
         document.activeElement?.tagName === 'TEXTAREA' ||
@@ -317,7 +419,7 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sessionCompleted, currentCard, isFlipped, handleRateCard]);
+  }, [sessionCompleted, currentCard, isFlipped, isEditingCard, handleRateCard]);
 
   const progressPct =
     sessionQueue.length > 0
@@ -432,10 +534,10 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
       {/* Tarjeta activa o Pantalla de Resumen Quickfire */}
       {!sessionCompleted && currentCard ? (
         <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm p-6 sm:p-8 space-y-6">
-          {/* Barra superior de progreso de la tanda */}
+          {/* Barra superior de progreso de la tanda y acciones de Editar / Eliminar */}
           <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 flex-wrap gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-mono-numbers font-extrabold text-slate-900 dark:text-white">
                   Flashcard {currentIndex + 1} de {sessionQueue.length}
                 </span>
@@ -450,9 +552,29 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
                 )}
               </div>
 
-              <span className="font-mono-numbers font-bold text-indigo-600 dark:text-indigo-400">
-                {progressPct}%
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleStartEditCard}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-indigo-50 dark:bg-slate-800 dark:hover:bg-indigo-950/60 text-slate-700 hover:text-indigo-700 dark:text-slate-300 dark:hover:text-indigo-300 border border-slate-200 dark:border-slate-700 text-[11px] font-semibold transition-colors cursor-pointer"
+                  title="Modificar la pregunta o la respuesta de esta flashcard"
+                >
+                  <Pencil className="w-3 h-3" />
+                  <span>Editar pregunta / respuesta</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteCurrentCard}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[11px] font-semibold transition-colors cursor-pointer"
+                  title="Eliminar esta flashcard porque no encaja"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Eliminar</span>
+                </button>
+                <span className="font-mono-numbers font-bold text-indigo-600 dark:text-indigo-400 ml-1">
+                  {progressPct}%
+                </span>
+              </div>
             </div>
 
             <div className="w-full bg-slate-100 dark:bg-slate-800 h-2 rounded-full overflow-hidden">
@@ -465,156 +587,265 @@ export const FlashcardQuickfireMode: React.FC<FlashcardQuickfireModeProps> = ({
             </div>
           </div>
 
-          {/* Área interactiva de la Flashcard (Pregunta / Respuesta) */}
-          <div
-            onClick={() => setIsFlipped((prev) => !prev)}
-            className={`min-h-[250px] sm:min-h-[280px] rounded-2xl border-2 p-6 sm:p-8 flex flex-col justify-between cursor-pointer transition-all select-none ${
-              isFlipped
-                ? 'bg-gradient-to-br from-indigo-50/70 via-white to-blue-50/50 dark:from-indigo-950/40 dark:via-slate-900 dark:to-slate-900 border-indigo-400 dark:border-indigo-600 shadow-xs'
-                : 'bg-slate-50/70 dark:bg-slate-800/40 hover:bg-slate-50 dark:hover:bg-slate-800/70 border-slate-200 dark:border-slate-700 hover:border-indigo-300'
-            }`}
-          >
-            <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider">
-              <span
-                className={
-                  isFlipped
-                    ? 'text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'
-                    : 'text-slate-400 dark:text-slate-500 flex items-center gap-1.5'
-                }
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>{isFlipped ? 'Respuesta / Definición' : 'Pregunta / Estímulo Activo'}</span>
-              </span>
-
-              <span className="text-slate-400 dark:text-slate-500 font-normal">
-                {isFlipped ? 'Clic o Espacio para ver pregunta' : 'Clic o Espacio para revelar'}
-              </span>
-            </div>
-
-            <div className="my-auto py-6 text-center space-y-4">
-              {!isFlipped ? (
-                <>
-                  <h4 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white leading-relaxed max-w-xl mx-auto">
-                    {currentCard.question}
-                  </h4>
-
-                  {currentCard.hint && (
-                    <div className="pt-2">
-                      {showHint ? (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="inline-block px-3.5 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200"
-                        >
-                          💡 <strong>Pista:</strong> {currentCard.hint}
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowHint(true);
-                          }}
-                          className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer"
-                        >
-                          Mostrar pista
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="space-y-3 max-w-xl mx-auto text-left sm:text-center">
-                  <div className="text-xs font-semibold text-slate-400 dark:text-slate-500 line-clamp-1">
-                    {currentCard.question}
-                  </div>
-                  <div className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-relaxed whitespace-pre-line">
-                    {currentCard.answer}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-center">
-              {!isFlipped ? (
+          {isEditingCard ? (
+            /* Editor en línea de Pregunta y Respuesta durante el repaso Quickfire */
+            <form
+              onSubmit={handleSaveEditCard}
+              className="rounded-2xl border-2 border-indigo-400 dark:border-indigo-600 bg-slate-50/70 dark:bg-slate-800/50 p-5 sm:p-6 space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-700 pb-3">
+                <span className="text-xs font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1.5">
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>Modificar Flashcard (Pregunta y Respuesta)</span>
+                </span>
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsFlipped(true);
-                  }}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition-all cursor-pointer inline-flex items-center gap-2"
+                  onClick={() => setIsEditingCard(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                 >
-                  <Eye className="w-4 h-4" />
-                  <span>Revelar Respuesta (Espacio)</span>
+                  <X className="w-4 h-4" />
                 </button>
-              ) : (
-                <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
-                  ¿Qué tan bien recordabas esta respuesta? Selecciona una opción abajo (o pulsa 1–4):
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Botonera Quickfire de calificación SM-2 */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-            <button
-              type="button"
-              onClick={() => handleRateCard('repetir')}
-              className="p-3 rounded-2xl border border-rose-200 dark:border-rose-800/80 bg-rose-50/70 hover:bg-rose-600 text-rose-900 hover:text-white dark:bg-rose-950/40 dark:text-rose-200 dark:hover:bg-rose-600 dark:hover:text-white transition-all cursor-pointer text-center group"
-            >
-              <div className="text-xs font-extrabold">1 · Repetir</div>
-              <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
-                Hoy (&lt;24h)
               </div>
-            </button>
 
-            <button
-              type="button"
-              onClick={() => handleRateCard('dificil')}
-              className="p-3 rounded-2xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/70 hover:bg-amber-500 text-amber-900 hover:text-white dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-500 dark:hover:text-white transition-all cursor-pointer text-center group"
-            >
-              <div className="text-xs font-extrabold">2 · Difícil</div>
-              <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
-                +{Math.max(1, Math.round((currentCard.interval || 1) * 1.2))}d
-              </div>
-            </button>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">
+                    Pregunta / Estímulo Activo:
+                  </label>
+                  <textarea
+                    value={editQuestion}
+                    onChange={(e) => setEditQuestion(e.target.value)}
+                    rows={2}
+                    required
+                    className="w-full text-xs p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                    placeholder="Escribe la pregunta o concepto..."
+                  />
+                </div>
 
-            <button
-              type="button"
-              onClick={() => handleRateCard('bien')}
-              className="p-3 rounded-2xl border border-blue-200 dark:border-blue-800/80 bg-blue-50/70 hover:bg-blue-600 text-blue-900 hover:text-white dark:bg-blue-950/40 dark:text-blue-200 dark:hover:bg-blue-600 dark:hover:text-white transition-all cursor-pointer text-center group"
-            >
-              <div className="text-xs font-extrabold">3 · Bien</div>
-              <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
-                +
-                {(currentCard.repetitions || 0) === 0
-                  ? 1
-                  : (currentCard.repetitions || 0) === 1
-                  ? 3
-                  : Math.round((currentCard.interval || 1) * (currentCard.easeFactor || 2.5))}
-                d
-              </div>
-            </button>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 mb-1">
+                    Respuesta / Definición Correcta:
+                  </label>
+                  <textarea
+                    value={editAnswer}
+                    onChange={(e) => setEditAnswer(e.target.value)}
+                    rows={3}
+                    required
+                    className="w-full text-xs p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                    placeholder="Escribe la respuesta o definición..."
+                  />
+                </div>
 
-            <button
-              type="button"
-              onClick={() => handleRateCard('facil')}
-              className="p-3 rounded-2xl border border-emerald-200 dark:border-emerald-800/80 bg-emerald-50/70 hover:bg-emerald-600 text-emerald-900 hover:text-white dark:bg-emerald-950/40 dark:text-emerald-200 dark:hover:bg-emerald-600 dark:hover:text-white transition-all cursor-pointer text-center group"
-            >
-              <div className="text-xs font-extrabold">4 · Fácil</div>
-              <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
-                +
-                {(currentCard.repetitions || 0) === 0
-                  ? 3
-                  : (currentCard.repetitions || 0) === 1
-                  ? 7
-                  : Math.round(
-                      (currentCard.interval || 1) * (currentCard.easeFactor || 2.5) * 1.3
-                    )}
-                d
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Pista opcional (Hint):
+                    </label>
+                    <input
+                      type="text"
+                      value={editHint}
+                      onChange={(e) => setEditHint(e.target.value)}
+                      className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Pista opcional..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 mb-1">
+                      Etiqueta / Concepto:
+                    </label>
+                    <input
+                      type="text"
+                      value={editConceptTag}
+                      onChange={(e) => setEditConceptTag(e.target.value)}
+                      className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Etiqueta del tema..."
+                    />
+                  </div>
+                </div>
               </div>
-            </button>
-          </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={handleDeleteCurrentCard}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Eliminar flashcard</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingCard(false)}
+                    className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Guardar cambios</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          ) : (
+            <>
+              {/* Área interactiva de la Flashcard (Pregunta / Respuesta) */}
+              <div
+                onClick={() => setIsFlipped((prev) => !prev)}
+                className={`min-h-[250px] sm:min-h-[280px] rounded-2xl border-2 p-6 sm:p-8 flex flex-col justify-between cursor-pointer transition-all select-none ${
+                  isFlipped
+                    ? 'bg-gradient-to-br from-indigo-50/70 via-white to-blue-50/50 dark:from-indigo-950/40 dark:via-slate-900 dark:to-slate-900 border-indigo-400 dark:border-indigo-600 shadow-xs'
+                    : 'bg-slate-50/70 dark:bg-slate-800/40 hover:bg-slate-50 dark:hover:bg-slate-800/70 border-slate-200 dark:border-slate-700 hover:border-indigo-300'
+                }`}
+              >
+                <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider">
+                  <span
+                    className={
+                      isFlipped
+                        ? 'text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5'
+                        : 'text-slate-400 dark:text-slate-500 flex items-center gap-1.5'
+                    }
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    <span>{isFlipped ? 'Respuesta / Definición' : 'Pregunta / Estímulo Activo'}</span>
+                  </span>
+
+                  <span className="text-slate-400 dark:text-slate-500 font-normal">
+                    {isFlipped ? 'Clic o Espacio para ver pregunta' : 'Clic o Espacio para revelar'}
+                  </span>
+                </div>
+
+                <div className="my-auto py-6 text-center space-y-4">
+                  {!isFlipped ? (
+                    <>
+                      <h4 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white leading-relaxed max-w-xl mx-auto">
+                        {currentCard.question}
+                      </h4>
+
+                      {currentCard.hint && (
+                        <div className="pt-2">
+                          {showHint ? (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-block px-3.5 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200"
+                            >
+                              💡 <strong>Pista:</strong> {currentCard.hint}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowHint(true);
+                              }}
+                              className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer"
+                            >
+                              Mostrar pista
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="space-y-3 max-w-xl mx-auto text-left sm:text-center">
+                      <div className="text-xs font-semibold text-slate-400 dark:text-slate-500 line-clamp-1">
+                        {currentCard.question}
+                      </div>
+                      <div className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-relaxed whitespace-pre-line">
+                        {currentCard.answer}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-center">
+                  {!isFlipped ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsFlipped(true);
+                      }}
+                      className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition-all cursor-pointer inline-flex items-center gap-2"
+                    >
+                      <Eye className="w-4 h-4" />
+                      <span>Revelar Respuesta (Espacio)</span>
+                    </button>
+                  ) : (
+                    <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                      ¿Qué tan bien recordabas esta respuesta? Selecciona una opción abajo (o pulsa 1–4):
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Botonera Quickfire de calificación SM-2 */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => handleRateCard('repetir')}
+                  className="p-3 rounded-2xl border border-rose-200 dark:border-rose-800/80 bg-rose-50/70 hover:bg-rose-600 text-rose-900 hover:text-white dark:bg-rose-950/40 dark:text-rose-200 dark:hover:bg-rose-600 dark:hover:text-white transition-all cursor-pointer text-center group"
+                >
+                  <div className="text-xs font-extrabold">1 · Repetir</div>
+                  <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
+                    Hoy (&lt;24h)
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRateCard('dificil')}
+                  className="p-3 rounded-2xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/70 hover:bg-amber-500 text-amber-900 hover:text-white dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-500 dark:hover:text-white transition-all cursor-pointer text-center group"
+                >
+                  <div className="text-xs font-extrabold">2 · Difícil</div>
+                  <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
+                    +{Math.max(1, Math.round((currentCard.interval || 1) * 1.2))}d
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRateCard('bien')}
+                  className="p-3 rounded-2xl border border-blue-200 dark:border-blue-800/80 bg-blue-50/70 hover:bg-blue-600 text-blue-900 hover:text-white dark:bg-blue-950/40 dark:text-blue-200 dark:hover:bg-blue-600 dark:hover:text-white transition-all cursor-pointer text-center group"
+                >
+                  <div className="text-xs font-extrabold">3 · Bien</div>
+                  <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
+                    +
+                    {(currentCard.repetitions || 0) === 0
+                      ? 1
+                      : (currentCard.repetitions || 0) === 1
+                      ? 3
+                      : Math.round((currentCard.interval || 1) * (currentCard.easeFactor || 2.5))}
+                    d
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRateCard('facil')}
+                  className="p-3 rounded-2xl border border-emerald-200 dark:border-emerald-800/80 bg-emerald-50/70 hover:bg-emerald-600 text-emerald-900 hover:text-white dark:bg-emerald-950/40 dark:text-emerald-200 dark:hover:bg-emerald-600 dark:hover:text-white transition-all cursor-pointer text-center group"
+                >
+                  <div className="text-xs font-extrabold">4 · Fácil</div>
+                  <div className="text-[10px] opacity-80 mt-0.5 font-mono-numbers">
+                    +
+                    {(currentCard.repetitions || 0) === 0
+                      ? 3
+                      : (currentCard.repetitions || 0) === 1
+                      ? 7
+                      : Math.round(
+                          (currentCard.interval || 1) * (currentCard.easeFactor || 2.5) * 1.3
+                        )}
+                    d
+                  </div>
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : (
         /* Pantalla de Resumen al completar la tanda Quickfire */

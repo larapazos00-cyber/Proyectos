@@ -3,6 +3,11 @@ import {
   Topic,
   Exam,
   Task,
+  Project,
+  SubjectGradingConfig,
+  SchedulingPriorityLevel,
+  TopicSchedulingPriorityInfo,
+  SubjectSchedulingPriorityInfo,
   StudyPreferences,
   ScheduledStudySession,
   ReviewQuality,
@@ -46,13 +51,25 @@ export const FORGETTING_CURVE_SCHEDULE = [
   { level: 5, days: 30, label: '5º repaso: Al mes (30 días)', shortLabel: 'R5 (30 días)' },
 ];
 
+export type CanonicalDifficulty = 'Básico' | 'Intermedio' | 'Avanzado';
+
+export function normalizeDifficultyToCanonical(
+  diff?: string
+): CanonicalDifficulty {
+  if (!diff) return 'Intermedio';
+  const low = diff.toLowerCase();
+  if (low === 'alta' || low === 'avanzado' || low === 'avanzada') return 'Avanzado';
+  if (low === 'baja' || low === 'básico' || low === 'basico' || low === 'básica') return 'Básico';
+  return 'Intermedio';
+}
+
 export interface SpacedReviewAdjustmentOptions {
   errorsCount?: number; // Nº de fallos cometidos o pendientes en el tema
   retentionPct?: number; // Retención demostrada o percibida (0-100%)
   baseDateStr?: string; // Fecha de referencia (por defecto hoy)
   studiedPages?: number; // Nº de páginas estudiadas a tener en cuenta en el repaso
   totalPages?: number; // Nº de páginas totales del tema
-  difficulty?: 'Baja' | 'Media' | 'Alta';
+  difficulty?: 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado';
 }
 
 export interface SpacedReviewCalculationResult {
@@ -65,6 +82,145 @@ export interface SpacedReviewCalculationResult {
   pagesReviewed?: number;
   totalPages?: number;
   estimatedReviewMinutes?: number;
+}
+
+export interface StoredSmartGoalItem {
+  id: string;
+  title: string;
+  subjectName: string;
+  priority: 'alta' | 'media' | 'baja';
+  specific?: string;
+  measurable?: string;
+  achievable?: string;
+  relevant?: string;
+  timeBound?: string;
+  milestones?: string[];
+}
+
+const SMART_GOAL_STOPWORDS = new Set([
+  'para', 'como', 'sobre', 'entre', 'antes', 'despues', 'desde', 'hasta',
+  'todos', 'todas', 'este', 'esta', 'estos', 'estas', 'tema', 'temas',
+  'estudiar', 'repasar', 'repaso', 'plan', 'general', 'semana', 'mes',
+  'dias', 'horas', 'completar', 'hacer', 'lograr', 'objetivo', 'smart',
+]);
+
+function normalizeSmartMatchText(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+export function loadActiveSmartGoalsFromStorage(): StoredSmartGoalItem[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
+    const rawGoals = window.localStorage.getItem('studyflow_smart_goals_v1');
+    if (!rawGoals) return [];
+    const parsed = JSON.parse(rawGoals);
+    const goals: StoredSmartGoalItem[] = Array.isArray(parsed?.smartGoals)
+      ? parsed.smartGoals
+      : [];
+    if (goals.length === 0) return [];
+
+    let completedMap: Record<string, boolean> = {};
+    try {
+      const rawMilestones = window.localStorage.getItem('studyflow_smart_milestones_v1');
+      if (rawMilestones) {
+        completedMap = JSON.parse(rawMilestones) || {};
+      }
+    } catch {
+      completedMap = {};
+    }
+
+    return goals.filter((goal, idx) => {
+      const milestones = goal.milestones || [];
+      if (milestones.length === 0) return true;
+      const doneCount = milestones.filter(
+        (_, mIdx) => Boolean(completedMap[`${goal.id || idx}__${mIdx}`])
+      ).length;
+      return doneCount < milestones.length;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function evaluateTopicMatchWithSmartGoals(
+  topicTitle: string,
+  subjectName: string | undefined,
+  smartGoals: StoredSmartGoalItem[]
+): { bonusScore: number; alignedTitle?: string; matchReason?: string } {
+  if (!smartGoals || smartGoals.length === 0) return { bonusScore: 0 };
+
+  const normSubject = normalizeSmartMatchText(subjectName || '');
+  const normTopic = normalizeSmartMatchText(topicTitle || '');
+  const topicWords = normTopic
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 4 && !SMART_GOAL_STOPWORDS.has(w));
+  const topicNumberMatch = normTopic.match(/(?:tema|t|unidad|bloque|leccion|modulo)\s*(\d+)/);
+
+  let bestScore = 0;
+  let bestTitle: string | undefined;
+  let bestReason: string | undefined;
+
+  smartGoals.forEach((goal) => {
+    const normGoalSub = normalizeSmartMatchText(goal.subjectName || '');
+    const isGeneralGoal =
+      !normGoalSub || normGoalSub === 'general' || normGoalSub === 'plan general';
+    const subjectMatches =
+      Boolean(normSubject) &&
+      (normGoalSub === normSubject ||
+        normGoalSub.includes(normSubject) ||
+        normSubject.includes(normGoalSub));
+
+    if (!subjectMatches && !isGeneralGoal) return;
+
+    const goalBlob = normalizeSmartMatchText(
+      [
+        goal.title,
+        goal.specific || '',
+        goal.measurable || '',
+        ...(goal.milestones || []),
+      ].join(' ')
+    );
+
+    const priorityWeight = goal.priority === 'alta' ? 45 : goal.priority === 'media' ? 30 : 18;
+    let directMatch = false;
+
+    if (normTopic.length >= 4 && goalBlob.includes(normTopic)) {
+      directMatch = true;
+    } else if (
+      topicNumberMatch &&
+      new RegExp(`(?:tema|t|unidad|bloque|leccion|modulo)\\s*${topicNumberMatch[1]}\\b`).test(
+        goalBlob
+      )
+    ) {
+      directMatch = true;
+    } else if (topicWords.some((w) => goalBlob.includes(w))) {
+      directMatch = true;
+    }
+
+    let score = 0;
+    if (directMatch) {
+      score = subjectMatches ? priorityWeight : Math.round(priorityWeight * 0.75);
+    } else if (subjectMatches) {
+      score = goal.priority === 'alta' ? 18 : goal.priority === 'media' ? 12 : 6;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestTitle = goal.title;
+      bestReason = directMatch
+        ? `🎯 Objetivo SMART: "${goal.title}"`
+        : `🎯 Alinea con Objetivo SMART: "${goal.title}"`;
+    }
+  });
+
+  return {
+    bonusScore: bestScore,
+    alignedTitle: bestTitle,
+    matchReason: bestReason,
+  };
 }
 
 // Obtiene la configuración de Velocidad de Lectura Promedio (páginas por hora y minutos por página) desde preferencias o localStorage
@@ -153,7 +309,7 @@ export function getStoredReadingSpeedConfig(prefsOverride?: Partial<StudyPrefere
 
 // Velocidad efectiva en páginas por hora según la Velocidad de Lectura Promedio configurada y la dificultad del tema
 export function getPagesPerHour(
-  difficulty: 'Baja' | 'Media' | 'Alta',
+  difficulty: 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado',
   customPagesPerHour?: number,
   useDifficultyScaling?: boolean,
   customAvgMinutesPerPage?: number
@@ -169,12 +325,13 @@ export function getPagesPerHour(
     return Math.round(basePagesPerHour * 10) / 10;
   }
 
-  switch (difficulty) {
-    case 'Alta':
+  const canonical = normalizeDifficultyToCanonical(difficulty);
+  switch (canonical) {
+    case 'Avanzado':
       return Math.max(1, Math.round((basePagesPerHour / 1.35) * 10) / 10); // Lectura profunda (~74% de la velocidad base)
-    case 'Media':
+    case 'Intermedio':
       return Math.round(basePagesPerHour * 10) / 10; // Velocidad de lectura promedio estándar configurada
-    case 'Baja':
+    case 'Básico':
     default:
       return Math.round((basePagesPerHour / 0.72) * 10) / 10; // Lectura ágil (~139% de la velocidad base)
   }
@@ -182,7 +339,7 @@ export function getPagesPerHour(
 
 // Ritmo estimado de minutos necesarios por página según la velocidad de lectura configurada en preferencias y la dificultad
 export function getMinutesPerPage(
-  difficulty: 'Baja' | 'Media' | 'Alta',
+  difficulty: 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado',
   customAvgMinutesPerPage?: number,
   useDifficultyScaling?: boolean,
   customPagesPerHour?: number
@@ -198,7 +355,7 @@ export function getMinutesPerPage(
 
 // Ritmo estimado de minutos por página ESTUDIADA durante un repaso espaciado
 export function getReviewMinutesPerStudiedPage(
-  difficulty: 'Baja' | 'Media' | 'Alta',
+  difficulty: 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado',
   reviewLevel = 1,
   customAvgMinutesPerPage?: number
 ): number {
@@ -227,6 +384,7 @@ function timeStrToMinutes(timeStr: string): number {
 }
 
 export const schedulerService = {
+  normalizeDifficultyToCanonical,
   /**
    * Devuelve los minutos por página según la velocidad de lectura en preferencias y la dificultad
    */
@@ -248,7 +406,7 @@ export const schedulerService = {
    * y el número de páginas del tema como factores determinantes.
    */
   calculateTopicTime(
-    difficulty: 'Baja' | 'Media' | 'Alta',
+    difficulty: 'Baja' | 'Media' | 'Alta' | 'Básico' | 'Intermedio' | 'Avanzado',
     subtopicsCount = 0,
     textLength = 0,
     pageCount?: number,
@@ -260,8 +418,9 @@ export const schedulerService = {
         : preferencesOrSpeed;
 
     const cfg = getStoredReadingSpeedConfig(prefsOverride);
+    const canonicalDiff = normalizeDifficultyToCanonical(difficulty);
     const effectivePagesPerHour = getPagesPerHour(
-      difficulty,
+      canonicalDiff,
       cfg.readingSpeedPagesPerHour,
       cfg.useDifficultyScalingForPages,
       cfg.averageMinutesPerPage
@@ -279,7 +438,7 @@ export const schedulerService = {
     const inferredPagesFromText =
       textLength > 600 ? Math.max(5, Math.ceil(textLength / 1800)) : 0;
     const difficultyDefaultFactor =
-      difficulty === 'Alta' ? 1.25 : difficulty === 'Baja' ? 0.8 : 1.0;
+      canonicalDiff === 'Avanzado' ? 1.25 : canonicalDiff === 'Básico' ? 0.8 : 1.0;
     const effectiveFallbackPages =
       inferredPagesFromText > 0
         ? inferredPagesFromText
@@ -1283,10 +1442,507 @@ export const schedulerService = {
   },
 
   /**
+   * Calcula la prioridad de agendado al calendario de un Tema concreto combinando:
+   * 1. Porcentaje de la nota final de Exámenes, Proyectos y Tareas evaluables vinculados.
+   * 2. Proximidad de la fecha de entrega o examen.
+   * 3. Prioridad manual ('critica' | 'alta' | 'media' | 'baja') u orden manual elegido por el usuario.
+   */
+  calculateTopicSchedulingPriority(
+    topic: Topic,
+    subjectContext: {
+      id: string;
+      subjectName?: string;
+      exams?: Exam[];
+      tasks?: Task[];
+      projects?: Project[];
+      gradingConfig?: SubjectGradingConfig;
+      topicsCount?: number;
+    },
+    todayStr?: string,
+    smartGoalsOverride?: StoredSmartGoalItem[]
+  ): TopicSchedulingPriorityInfo {
+    const refTodayStr = todayStr || getTodayLocalDateStr();
+    const exams = subjectContext.exams || [];
+    const tasks = subjectContext.tasks || [];
+    const projects = subjectContext.projects || [];
+    const gradingComponents = subjectContext.gradingConfig?.components || [];
+    const totalTopicsInSub = Math.max(1, subjectContext.topicsCount || 1);
+
+    const normalizeText = (s: string) =>
+      (s || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+
+    const normTitle = normalizeText(topic.title);
+    const reasons: string[] = [];
+    const deadlineDates: string[] = [];
+
+    // 1. Calcular peso en la nota final por EXÁMENES que evalúan este tema
+    let examWeightPct = 0;
+    const activeExams = exams.filter((e) => !e.completed);
+    const relevantExams = activeExams.filter(
+      (e) => !e.topicIds || e.topicIds.length === 0 || e.topicIds.includes(topic.id)
+    );
+
+    relevantExams.forEach((ex) => {
+      if (ex.date && ex.date >= refTodayStr) {
+        deadlineDates.push(ex.date);
+      }
+      let w = ex.weightPercentage ?? ex.weight;
+      if (w === undefined || w <= 0) {
+        const linkedComp = gradingComponents.find(
+          (c) => c.linkedId === ex.id || (c.type === 'exam' && c.weight > 0)
+        );
+        if (linkedComp) {
+          w = linkedComp.weight;
+        } else {
+          const isFinal =
+            normalizeText(ex.title).includes('final') ||
+            normalizeText(ex.convocatoria || '').includes('ordinaria');
+          w = isFinal ? 50 : 35;
+        }
+      }
+      examWeightPct += w;
+      reasons.push(`Examen "${ex.title}" (${Math.round(w)}% nota final)`);
+    });
+    examWeightPct = Math.min(100, Math.round(examWeightPct * 10) / 10);
+
+    // 2. Calcular peso en la nota final por PROYECTOS vinculados al tema o a la asignatura
+    let projectWeightPct = 0;
+    const activeProjects = projects.filter(
+      (p) => p.status !== 'calificado' && p.status !== 'entregado'
+    );
+    activeProjects.forEach((proj) => {
+      const projTasks = proj.tasks || [];
+      const directlyLinkedToTopic =
+        projTasks.some(
+          (pt) =>
+            pt.topicId === topic.id ||
+            (pt.title && normalizeText(pt.title).includes(normTitle))
+        ) ||
+        normalizeText(proj.title).includes(normTitle) ||
+        normalizeText(proj.description || '').includes(normTitle);
+
+      let w = proj.weightPercentage;
+      if (w === undefined || w <= 0) {
+        const linkedComp = gradingComponents.find(
+          (c) => c.linkedId === proj.id || (c.type === 'project' && c.weight > 0)
+        );
+        w = linkedComp ? linkedComp.weight : 20;
+      }
+
+      if (directlyLinkedToTopic) {
+        projectWeightPct += w;
+        if (proj.dueDate && proj.dueDate >= refTodayStr) {
+          deadlineDates.push(proj.dueDate);
+        }
+        reasons.push(`Proyecto "${proj.title}" (${Math.round(w)}% nota final)`);
+      } else if (activeProjects.length > 0 && totalTopicsInSub <= 12) {
+        // Impacto general del proyecto de la asignatura
+        const share = Math.max(5, Math.round((w * 0.5) * 10) / 10);
+        projectWeightPct += share;
+        if (proj.dueDate && proj.dueDate >= refTodayStr) {
+          deadlineDates.push(proj.dueDate);
+        }
+        reasons.push(`Proyecto de asignatura "${proj.title}" (${Math.round(w)}% nota)`);
+      }
+    });
+    projectWeightPct = Math.min(100, Math.round(projectWeightPct * 10) / 10);
+
+    // 3. Calcular peso en la nota final por TAREAS pendientes vinculadas
+    let taskWeightPct = 0;
+    const allSubjectTasks = [
+      ...tasks,
+      ...projects.flatMap((p) => p.tasks || []),
+    ].filter((tk) => !tk.completed);
+
+    const matchedTasks = allSubjectTasks.filter((tk) => {
+      if (tk.topicId && tk.topicId === topic.id) return true;
+      const tNorm = normalizeText(`${tk.title} ${tk.subtopic || ''}`);
+      return (normTitle.length >= 4 && tNorm.includes(normTitle)) || (tk.title.length >= 4 && normTitle.includes(normalizeText(tk.title)));
+    });
+
+    let linkedTaskManualBonus = 0;
+    matchedTasks.forEach((tk) => {
+      if (tk.dueDate && tk.dueDate >= refTodayStr) {
+        deadlineDates.push(tk.dueDate);
+      }
+      let w = tk.weightPercentage;
+      if (w === undefined || w <= 0) {
+        const contComp = gradingComponents.find(
+          (c) => c.type === 'continuous' || c.type === 'activity'
+        );
+        if (contComp && contComp.weight > 0) {
+          w = Math.max(5, Math.round(contComp.weight / Math.max(1, allSubjectTasks.length)));
+        } else {
+          w =
+            tk.priority === 'urgente'
+              ? 15
+              : tk.priority === 'alta'
+              ? 10
+              : tk.isGraded
+              ? 10
+              : 5;
+        }
+      }
+      taskWeightPct += w;
+      if (typeof tk.manualPriorityOrder === 'number' && tk.manualPriorityOrder > 0) {
+        linkedTaskManualBonus = Math.max(
+          linkedTaskManualBonus,
+          Math.max(15, 160 - tk.manualPriorityOrder * 10)
+        );
+        reasons.push(`Tarea "${tk.title}" (#${tk.manualPriorityOrder} manual · ${Math.round(w)}% nota)`);
+      } else {
+        reasons.push(`Tarea "${tk.title}" (${Math.round(w)}% nota)`);
+      }
+    });
+    taskWeightPct = Math.min(100, Math.round(taskWeightPct * 10) / 10);
+
+    // Si el usuario asignó manualmente un % de impacto en la nota final al tema, lo respetamos
+    const rawCombinedWeight = Math.min(
+      100,
+      Math.round((examWeightPct + projectWeightPct + taskWeightPct) * 10) / 10
+    );
+    const totalGradeWeightPct =
+      topic.customGradeWeightImpact !== undefined && topic.customGradeWeightImpact >= 0
+        ? Math.min(100, Math.round(topic.customGradeWeightImpact * 10) / 10)
+        : rawCombinedWeight;
+
+    // Fecha límite más próxima
+    const sortedDeadlines = deadlineDates.filter(Boolean).sort();
+    const nearestDeadlineDate = sortedDeadlines[0];
+    let daysUntilDeadline: number | undefined;
+    if (nearestDeadlineDate) {
+      const d1 = parseLocalDate(refTodayStr).getTime();
+      const d2 = parseLocalDate(nearestDeadlineDate).getTime();
+      daysUntilDeadline = Math.max(0, Math.round((d2 - d1) / (1000 * 60 * 60 * 24)));
+    }
+
+    // Nivel automático según % de la nota final y cercanía de entrega
+    let autoLevel: 'critica' | 'alta' | 'media' | 'baja' = 'media';
+    if (
+      totalGradeWeightPct >= 50 ||
+      (totalGradeWeightPct >= 30 && daysUntilDeadline !== undefined && daysUntilDeadline <= 7)
+    ) {
+      autoLevel = 'critica';
+    } else if (
+      totalGradeWeightPct >= 30 ||
+      (daysUntilDeadline !== undefined && daysUntilDeadline <= 10)
+    ) {
+      autoLevel = 'alta';
+    } else if (totalGradeWeightPct >= 15 || daysUntilDeadline !== undefined) {
+      autoLevel = 'media';
+    } else {
+      autoLevel = 'baja';
+    }
+
+    const configuredPriority: SchedulingPriorityLevel = topic.schedulingPriority || 'auto';
+    const isManualLevel = configuredPriority !== 'auto';
+    const isManualOrder =
+      typeof topic.manualPriorityOrder === 'number' && topic.manualPriorityOrder > 0;
+    const mode: 'manual' | 'auto' = isManualLevel || isManualOrder ? 'manual' : 'auto';
+    const effectiveLevel: 'critica' | 'alta' | 'media' | 'baja' = isManualLevel
+      ? (configuredPriority as 'critica' | 'alta' | 'media' | 'baja')
+      : autoLevel;
+
+    // Cálculo de puntuación efectiva para ordenar en la cola del calendario
+    const urgencyPoints =
+      daysUntilDeadline !== undefined
+        ? daysUntilDeadline <= 3
+          ? 45
+          : daysUntilDeadline <= 7
+          ? 30
+          : daysUntilDeadline <= 14
+          ? 18
+          : daysUntilDeadline <= 30
+          ? 8
+          : 2
+        : 0;
+
+    const diffCanonical = normalizeDifficultyToCanonical(topic.difficulty);
+    const difficultyPoints =
+      diffCanonical === 'Avanzado' ? 10 : diffCanonical === 'Intermedio' ? 5 : 2;
+
+    let effectiveScore = totalGradeWeightPct * 1.25 + urgencyPoints + difficultyPoints;
+
+    if (isManualLevel) {
+      const manualBaseMap: Record<'critica' | 'alta' | 'media' | 'baja', number> = {
+        critica: 220,
+        alta: 165,
+        media: 105,
+        baja: 30,
+      };
+      effectiveScore =
+        manualBaseMap[effectiveLevel] + totalGradeWeightPct * 0.4 + urgencyPoints * 0.5;
+    }
+
+    if (isManualOrder && topic.manualPriorityOrder) {
+      // Garantiza que el orden manual (#1, #2, #3...) tenga precedencia directa
+      effectiveScore += Math.max(50, 600 - topic.manualPriorityOrder * 15);
+    } else if (linkedTaskManualBonus > 0) {
+      effectiveScore += linkedTaskManualBonus;
+    }
+
+    // 4. Alineación con Objetivos SMART activos
+    const activeSmartGoals = smartGoalsOverride ?? loadActiveSmartGoalsFromStorage();
+    const smartMatch = evaluateTopicMatchWithSmartGoals(
+      topic.title,
+      subjectContext.subjectName,
+      activeSmartGoals
+    );
+    let smartGoalAligned = false;
+    let alignedSmartGoalTitle: string | undefined;
+    if (smartMatch.bonusScore > 0) {
+      effectiveScore += smartMatch.bonusScore;
+      smartGoalAligned = true;
+      alignedSmartGoalTitle = smartMatch.alignedTitle;
+      if (smartMatch.matchReason) {
+        reasons.unshift(smartMatch.matchReason);
+      }
+    }
+
+    const levelLabels: Record<'critica' | 'alta' | 'media' | 'baja', string> = {
+      critica: 'Crítica',
+      alta: 'Alta',
+      media: 'Media',
+      baja: 'Baja',
+    };
+
+    const summaryLabel = isManualLevel
+      ? `Prioridad Manual: ${levelLabels[effectiveLevel]} (${totalGradeWeightPct}% nota final)`
+      : `Prioridad ${levelLabels[effectiveLevel]} (${totalGradeWeightPct}% nota final)`;
+
+    if (reasons.length === 0) {
+      reasons.push(`Peso estimado en nota: ${totalGradeWeightPct}%`);
+    }
+
+    return {
+      topicId: topic.id,
+      subjectId: subjectContext.id,
+      mode,
+      effectiveLevel,
+      configuredPriority,
+      manualPriorityOrder: topic.manualPriorityOrder,
+      effectiveScore: Math.round(effectiveScore * 10) / 10,
+      totalGradeWeightPct,
+      examWeightPct,
+      projectWeightPct,
+      taskWeightPct,
+      nearestDeadlineDate,
+      daysUntilDeadline,
+      summaryLabel,
+      reasons,
+      smartGoalAligned,
+      alignedSmartGoalTitle,
+    };
+  },
+
+  /**
+   * Calcula la prioridad global de una Asignatura frente a las demás a la hora de repartir los primeros huecos del calendario,
+   * tomando el % de nota final de sus exámenes, proyectos y tareas activas o la prioridad manual elegida por el usuario.
+   */
+  calculateSubjectSchedulingPriority(
+    subject: Subject,
+    todayStr?: string,
+    smartGoalsOverride?: StoredSmartGoalItem[]
+  ): SubjectSchedulingPriorityInfo {
+    const refTodayStr = todayStr || getTodayLocalDateStr();
+    const exams = (subject.exams || []).filter((e) => !e.completed);
+    const projects = (subject.projects || []).filter(
+      (p) => p.status !== 'calificado' && p.status !== 'entregado'
+    );
+    const tasks = [
+      ...(subject.tasks || []),
+      ...(subject.projects || []).flatMap((p) => p.tasks || []),
+    ].filter((tk) => !tk.completed);
+    const gradingComponents = subject.gradingConfig?.components || [];
+
+    const deadlineDates: string[] = [];
+
+    let examWeightPct = 0;
+    exams.forEach((ex) => {
+      if (ex.date && ex.date >= refTodayStr) deadlineDates.push(ex.date);
+      const w =
+        ex.weightPercentage ??
+        ex.weight ??
+        gradingComponents.find((c) => c.linkedId === ex.id || c.type === 'exam')?.weight ??
+        40;
+      examWeightPct += w;
+    });
+    examWeightPct = Math.min(100, Math.round(examWeightPct * 10) / 10);
+
+    let projectWeightPct = 0;
+    projects.forEach((proj) => {
+      if (proj.dueDate && proj.dueDate >= refTodayStr) deadlineDates.push(proj.dueDate);
+      const w =
+        proj.weightPercentage ??
+        gradingComponents.find((c) => c.linkedId === proj.id || c.type === 'project')?.weight ??
+        20;
+      projectWeightPct += w;
+    });
+    projectWeightPct = Math.min(100, Math.round(projectWeightPct * 10) / 10);
+
+    let taskWeightPct = 0;
+    tasks.forEach((tk) => {
+      if (tk.dueDate && tk.dueDate >= refTodayStr) deadlineDates.push(tk.dueDate);
+      const w = tk.weightPercentage ?? (tk.isGraded || tk.priority === 'urgente' ? 10 : 5);
+      taskWeightPct += w;
+    });
+    taskWeightPct = Math.min(100, Math.round(taskWeightPct * 10) / 10);
+
+    const totalActiveGradeWeightPct = Math.min(
+      100,
+      Math.round((examWeightPct + projectWeightPct + taskWeightPct) * 10) / 10
+    );
+
+    const sortedDeadlines = deadlineDates.filter(Boolean).sort();
+    const nearestDeadlineDate = sortedDeadlines[0];
+    let daysUntilDeadline: number | undefined;
+    if (nearestDeadlineDate) {
+      const d1 = parseLocalDate(refTodayStr).getTime();
+      const d2 = parseLocalDate(nearestDeadlineDate).getTime();
+      daysUntilDeadline = Math.max(0, Math.round((d2 - d1) / (1000 * 60 * 60 * 24)));
+    }
+
+    let autoLevel: 'critica' | 'alta' | 'media' | 'baja' = 'media';
+    if (
+      totalActiveGradeWeightPct >= 60 ||
+      (totalActiveGradeWeightPct >= 35 && daysUntilDeadline !== undefined && daysUntilDeadline <= 7)
+    ) {
+      autoLevel = 'critica';
+    } else if (
+      totalActiveGradeWeightPct >= 35 ||
+      (daysUntilDeadline !== undefined && daysUntilDeadline <= 14)
+    ) {
+      autoLevel = 'alta';
+    } else if (totalActiveGradeWeightPct >= 15 || daysUntilDeadline !== undefined) {
+      autoLevel = 'media';
+    } else {
+      autoLevel = 'baja';
+    }
+
+    const configuredPriority: SchedulingPriorityLevel = subject.schedulingPriority || 'auto';
+    const isManualLevel = configuredPriority !== 'auto';
+    const isManualRank =
+      typeof subject.manualPriorityRank === 'number' && subject.manualPriorityRank > 0;
+    const mode: 'manual' | 'auto' = isManualLevel || isManualRank ? 'manual' : 'auto';
+    const effectiveLevel = isManualLevel
+      ? (configuredPriority as 'critica' | 'alta' | 'media' | 'baja')
+      : autoLevel;
+
+    const urgencyPoints =
+      daysUntilDeadline !== undefined
+        ? daysUntilDeadline <= 5
+          ? 40
+          : daysUntilDeadline <= 14
+          ? 22
+          : 8
+        : 0;
+
+    let effectiveScore = totalActiveGradeWeightPct * 1.2 + urgencyPoints;
+    if (isManualLevel) {
+      const manualBaseMap: Record<'critica' | 'alta' | 'media' | 'baja', number> = {
+        critica: 220,
+        alta: 165,
+        media: 105,
+        baja: 30,
+      };
+      effectiveScore = manualBaseMap[effectiveLevel] + totalActiveGradeWeightPct * 0.4 + urgencyPoints * 0.5;
+    }
+    if (isManualRank && subject.manualPriorityRank) {
+      effectiveScore += Math.max(50, 500 - subject.manualPriorityRank * 20);
+    }
+
+    // Impulso ligero si la asignatura tiene Objetivos SMART activos
+    const activeSmartGoals = smartGoalsOverride ?? loadActiveSmartGoalsFromStorage();
+    const normSub = normalizeSmartMatchText(subject.name);
+    const matchingSubjectGoals = activeSmartGoals.filter((g) => {
+      const normG = normalizeSmartMatchText(g.subjectName || '');
+      return Boolean(normG) && (normG === normSub || normG.includes(normSub) || normSub.includes(normG));
+    });
+    if (matchingSubjectGoals.length > 0) {
+      const maxGoalBoost = matchingSubjectGoals.reduce(
+        (mx, g) => Math.max(mx, g.priority === 'alta' ? 30 : g.priority === 'media' ? 20 : 10),
+        0
+      );
+      effectiveScore += maxGoalBoost;
+    }
+
+    const levelLabels: Record<'critica' | 'alta' | 'media' | 'baja', string> = {
+      critica: 'Crítica',
+      alta: 'Alta',
+      media: 'Media',
+      baja: 'Baja',
+    };
+
+    return {
+      subjectId: subject.id,
+      subjectName: subject.name,
+      mode,
+      effectiveLevel,
+      configuredPriority,
+      manualPriorityRank: subject.manualPriorityRank,
+      effectiveScore: Math.round(effectiveScore * 10) / 10,
+      totalActiveGradeWeightPct,
+      examWeightPct,
+      projectWeightPct,
+      taskWeightPct,
+      nearestDeadlineDate,
+      daysUntilDeadline,
+      summaryLabel: `${levelLabels[effectiveLevel]} (${totalActiveGradeWeightPct}% nota en juego)`,
+    };
+  },
+
+  /**
+   * Ordena las tareas de una asignatura combinando orden manual, % de peso académico en nota final, prioridad y vencimiento.
+   */
+  sortTasksByAcademicPriority(tasks: Task[]): Task[] {
+    const prioRank: Record<string, number> = { urgente: 4, alta: 3, media: 2, baja: 1 };
+    return [...tasks].sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      if (
+        typeof a.manualPriorityOrder === 'number' &&
+        typeof b.manualPriorityOrder === 'number' &&
+        a.manualPriorityOrder !== b.manualPriorityOrder
+      ) {
+        return a.manualPriorityOrder - b.manualPriorityOrder;
+      }
+      if (typeof a.manualPriorityOrder === 'number' && typeof b.manualPriorityOrder !== 'number') {
+        return -1;
+      }
+      if (typeof a.manualPriorityOrder !== 'number' && typeof b.manualPriorityOrder === 'number') {
+        return 1;
+      }
+      const wA = a.weightPercentage ?? 0;
+      const wB = b.weightPercentage ?? 0;
+      if (wB !== wA) return wB - wA;
+      const pDiff = (prioRank[b.priority] || 0) - (prioRank[a.priority] || 0);
+      if (pDiff !== 0) return pDiff;
+      return (a.dueDate || '9999-12-31').localeCompare(b.dueDate || '9999-12-31');
+    });
+  },
+
+  /**
+   * Ordena una lista de asignaturas de mayor a menor prioridad de agendado al calendario.
+   */
+  sortSubjectsBySchedulingPriority(subjects: Subject[], todayStr?: string): Subject[] {
+    const activeSmartGoals = loadActiveSmartGoalsFromStorage();
+    return [...subjects].sort((a, b) => {
+      const pA = this.calculateSubjectSchedulingPriority(a, todayStr, activeSmartGoals);
+      const pB = this.calculateSubjectSchedulingPriority(b, todayStr, activeSmartGoals);
+      if (pB.effectiveScore !== pA.effectiveScore) {
+        return pB.effectiveScore - pA.effectiveScore;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  },
+
+  /**
    * Genera el calendario de sesiones de estudio inteligentes
    * distribuyendo temario y repasos espaciados según los días y horas disponibles,
    * respetando los bloques de tiempo personales, citas añadidas y priorizando los temas
-   * vinculados a tareas que vencen esa semana.
+   * según el % de la nota final de exámenes, proyectos y tareas (o la prioridad manual elegida).
    */
   generateSmartSchedule(
     topics: Topic[],
@@ -1297,7 +1953,9 @@ export const schedulerService = {
     preferences: StudyPreferences,
     startDateStr?: string,
     blockedEvents?: BlockedTimeEvent[],
-    tasks?: Task[]
+    tasks?: Task[],
+    projects?: Project[],
+    gradingConfig?: SubjectGradingConfig
   ): {
     sessions: ScheduledStudySession[];
     updatedTopics: Topic[];
@@ -1308,9 +1966,23 @@ export const schedulerService = {
   } {
     const today = startDateStr ? parseLocalDate(startDateStr) : new Date();
     const todayStr = toLocalDateStr(today);
+    const realTodayStr = getTodayLocalDateStr();
     const availableDaysSet = new Set(preferences.availableDays);
     const hoursPerDay = preferences.hoursPerDay;
-    const defaultStartHour = preferences.studyDayStartHour || 9;
+    const defaultStartHour = preferences.studyDayStartHour || 8;
+    const studyEndHour = preferences.studyDayEndHour || 22;
+
+    // Configuración de Reajuste Dinámico Intradía (si pasan las horas del día y no se llegó a hacer una sesión)
+    const isIntradayAuto = preferences.autoIntradayReschedule ?? true;
+    const nowClock = new Date();
+    const rawClockMinutes = nowClock.getHours() * 60 + nowClock.getMinutes();
+    const roundedClockMinutes = Math.ceil(rawClockMinutes / 30) * 30;
+    const simulatedMinutes =
+      preferences.intradaySimulatedTime && preferences.intradaySimulatedTime.includes(':')
+        ? timeStrToMinutes(preferences.intradaySimulatedTime)
+        : null;
+    const effectiveIntradayCutoffMinutes =
+      simulatedMinutes !== null ? simulatedMinutes : roundedClockMinutes;
 
     // Próximo examen relevante para esta asignatura
     const upcomingExam = exams
@@ -1319,9 +1991,36 @@ export const schedulerService = {
 
     const examDate = upcomingExam ? new Date(upcomingExam.date) : null;
 
+    // Combinar tareas directas de la asignatura y tareas de proyectos
+    const allEffectiveTasks: Task[] = [
+      ...(tasks || []),
+      ...(projects || []).flatMap((p) => p.tasks || []),
+    ];
+
     // Identificar temas asociados a tareas que hay que entregar esta semana
-    const weeklyTaskMap = this.matchWeeklyTasksToTopics(topics, tasks || [], todayStr);
+    const weeklyTaskMap = this.matchWeeklyTasksToTopics(topics, allEffectiveTasks, todayStr);
     let taskPrioritizedCount = 0;
+
+    // Mapa de prioridad de agendado por tema (según % nota final + Objetivos SMART activos + ajustes manuales)
+    const activeSmartGoals = loadActiveSmartGoalsFromStorage();
+    const topicPriorityMap = new Map<string, TopicSchedulingPriorityInfo>();
+    topics.forEach((t) => {
+      const pInfo = this.calculateTopicSchedulingPriority(
+        t,
+        {
+          id: subjectId,
+          subjectName,
+          exams,
+          tasks: allEffectiveTasks,
+          projects,
+          gradingConfig,
+          topicsCount: topics.length,
+        },
+        todayStr,
+        activeSmartGoals
+      );
+      topicPriorityMap.set(t.id, pInfo);
+    });
 
     // Clonamos temas y recalculamos su tiempo estimado (estimatedHours) usando el nº de páginas por tema
     // y la velocidad de lectura promedio por página configurada en las preferencias del usuario
@@ -1336,6 +2035,7 @@ export const schedulerService = {
       );
 
       const matchedTaskInfo = weeklyTaskMap.get(t.id);
+      const prioInfo = topicPriorityMap.get(t.id);
       const pInfo = this.getTopicStudiedPages(t, preferences);
       const isStudiedOrHasReadPages =
         t.status === 'estudiado' ||
@@ -1362,10 +2062,18 @@ export const schedulerService = {
           if (!nextReviewDate || nextReviewDate > matchedTaskInfo.task.dueDate || nextReviewDate < todayStr) {
             nextReviewDate = matchedTaskInfo.targetDateStr;
           }
-          lastAdjustmentReason = `Repaso priorizado para tarea "${matchedTaskInfo.task.title}" (entrega ${matchedTaskInfo.task.dueDate})`;
+          lastAdjustmentReason = `Repaso priorizado para tarea "${matchedTaskInfo.task.title}" (entrega ${matchedTaskInfo.task.dueDate})${
+            prioInfo ? ` · ${prioInfo.summaryLabel}` : ''
+          }`;
         } else {
-          lastAdjustmentReason = `Lectura diaria priorizada para llegar a tarea "${matchedTaskInfo.task.title}" (${matchedTaskInfo.task.dueDate})`;
+          lastAdjustmentReason = `Lectura diaria priorizada para llegar a tarea "${matchedTaskInfo.task.title}" (${matchedTaskInfo.task.dueDate})${
+            prioInfo ? ` · ${prioInfo.summaryLabel}` : ''
+          }`;
         }
+      } else if (prioInfo && (prioInfo.mode === 'manual' || prioInfo.totalGradeWeightPct > 0)) {
+        lastAdjustmentReason = `${prioInfo.summaryLabel}${
+          prioInfo.reasons.length > 0 ? ` · ${prioInfo.reasons[0]}` : ''
+        }`;
       }
 
       return {
@@ -1383,14 +2091,14 @@ export const schedulerService = {
     const sessions: ScheduledStudySession[] = [];
     const currentDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 12, 0, 0);
 
-    // Mapear TODAS las tareas pendientes (no solo las de esta semana) para saber qué temas requieren terminarse antes de una entrega
-    const pendingTasks = (tasks || [])
+    // Mapear TODAS las tareas y proyectos pendientes para saber qué temas requieren terminarse antes de una entrega
+    const pendingTasks = allEffectiveTasks
       .filter((tk) => !tk.completed && tk.dueDate >= todayStr)
       .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
     const topicDeadlineMap = new Map<
       string,
-      { type: 'task' | 'exam'; title: string; dueDate: string; targetStudyDate: string }
+      { type: 'task' | 'exam' | 'project'; title: string; dueDate: string; targetStudyDate: string }
     >();
 
     updatedTopics.forEach((topic) => {
@@ -1417,7 +2125,31 @@ export const schedulerService = {
         return;
       }
 
-      // 2. Buscar examen próximo que incluya este tema o sea general de la materia
+      // 2. Buscar proyecto activo vinculado
+      const linkedProject = (projects || []).find(
+        (p) =>
+          p.status !== 'calificado' &&
+          p.status !== 'entregado' &&
+          p.dueDate &&
+          p.dueDate >= todayStr &&
+          (p.title.toLowerCase().includes(topic.title.toLowerCase()) ||
+            (p.tasks || []).some((pt) => pt.topicId === topic.id))
+      );
+
+      if (linkedProject && linkedProject.dueDate) {
+        const pObj = parseLocalDate(linkedProject.dueDate);
+        pObj.setDate(pObj.getDate() - 1);
+        const targetStr = toLocalDateStr(pObj) >= todayStr ? toLocalDateStr(pObj) : linkedProject.dueDate;
+        topicDeadlineMap.set(topic.id, {
+          type: 'project',
+          title: linkedProject.title,
+          dueDate: linkedProject.dueDate,
+          targetStudyDate: targetStr,
+        });
+        return;
+      }
+
+      // 3. Buscar examen próximo que incluya este tema o sea general de la materia
       const matchingExam =
         exams
           .filter(
@@ -1453,18 +2185,37 @@ export const schedulerService = {
           Boolean(hasExtraSessions)
         );
       })
-      .map((t) => {
+      .map((t, originalIdx) => {
         const pInfo = this.getTopicStudiedPages(t, preferences);
         return {
           ...t,
+          _originalIdx: originalIdx,
           _totalPages: pInfo.totalPages,
           _simulatedHoursSpent: t.actualHoursSpent || 0,
           _simulatedPagesRead: Math.min(pInfo.totalPages, pInfo.studiedPages),
         };
       });
 
-    // Mantener todos los temas pendientes en su orden lógico sin extraerlos a otra lista (evita que aparezca otro tema o se duplique al cambiar la hora de inicio)
+    // Ordenar temas pendientes por su Prioridad de Agendado (Orden manual -> Nivel manual -> % Nota final de exámenes/proyectos/tareas -> Fecha de entrega)
     const pendingTopics = [...allPendingClones].sort((a, b) => {
+      const prioA = topicPriorityMap.get(a.id);
+      const prioB = topicPriorityMap.get(b.id);
+
+      // 1. Si ambos tienen posición manual explícita, respetar el orden manual (#1 antes que #2)
+      if (a.manualPriorityOrder && b.manualPriorityOrder && a.manualPriorityOrder !== b.manualPriorityOrder) {
+        return a.manualPriorityOrder - b.manualPriorityOrder;
+      }
+      if (a.manualPriorityOrder && !b.manualPriorityOrder) return -1;
+      if (!a.manualPriorityOrder && b.manualPriorityOrder) return 1;
+
+      // 2. Comparar puntuación efectiva de prioridad (calculada por % de nota final + prioridad manual + urgencia)
+      const scoreA = prioA?.effectiveScore ?? 0;
+      const scoreB = prioB?.effectiveScore ?? 0;
+      if (Math.abs(scoreB - scoreA) >= 1) {
+        return scoreB - scoreA;
+      }
+
+      // 3. Desempate por fecha límite más próxima
       const dlA = topicDeadlineMap.get(a.id);
       const dlB = topicDeadlineMap.get(b.id);
       if (dlA && !dlB) return -1;
@@ -1472,7 +2223,8 @@ export const schedulerService = {
       if (dlA && dlB && dlA.targetStudyDate !== dlB.targetStudyDate) {
         return dlA.targetStudyDate.localeCompare(dlB.targetStudyDate);
       }
-      return 0;
+
+      return a._originalIdx - b._originalIdx;
     });
 
     // Contar días de estudio disponibles hasta la fecha límite (examen o entrega) para garantizar que el ritmo diario de páginas llegue a tiempo
@@ -1506,11 +2258,22 @@ export const schedulerService = {
         ? Math.max(1, Math.ceil(totalRemainingPagesAllPending / Math.max(1, availableDaysBeforeExam)))
         : 0;
 
-    // Conjunto de fechas que tienen sesiones extra añadidas manualmente por el usuario ("+ Añadir tema")
+    // Conjunto de fechas que tienen sesiones extra elegidas por el usuario ("+ Añadir tema")
     const extraSessionDatesSet = new Set<string>();
+    // Mapa topicId -> fecha objetivo más temprana cuando el usuario reubica/modifica todo el plan del tema en un hueco libre
+    const userMovedTopicTargetDateMap = new Map<string, string>();
     pendingTopics.forEach((pt) => {
       if (pt.extraStudySessionsByDate) {
-        Object.keys(pt.extraStudySessionsByDate).forEach((d) => extraSessionDatesSet.add(d));
+        const entries = Object.entries(pt.extraStudySessionsByDate);
+        entries.forEach(([d, cfg]) => {
+          extraSessionDatesSet.add(d);
+          if (cfg?.replacePreviousPlan || pt.manualScheduledDate) {
+            const existingTarget = userMovedTopicTargetDateMap.get(pt.id);
+            if (!existingTarget || d < existingTarget) {
+              userMovedTopicTargetDateMap.set(pt.id, d);
+            }
+          }
+        });
       }
     });
 
@@ -1529,7 +2292,11 @@ export const schedulerService = {
         const taskB = weeklyTaskMap.get(b.id);
         if (taskA && !taskB) return -1;
         if (!taskA && taskB) return 1;
-        return (a.nextReviewDate || '').localeCompare(b.nextReviewDate || '');
+        const prioA = topicPriorityMap.get(a.id)?.effectiveScore ?? 0;
+        const prioB = topicPriorityMap.get(b.id)?.effectiveScore ?? 0;
+        const dateCmp = (a.nextReviewDate || '').localeCompare(b.nextReviewDate || '');
+        if (dateCmp !== 0) return dateCmp;
+        return prioB - prioA;
       });
 
     let topicIdx = 0;
@@ -1557,16 +2324,21 @@ export const schedulerService = {
             !(e.id && e.id.startsWith('block-topic-'))
         );
 
-        // Bloqueos en esta fecha: combina citas puntuales (date === dateStr), bloqueos recurrentes semanales y weeklyFixedObligations
+        // Bloqueos en esta fecha: combina citas puntuales (date === dateStr), bloqueos recurrentes semanales y weeklyFixedObligations (respetando excludedDates)
         const specificDateBlocked = nonTopicBlockedEvents.filter((e) => e.date === dateStr);
         const recurringBlocked = nonTopicBlockedEvents.filter(
-          (e) => !e.date && e.recurringDays && e.recurringDays.includes(dayOfWeek)
+          (e) =>
+            !e.date &&
+            e.recurringDays &&
+            e.recurringDays.includes(dayOfWeek) &&
+            !(e.excludedDates && e.excludedDates.includes(dateStr))
         );
         const fixedObligationsToday = (preferences.weeklyFixedObligations || [])
           .filter(
             (ob) =>
-              ob.dayOfWeek === dayOfWeek ||
-              (ob.recurringDays && ob.recurringDays.includes(dayOfWeek))
+              (ob.dayOfWeek === dayOfWeek ||
+                (ob.recurringDays && ob.recurringDays.includes(dayOfWeek))) &&
+              !(ob.excludedDates && ob.excludedDates.includes(dateStr))
           )
           .map((ob) => ({
             id: ob.id,
@@ -1619,8 +2391,72 @@ export const schedulerService = {
           : 0;
         let dayRemainingHours = dailyAvailableHours;
 
-        // Rastreador del cursor de tiempo para time blocking
-        let currentTimelineMinute = defaultStartHour * 60;
+        const isCurrentRealToday = dateStr === realTodayStr || dateStr === todayStr;
+        const applyIntradayShiftToday =
+          isCurrentRealToday &&
+          isIntradayAuto &&
+          effectiveIntradayCutoffMinutes > defaultStartHour * 60;
+
+        // Cursor matinal original (ej: 08:00) para saber a qué hora estaba prevista la sesión antes del reajuste intradía
+        let morningOriginalCursorMinute = defaultStartHour * 60;
+        const allocateMorningOriginalSlot = (durationMins: number): { startTime: string; endTime: string } => {
+          let testStart = morningOriginalCursorMinute;
+          const fixedOnlyBlocked = [
+            ...recurringBlocked,
+            ...fixedObligationsToday,
+          ];
+          let conflict = true;
+          let guard = 0;
+          while (conflict && guard < 20) {
+            guard++;
+            conflict = false;
+            const testEnd = testStart + durationMins;
+            for (const b of fixedOnlyBlocked) {
+              const bStart = timeStrToMinutes(b.startTime);
+              const bEnd = timeStrToMinutes(b.endTime);
+              if (testStart < bEnd && testEnd > bStart) {
+                testStart = bEnd + 15;
+                conflict = true;
+                break;
+              }
+            }
+          }
+          const finalEnd = testStart + durationMins;
+          morningOriginalCursorMinute = finalEnd + 15;
+          return {
+            startTime: minutesToTimeStr(testStart),
+            endTime: minutesToTimeStr(finalEnd),
+          };
+        };
+
+        // Si el reajuste intradía está activo en el día de hoy, el cursor de horario arranca a partir de la hora actual
+        // y las horas disponibles de hoy se ajustan al tiempo real que queda hasta el final de la jornada de estudio
+        let currentTimelineMinute = applyIntradayShiftToday
+          ? Math.max(defaultStartHour * 60, effectiveIntradayCutoffMinutes)
+          : defaultStartHour * 60;
+
+        if (applyIntradayShiftToday) {
+          const endOfStudyDayMins = studyEndHour * 60;
+          if (effectiveIntradayCutoffMinutes >= endOfStudyDayMins) {
+            // Ya terminó la jornada de estudio de hoy: las sesiones no realizadas pasan a mañana recalculando semana y mes
+            dayRemainingHours = 0;
+          } else {
+            // Calcular horas libres reales que quedan desde la hora actual hasta el cierre del día de estudio
+            let blockedMinsAfterNow = 0;
+            dateBlocked.forEach((b) => {
+              const bStart = Math.max(effectiveIntradayCutoffMinutes, timeStrToMinutes(b.startTime));
+              const bEnd = Math.min(endOfStudyDayMins, timeStrToMinutes(b.endTime));
+              if (bEnd > bStart) {
+                blockedMinsAfterNow += bEnd - bStart;
+              }
+            });
+            const remainingWindowHoursToday = Math.max(
+              0,
+              Math.round(((endOfStudyDayMins - effectiveIntradayCutoffMinutes - blockedMinsAfterNow) / 60) * 10) / 10
+            );
+            dayRemainingHours = Math.min(dayRemainingHours, remainingWindowHoursToday);
+          }
+        }
 
         // Función interna para encontrar el siguiente intervalo libre que no colisione con eventos bloqueados ni horarios fijos
         const allocateSlot = (durationMins: number): { startTime: string; endTime: string } => {
@@ -1661,7 +2497,7 @@ export const schedulerService = {
           return allocated;
         };
 
-        // 0. Colocar temas extra añadidos a elección del usuario en este día ("+ Añadir tema en hueco")
+        // 0. Colocar temas extra añadidos a elección del usuario o partes restantes de sesiones hechas parcialmente
         pendingTopics.forEach((extraTopic) => {
           const extraCfg = extraTopic.extraStudySessionsByDate?.[dateStr];
           if (!extraCfg) return;
@@ -1671,15 +2507,24 @@ export const schedulerService = {
             preferences.averageMinutesPerPage,
             preferences.useDifficultyScalingForPages
           );
+          // Si este hueco libre modifica toda la planificación de un tema ya planeado, respetamos sus páginas reales pendientes
+          if (extraCfg.replacePreviousPlan) {
+            extraTopic._simulatedPagesRead = Math.min(
+              extraTopic._totalPages,
+              Math.max(0, extraTopic.pagesRead || 0)
+            );
+          }
+
           const pagesLeft = Math.max(1, extraTopic._totalPages - extraTopic._simulatedPagesRead);
           const requestedPages = extraCfg.pagesCount
-            ? Math.max(1, extraCfg.pagesCount)
-            : Math.min(pagesLeft, Math.max(2, Math.min(minSubjectPagesPerDayForExam || 6, 8)));
+            ? extraCfg.replacePreviousPlan
+              ? Math.max(1, Math.min(pagesLeft, extraCfg.pagesCount))
+              : Math.max(1, extraCfg.pagesCount)
+            : pagesLeft;
 
-          const effectiveTopicPages = Math.max(
-            extraTopic._totalPages,
-            extraTopic._simulatedPagesRead + requestedPages
-          );
+          const effectiveTopicPages = extraCfg.replacePreviousPlan
+            ? extraTopic._totalPages
+            : Math.max(extraTopic._totalPages, extraTopic._simulatedPagesRead + requestedPages);
 
           const allocatedMins = Math.max(5, Math.round(requestedPages * topicMinsPerPage));
           const allocatedHours = Math.max(
@@ -1692,20 +2537,39 @@ export const schedulerService = {
           const pCount = Math.max(1, endPage - startPage + 1);
           extraTopic._simulatedPagesRead = Math.min(effectiveTopicPages, endPage);
 
-          const chosenStart =
+          const rawConfiguredStart =
             extraTopic.studyTimeByDate?.[dateStr] ||
             extraCfg.startTime ||
             `${String(defaultStartHour).padStart(2, '0')}:00`;
-          const startMins = timeStrToMinutes(chosenStart);
-          const endMins = Math.min(23 * 60 + 59, startMins + allocatedMins);
-          const chosenEnd = minutesToTimeStr(endMins);
+          const rawStartMins = timeStrToMinutes(rawConfiguredStart);
 
-          dateBlocked.push({
-            startTime: chosenStart,
-            endTime: chosenEnd,
-            title: extraTopic.title,
-            isSpecificDate: true,
-          });
+          // Si estamos en hoy, el reajuste intradía está activo y la hora configurada (ej: 08:00) ya pasó,
+          // reubicamos automáticamente la sesión en el siguiente hueco libre a partir de la hora actual
+          let chosenStart = rawConfiguredStart;
+          let chosenEnd = minutesToTimeStr(Math.min(23 * 60 + 59, rawStartMins + allocatedMins));
+          let wasIntradayMoved = false;
+          let origStartStr: string | undefined = extraTopic.intradayRelocatedFromTime;
+          let origEndStr: string | undefined;
+
+          if (applyIntradayShiftToday && rawStartMins < effectiveIntradayCutoffMinutes) {
+            origStartStr = rawConfiguredStart;
+            origEndStr = chosenEnd;
+            const relocatedSlot = allocateSlot(allocatedMins);
+            chosenStart = relocatedSlot.startTime;
+            chosenEnd = relocatedSlot.endTime;
+            wasIntradayMoved = true;
+          } else {
+            dateBlocked.push({
+              startTime: chosenStart,
+              endTime: chosenEnd,
+              title: extraTopic.title,
+              isSpecificDate: true,
+            });
+          }
+
+          const latestPartial = (extraTopic.partialCompletionHistory || []).find(
+            (p) => p.relocatedToDate === dateStr || p.date === dateStr
+          );
 
           sessions.push({
             id: `sess-extra-${extraTopic.id}-${dateStr}`,
@@ -1724,7 +2588,25 @@ export const schedulerService = {
             } · ~${allocatedMins} min)`,
             type: 'estudio_nuevo',
             completed: false,
+            isIntradayRescheduled: wasIntradayMoved || Boolean(origStartStr),
+            originalStartTime: origStartStr || latestPartial?.originalSlotTime,
+            originalEndTime: origEndStr,
+            isPartialRemainder: Boolean(latestPartial),
+            partialHoursCompleted: latestPartial?.hoursCompleted,
+            partialPagesCompleted: latestPartial?.pagesCompleted,
           });
+
+          if (extraCfg.replacePreviousPlan) {
+            extraTopic.scheduledDate = dateStr;
+            extraTopic.scheduledTime = chosenStart;
+            extraTopic.scheduledEndTime = chosenEnd;
+            const originalInArray = updatedTopics.find((t) => t.id === extraTopic.id);
+            if (originalInArray) {
+              originalInArray.scheduledDate = dateStr;
+              originalInArray.scheduledTime = chosenStart;
+              originalInArray.scheduledEndTime = chosenEnd;
+            }
+          }
         });
 
         // 1. Prioridad: Colocar repasos espaciados que venzan hoy o antes, dimensionados según el número de páginas estudiado
@@ -1736,17 +2618,43 @@ export const schedulerService = {
             const reviewTime = Math.max(0.25, Math.round(revTimeCalc.reviewHours * 10) / 10);
             if (dayRemainingHours >= Math.min(0.3, reviewTime)) {
               const sessionDurHours = Math.round(Math.min(dayRemainingHours, reviewTime) * 10) / 10;
+              const sessionDurMins = Math.max(15, Math.round(sessionDurHours * 60));
               const customRevTime =
                 reviewTopic.reviewTimeByDate?.[dateStr] ||
                 (reviewTopic.nextReviewDate === dateStr ? reviewTopic.reviewScheduledTime : undefined);
-              const slot = customRevTime
-                ? {
+              const morningSlotRef = allocateMorningOriginalSlot(sessionDurMins);
+
+              let slot: { startTime: string; endTime: string };
+              let wasRevIntradayMoved = false;
+              let revOrigStart: string | undefined;
+              let revOrigEnd: string | undefined;
+
+              if (customRevTime) {
+                const customMins = timeStrToMinutes(customRevTime);
+                if (applyIntradayShiftToday && customMins < effectiveIntradayCutoffMinutes) {
+                  revOrigStart = customRevTime;
+                  revOrigEnd = minutesToTimeStr(customMins + sessionDurMins);
+                  slot = allocateSlot(sessionDurMins);
+                  wasRevIntradayMoved = true;
+                } else {
+                  slot = {
                     startTime: customRevTime,
-                    endTime: minutesToTimeStr(
-                      timeStrToMinutes(customRevTime) + Math.max(15, Math.round(sessionDurHours * 60))
-                    ),
-                  }
-                : allocateSlot(Math.max(15, Math.round(sessionDurHours * 60)));
+                    endTime: minutesToTimeStr(customMins + sessionDurMins),
+                  };
+                }
+              } else {
+                slot = allocateSlot(sessionDurMins);
+                if (
+                  applyIntradayShiftToday &&
+                  timeStrToMinutes(morningSlotRef.startTime) < effectiveIntradayCutoffMinutes &&
+                  slot.startTime !== morningSlotRef.startTime
+                ) {
+                  wasRevIntradayMoved = true;
+                  revOrigStart = morningSlotRef.startTime;
+                  revOrigEnd = morningSlotRef.endTime;
+                }
+              }
+
               const pagesAllocLabel =
                 revTimeCalc.pagesToReview > 0
                   ? revTimeCalc.pagesToReview < revTimeCalc.totalPages
@@ -1770,6 +2678,9 @@ export const schedulerService = {
                 pagesAllocation: pagesAllocLabel,
                 type: 'repaso_espaciado',
                 completed: false,
+                isIntradayRescheduled: wasRevIntradayMoved,
+                originalStartTime: revOrigStart,
+                originalEndTime: revOrigEnd,
               });
               dayRemainingHours -= sessionDurHours;
               // Removido de la cola de repasos pendientes
@@ -1780,8 +2691,26 @@ export const schedulerService = {
         }
 
         // 2. Colocar estudio diario de páginas por tema para llegar a tiempo al examen o tarea
-        while (topicIdx < pendingTopics.length && dayRemainingHours >= 0.25) {
-          const currentTopic = pendingTopics[topicIdx];
+        const hasMorePendingTopics = () =>
+          pendingTopics.some((pt) => pt._simulatedPagesRead < pt._totalPages);
+
+        while (hasMorePendingTopics() && dayRemainingHours >= 0.25) {
+          // Buscar el siguiente tema elegible hoy: con páginas pendientes, no diferido a una fecha futura manual, y sin duplicar sesión extra hoy
+          const currentTopic = pendingTopics.find((pt) => {
+            if (pt._simulatedPagesRead >= pt._totalPages) return false;
+            const movedTargetDate = userMovedTopicTargetDateMap.get(pt.id);
+            if (movedTargetDate && dateStr < movedTargetDate) return false;
+            const alreadyExtraToday = sessions.some(
+              (s) => s.date === dateStr && s.topicId === pt.id && s.id.startsWith('sess-extra-')
+            );
+            if (alreadyExtraToday) return false;
+            return true;
+          });
+
+          if (!currentTopic) {
+            break;
+          }
+
           const effectiveTopicPages = currentTopic._totalPages;
           const topicMinsPerPage = getMinutesPerPage(
             currentTopic.difficulty || 'Media',
@@ -1791,16 +2720,7 @@ export const schedulerService = {
 
           const pagesLeft = Math.max(0, effectiveTopicPages - currentTopic._simulatedPagesRead);
           if (pagesLeft <= 0) {
-            topicIdx++;
             continue;
-          }
-
-          // Si ya tenía una sesión extra añadida manualmente en este mismo día para este mismo tema, evitamos duplicarlo salvo que queden más temas
-          const alreadyScheduledExtraToday = sessions.some(
-            (s) => s.date === dateStr && s.topicId === currentTopic.id && s.id.startsWith('sess-extra-')
-          );
-          if (alreadyScheduledExtraToday) {
-            break;
           }
 
           // Verificar fecha límite del tema (tarea o examen) para calcular cuántas páginas mínimas hay que ver hoy
@@ -1830,6 +2750,61 @@ export const schedulerService = {
             0.25,
             Math.round(((targetPagesInSession * topicMinsPerPage) / 60) * 10) / 10
           );
+          const allocatedSessionMins = Math.max(15, Math.round(allocatedHours * 60));
+
+          // Calcular cuál habría sido su tramo horario matinal original (ej: 08:00–10:00) antes del reajuste intradía
+          const morningBaselineSlot = allocateMorningOriginalSlot(allocatedSessionMins);
+
+          const customStartForDate = currentTopic.studyTimeByDate?.[dateStr];
+          let slot: { startTime: string; endTime: string };
+          let wasIntradayRescheduled = false;
+          let origStartTime: string | undefined = currentTopic.intradayRelocatedFromTime;
+          let origEndTime: string | undefined;
+
+          if (customStartForDate) {
+            const startM = timeStrToMinutes(customStartForDate);
+            const endM = Math.min(23 * 60 + 59, startM + allocatedSessionMins);
+            if (applyIntradayShiftToday && startM < effectiveIntradayCutoffMinutes) {
+              // El usuario tenía esta sesión hoy a una hora que ya pasó (ej. 08:00 y son las 12:00):
+              // se reajusta automáticamente a partir de la hora actual
+              origStartTime = customStartForDate;
+              origEndTime = minutesToTimeStr(endM);
+              slot = allocateSlot(allocatedSessionMins);
+              wasIntradayRescheduled = true;
+            } else {
+              const sStr = minutesToTimeStr(startM);
+              const eStr = minutesToTimeStr(endM);
+              dateBlocked.push({
+                startTime: sStr,
+                endTime: eStr,
+                title: currentTopic.title,
+                isSpecificDate: true,
+              });
+              slot = { startTime: sStr, endTime: eStr };
+            }
+          } else {
+            slot = allocateSlot(allocatedSessionMins);
+            if (
+              applyIntradayShiftToday &&
+              timeStrToMinutes(morningBaselineSlot.startTime) < effectiveIntradayCutoffMinutes &&
+              slot.startTime !== morningBaselineSlot.startTime
+            ) {
+              wasIntradayRescheduled = true;
+              origStartTime = origStartTime || morningBaselineSlot.startTime;
+              origEndTime = morningBaselineSlot.endTime;
+            }
+          }
+
+          // Si al reajustar intradía la sesión se sale del horario de fin del día de estudio (ej. > 22:00),
+          // no cabe hoy y pasa al siguiente día disponible (recalculando día, semana y mes)
+          if (
+            applyIntradayShiftToday &&
+            timeStrToMinutes(slot.endTime) > studyEndHour * 60 &&
+            sessions.filter((s) => s.date === dateStr).length > 0
+          ) {
+            dayRemainingHours = 0;
+            break;
+          }
 
           const totalPages = effectiveTopicPages;
           const startPage = Math.min(totalPages, currentTopic._simulatedPagesRead + 1);
@@ -1843,26 +2818,14 @@ export const schedulerService = {
           })${dlBadge}`;
           currentTopic._simulatedPagesRead = endPage;
 
-          const customStartForDate = currentTopic.studyTimeByDate?.[dateStr];
-          const slot = customStartForDate
-            ? (() => {
-                const startM = timeStrToMinutes(customStartForDate);
-                const endM = Math.min(
-                  23 * 60 + 59,
-                  startM + Math.max(15, Math.round(allocatedHours * 60))
-                );
-                const sStr = minutesToTimeStr(startM);
-                const eStr = minutesToTimeStr(endM);
-                dateBlocked.push({
-                  startTime: sStr,
-                  endTime: eStr,
-                  title: currentTopic.title,
-                  isSpecificDate: true,
-                });
-                return { startTime: sStr, endTime: eStr };
-              })()
-            : allocateSlot(Math.max(15, Math.round(allocatedHours * 60)));
+          const latestPartialForTopic = (currentTopic.partialCompletionHistory || []).slice(-1)[0];
+          const isPartialRem = Boolean(
+            latestPartialForTopic &&
+              (latestPartialForTopic.relocatedToDate === dateStr ||
+                currentTopic.status === 'en_progreso')
+          );
 
+          const currentTopicPriority = topicPriorityMap.get(currentTopic.id);
           sessions.push({
             id: `sess-top-${currentTopic.id}-${dateStr}-${startPage}`,
             date: dateStr,
@@ -1878,6 +2841,14 @@ export const schedulerService = {
             pagesAllocation: pagesAllocText,
             type: 'estudio_nuevo',
             completed: false,
+            isIntradayRescheduled: wasIntradayRescheduled || Boolean(origStartTime),
+            originalStartTime: origStartTime,
+            originalEndTime: origEndTime,
+            isPartialRemainder: isPartialRem,
+            partialHoursCompleted: latestPartialForTopic?.hoursCompleted,
+            partialPagesCompleted: latestPartialForTopic?.pagesCompleted,
+            smartGoalAligned: currentTopicPriority?.smartGoalAligned,
+            alignedSmartGoalTitle: currentTopicPriority?.alignedSmartGoalTitle,
           });
 
           // Marcamos fecha y hora programada en el tema (primera sesión)
@@ -1897,9 +2868,9 @@ export const schedulerService = {
           currentTopic._simulatedHoursSpent =
             Math.round((currentTopic._simulatedHoursSpent + allocatedHours) * 10) / 10;
 
-          // Si completamos todas las páginas del tema en esta sesión, pasamos al siguiente tema
+          // Si completamos todas las páginas del tema en esta sesión, avanzamos al siguiente tema disponible hoy
           if (currentTopic._simulatedPagesRead >= effectiveTopicPages) {
-            topicIdx++;
+            if (topicIdx < pendingTopics.length) topicIdx++;
           } else {
             // El resto de páginas de este tema se verá en el siguiente día disponible
             break;
@@ -1933,6 +2904,175 @@ export const schedulerService = {
       deficitHours,
       taskPrioritizedCount,
     };
+  },
+
+  /**
+   * Busca los próximos huecos libres reales en el calendario (hoy en las horas restantes, en la semana o en el mes)
+   * para reubicar la parte que falte de una sesión marcada como "Hecho parcialmente" o una sesión vencida intradía.
+   */
+  findNextFreeSlotsForPartialSession(
+    preferences: StudyPreferences,
+    blockedEvents: BlockedTimeEvent[] = [],
+    existingSessions: ScheduledStudySession[] = [],
+    options: {
+      fromDateStr?: string;
+      afterTimeStr?: string;
+      durationHours: number;
+      excludeSessionId?: string;
+      maxSuggestions?: number;
+    }
+  ): Array<{
+    date: string;
+    startTime: string;
+    endTime: string;
+    durationHours: number;
+    isToday: boolean;
+    isThisWeek: boolean;
+    dayLabel: string;
+  }> {
+    const todayStr = getTodayLocalDateStr();
+    const startDateStr = options.fromDateStr || todayStr;
+    const durationMins = Math.max(15, Math.round((options.durationHours || 1) * 60));
+    const maxSuggestions = options.maxSuggestions || 5;
+    const studyStartHour = preferences.studyDayStartHour || 8;
+    const studyEndHour = preferences.studyDayEndHour || 22;
+    const availableDaysSet = new Set(
+      preferences.availableDays && preferences.availableDays.length > 0
+        ? preferences.availableDays
+        : [1, 2, 3, 4, 5, 6]
+    );
+
+    const nowClock = new Date();
+    const rawNowMins = nowClock.getHours() * 60 + nowClock.getMinutes();
+    const defaultAfterMins = Math.ceil(rawNowMins / 30) * 30;
+    const requestedAfterMins = options.afterTimeStr
+      ? timeStrToMinutes(options.afterTimeStr)
+      : preferences.intradaySimulatedTime
+      ? timeStrToMinutes(preferences.intradaySimulatedTime)
+      : defaultAfterMins;
+
+    const suggestions: Array<{
+      date: string;
+      startTime: string;
+      endTime: string;
+      durationHours: number;
+      isToday: boolean;
+      isThisWeek: boolean;
+      dayLabel: string;
+    }> = [];
+
+    const cursorDate = parseLocalDate(startDateStr);
+    const weekEndObj = parseLocalDate(todayStr);
+    weekEndObj.setDate(weekEndObj.getDate() + 7);
+    const weekEndStr = toLocalDateStr(weekEndObj);
+
+    for (let dayOffset = 0; dayOffset < 30 && suggestions.length < maxSuggestions; dayOffset++) {
+      const candidateDateStr = toLocalDateStr(cursorDate);
+      const dayOfWeek = cursorDate.getDay();
+
+      // Permitimos buscar hoy aunque no esté en availableDays si el usuario quiere reubicar hoy, o en días disponibles
+      if (dayOffset > 0 && !availableDaysSet.has(dayOfWeek)) {
+        cursorDate.setDate(cursorDate.getDate() + 1);
+        continue;
+      }
+
+      // Recopilar todos los intervalos ocupados en candidateDateStr
+      const occupiedIntervals: Array<{ start: number; end: number }> = [];
+
+      // 1. Obligaciones fijas semanales (respetando excludedDates)
+      (preferences.weeklyFixedObligations || []).forEach((ob) => {
+        if (ob.excludedDates && ob.excludedDates.includes(candidateDateStr)) return;
+        if (
+          ob.dayOfWeek === dayOfWeek ||
+          (ob.recurringDays && ob.recurringDays.includes(dayOfWeek))
+        ) {
+          occupiedIntervals.push({
+            start: timeStrToMinutes(ob.startTime),
+            end: timeStrToMinutes(ob.endTime),
+          });
+        }
+      });
+
+      // 2. Eventos bloqueados (puntuales o recurrentes, respetando excludedDates)
+      (blockedEvents || []).forEach((b) => {
+        if (b.excludedDates && b.excludedDates.includes(candidateDateStr)) return;
+        const applies =
+          b.date === candidateDateStr ||
+          (!b.date && b.recurringDays && b.recurringDays.includes(dayOfWeek));
+        if (applies && b.startTime && b.endTime) {
+          occupiedIntervals.push({
+            start: timeStrToMinutes(b.startTime),
+            end: timeStrToMinutes(b.endTime),
+          });
+        }
+      });
+
+      // 3. Otras sesiones ya programadas ese día (excluyendo la sesión actual que estamos dividiendo/reubicando)
+      (existingSessions || []).forEach((s) => {
+        if (s.date !== candidateDateStr) return;
+        if (options.excludeSessionId && s.id === options.excludeSessionId) return;
+        if (s.startTime) {
+          const sStart = timeStrToMinutes(s.startTime);
+          const sEnd = s.endTime
+            ? timeStrToMinutes(s.endTime)
+            : sStart + Math.max(30, Math.round((s.durationHours || 1) * 60));
+          occupiedIntervals.push({ start: sStart, end: sEnd });
+        }
+      });
+
+      occupiedIntervals.sort((a, b) => a.start - b.start);
+
+      const minStartMinute =
+        candidateDateStr === startDateStr
+          ? Math.max(studyStartHour * 60, requestedAfterMins)
+          : studyStartHour * 60;
+      const maxEndMinute = studyEndHour * 60;
+
+      let testStart = minStartMinute;
+      while (testStart + durationMins <= maxEndMinute && suggestions.length < maxSuggestions) {
+        const testEnd = testStart + durationMins;
+        const colliding = occupiedIntervals.find(
+          (iv) => testStart < iv.end && testEnd > iv.start
+        );
+
+        if (colliding) {
+          // Saltar al final del intervalo ocupado + 15 min de descanso, redondeado a 15 min
+          testStart = Math.ceil((colliding.end + 15) / 15) * 15;
+        } else {
+          const startStr = minutesToTimeStr(testStart);
+          const endStr = minutesToTimeStr(testEnd);
+          const isToday = candidateDateStr === todayStr;
+          const isThisWeek = candidateDateStr >= todayStr && candidateDateStr <= weekEndStr;
+          const dayName = cursorDate.toLocaleDateString('es-ES', {
+            weekday: 'short',
+            day: 'numeric',
+            month: 'short',
+          });
+
+          suggestions.push({
+            date: candidateDateStr,
+            startTime: startStr,
+            endTime: endStr,
+            durationHours: Math.round((durationMins / 60) * 100) / 100,
+            isToday,
+            isThisWeek,
+            dayLabel: isToday ? `Hoy (${dayName})` : dayName,
+          });
+
+          // Añadir como ocupado temporalmente para buscar otra opción más tarde en el mismo día o al día siguiente
+          occupiedIntervals.push({ start: testStart, end: testEnd });
+          occupiedIntervals.sort((a, b) => a.start - b.start);
+          testStart = Math.ceil((testEnd + 60) / 30) * 30;
+          // Máximo 2 sugerencias por mismo día para ofrecer variedad entre hoy y el resto de la semana
+          const countOnThisDay = suggestions.filter((sg) => sg.date === candidateDateStr).length;
+          if (countOnThisDay >= 2) break;
+        }
+      }
+
+      cursorDate.setDate(cursorDate.getDate() + 1);
+    }
+
+    return suggestions;
   },
 
   /**
@@ -2459,8 +3599,9 @@ export const schedulerService = {
       const testStart = hour * 60;
       const testEnd = testStart + durationMins;
 
-      // Comprobar bloqueos de fecha o recurrentes
+      // Comprobar bloqueos de fecha o recurrentes (respetando excludedDates)
       for (const b of workingBlockedEvents) {
+        if (b.excludedDates && b.excludedDates.includes(dateStr)) continue;
         const appliesToday =
           b.date === dateStr ||
           (!b.date && b.recurringDays && b.recurringDays.includes(dayOfWeek));
@@ -2470,8 +3611,9 @@ export const schedulerService = {
         if (testStart < bEnd && testEnd > bStart) return true;
       }
 
-      // Comprobar obligaciones fijas semanales
+      // Comprobar obligaciones fijas semanales (respetando excludedDates)
       for (const ob of allObligations) {
+        if (ob.excludedDates && ob.excludedDates.includes(dateStr)) continue;
         const appliesToday =
           ob.dayOfWeek === dayOfWeek ||
           (ob.recurringDays && ob.recurringDays.includes(dayOfWeek));
@@ -2506,9 +3648,12 @@ export const schedulerService = {
       return { dateStr: initialDateStr, hourStr: '10:00' };
     };
 
-    // 2. Ejecutar planificación inteligente para cada materia distribuyendo temas y repasos sin colisionar
-    // y teniendo en cuenta las tareas que vencen esta semana para revisar esos temas durante la semana
-    const updatedSubjects = subjects.map((subject) => {
+    // 2. Ordenar las asignaturas por orden de prioridad (manual o % de la nota final de exámenes, proyectos y tareas)
+    // para que las asignaturas prioritarias reserven primero los mejores huecos del calendario
+    const prioritizedSubjectsOrder = this.sortSubjectsBySchedulingPriority(subjects, todayStr);
+    const updatedSubjectsById = new Map<string, Subject>();
+
+    prioritizedSubjectsOrder.forEach((subject) => {
       const subjectWeeklyTaskMap = this.matchWeeklyTasksToTopics(
         subject.topics || [],
         subject.tasks || [],
@@ -2547,7 +3692,9 @@ export const schedulerService = {
         updatedPreferences,
         todayStr,
         workingBlockedEvents,
-        subject.tasks || []
+        subject.tasks || [],
+        subject.projects || [],
+        subject.gradingConfig
       );
 
       weeklyTaskPrioritizedCount += scheduleResult.taskPrioritizedCount || 0;
@@ -2583,6 +3730,7 @@ export const schedulerService = {
             ...topic,
             nextReviewDate: undefined,
             reviewScheduledTime: undefined,
+            reviewScheduledEndTime: undefined,
             reviewLevel: 0,
           };
         }
@@ -2653,11 +3801,15 @@ export const schedulerService = {
 
       sessionsGeneratedCount += scheduleResult.sessions.length;
 
-      return {
+      updatedSubjectsById.set(subject.id, {
         ...subject,
         topics: finalTopics,
-      };
+      });
     });
+
+    const updatedSubjects = subjects.map(
+      (s) => updatedSubjectsById.get(s.id) || s
+    );
 
     const dailyNeeds = this.calculateDailyStudyAndReviewNeeds(
       updatedSubjects,
@@ -2673,7 +3825,7 @@ export const schedulerService = {
           } a tus tareas de esta semana para que los estudies o repases antes de su entrega.`
         : '';
 
-    const summaryMessage = `¡Temas y repasos recalculados con éxito! Se han reorganizado ${recalculatedTopicsCount} temas con su cuota de páginas por día y ${recalculatedReviewsCount} repasos espaciados (solo de temas/páginas leídas) respetando tus entregas y exámenes (${dailyNeeds.totalHoursNeededDaily}h/día necesarias).${taskSuffix}`;
+    const summaryMessage = `¡Temas y repasos recalculados por orden de prioridad (% de nota final de exámenes, proyectos y tareas + prioridad manual)! Se han reorganizado ${recalculatedTopicsCount} temas con su cuota de páginas por día y ${recalculatedReviewsCount} repasos espaciados (${dailyNeeds.totalHoursNeededDaily}h/día necesarias).${taskSuffix}`;
 
     return {
       updatedSubjects,

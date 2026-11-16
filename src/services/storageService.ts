@@ -16,7 +16,16 @@ const IDB_CONFIG = {
   PROGRAMS_KEY: 'programs_full_v1',
   BLOCKED_EVENTS_KEY: 'blocked_events_full_v1',
   PREFERENCES_KEY: 'preferences_full_v1',
+  POMODORO_LOGS_KEY: 'pomodoro_logs_full_v1',
+  ACTIVE_SELECTION_KEY: 'active_selection_full_v1',
+  SWR_META_KEY: 'swr_cache_meta_v1',
+  OFFLINE_MUTATIONS_KEY: 'offline_pending_mutations_v1',
 };
+
+interface SwrCacheMeta {
+  lastUpdatedAt: string;
+  pendingOfflineMutations: number;
+}
 
 // Base64 inline data regex for stripping heavy embedded data URLs (images, PDFs, audio, etc.) when compacting for localStorage and Firestore
 const INLINE_BASE64_IMG_REGEX = /data:[a-zA-Z0-9.+/-]+;base64,[A-Za-z0-9+/=\s]{512,}/g;
@@ -96,6 +105,25 @@ async function loadProgramsFromIndexedDB(): Promise<StudyProgram[] | null> {
   return Array.isArray(result) && result.length > 0 ? result : null;
 }
 
+async function touchSwrMetadataInIndexedDB(): Promise<void> {
+  try {
+    const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+    const currentMeta = await loadKeyFromIndexedDB<SwrCacheMeta>(IDB_CONFIG.SWR_META_KEY);
+    const nextPending = isOffline
+      ? (currentMeta?.pendingOfflineMutations || 0) + 1
+      : 0;
+    await saveKeyToIndexedDB<SwrCacheMeta>(IDB_CONFIG.SWR_META_KEY, {
+      lastUpdatedAt: new Date().toISOString(),
+      pendingOfflineMutations: nextPending,
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('studyflow:idb-swr-updated'));
+    }
+  } catch {
+    // Ignore
+  }
+}
+
 async function clearProgramsFromIndexedDB(): Promise<void> {
   try {
     const db = await openIndexedDB();
@@ -106,6 +134,10 @@ async function clearProgramsFromIndexedDB(): Promise<void> {
       store.delete(IDB_CONFIG.PROGRAMS_KEY);
       store.delete(IDB_CONFIG.BLOCKED_EVENTS_KEY);
       store.delete(IDB_CONFIG.PREFERENCES_KEY);
+      store.delete(IDB_CONFIG.POMODORO_LOGS_KEY);
+      store.delete(IDB_CONFIG.ACTIVE_SELECTION_KEY);
+      store.delete(IDB_CONFIG.SWR_META_KEY);
+      store.delete(IDB_CONFIG.OFFLINE_MUTATIONS_KEY);
       tx.oncomplete = () => {
         db.close();
         resolve();
@@ -389,6 +421,38 @@ export const storageService = {
     return await loadKeyFromIndexedDB<StudyPreferences>(IDB_CONFIG.PREFERENCES_KEY);
   },
 
+  async hydratePomodoroLogsFromIndexedDB(): Promise<PomodoroLog[] | null> {
+    const res = await loadKeyFromIndexedDB<PomodoroLog[]>(IDB_CONFIG.POMODORO_LOGS_KEY);
+    return Array.isArray(res) && res.length > 0 ? res : null;
+  },
+
+  async hydrateActiveSelectionFromIndexedDB(): Promise<{ programId?: string; yearId?: string } | null> {
+    return await loadKeyFromIndexedDB<{ programId?: string; yearId?: string }>(
+      IDB_CONFIG.ACTIVE_SELECTION_KEY
+    );
+  },
+
+  async getOfflineCacheStatus(): Promise<{
+    lastUpdatedAt: string | null;
+    pendingOfflineMutations: number;
+  }> {
+    const meta = await loadKeyFromIndexedDB<SwrCacheMeta>(IDB_CONFIG.SWR_META_KEY);
+    return {
+      lastUpdatedAt: meta?.lastUpdatedAt || null,
+      pendingOfflineMutations: meta?.pendingOfflineMutations || 0,
+    };
+  },
+
+  async markOfflineMutationsRevalidated(): Promise<void> {
+    await saveKeyToIndexedDB<SwrCacheMeta>(IDB_CONFIG.SWR_META_KEY, {
+      lastUpdatedAt: new Date().toISOString(),
+      pendingOfflineMutations: 0,
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('studyflow:idb-swr-updated'));
+    }
+  },
+
   resetToBlank(): StudyProgram[] {
     this.savePrograms(blankStudyPrograms);
     return blankStudyPrograms;
@@ -402,9 +466,9 @@ export const storageService = {
   savePrograms(programs: StudyProgram[], options?: { skipIndexedDB?: boolean }): void {
     // 1. Save full uncompacted data in IndexedDB (supports large PDFs & images without 5MB cap)
     if (!options?.skipIndexedDB) {
-      void saveProgramsToIndexedDB(programs);
+      void saveProgramsToIndexedDB(programs).then(() => touchSwrMetadataInIndexedDB());
     }
-    // 2. Save quota-safe copy in localStorage for instant synchronous startup
+    // 2. Save quota-safe copy in localStorage for instant synchronous startup (Stale-While-Revalidate)
     writeProgramsToLocalStorageSafe(programs);
   },
 
@@ -423,7 +487,9 @@ export const storageService = {
 
   savePreferences(prefs: StudyPreferences, options?: { skipIndexedDB?: boolean }): void {
     if (!options?.skipIndexedDB) {
-      void saveKeyToIndexedDB(IDB_CONFIG.PREFERENCES_KEY, prefs);
+      void saveKeyToIndexedDB(IDB_CONFIG.PREFERENCES_KEY, prefs).then(() =>
+        touchSwrMetadataInIndexedDB()
+      );
     }
     safeSetLocalStorageItem(STORAGE_KEYS.PREFERENCES, JSON.stringify(prefs));
   },
@@ -443,7 +509,9 @@ export const storageService = {
 
   saveBlockedEvents(events: BlockedTimeEvent[], options?: { skipIndexedDB?: boolean }): void {
     if (!options?.skipIndexedDB) {
-      void saveKeyToIndexedDB(IDB_CONFIG.BLOCKED_EVENTS_KEY, events);
+      void saveKeyToIndexedDB(IDB_CONFIG.BLOCKED_EVENTS_KEY, events).then(() =>
+        touchSwrMetadataInIndexedDB()
+      );
     }
     safeSetLocalStorageItem(STORAGE_KEYS.BLOCKED_EVENTS, JSON.stringify(events));
   },
@@ -473,7 +541,12 @@ export const storageService = {
     return initialPomodoroLogs;
   },
 
-  savePomodoroLogs(logs: PomodoroLog[]): void {
+  savePomodoroLogs(logs: PomodoroLog[], options?: { skipIndexedDB?: boolean }): void {
+    if (!options?.skipIndexedDB) {
+      void saveKeyToIndexedDB(IDB_CONFIG.POMODORO_LOGS_KEY, logs).then(() =>
+        touchSwrMetadataInIndexedDB()
+      );
+    }
     // Keep at most the most recent 2,000 logs in localStorage to avoid unbounded growth
     const trimmedLogs = logs.length > 2000 ? logs.slice(0, 2000) : logs;
     safeSetLocalStorageItem(STORAGE_KEYS.POMODORO_LOGS, JSON.stringify(trimmedLogs));
@@ -511,6 +584,7 @@ export const storageService = {
   setActiveSelection(programId: string, yearId: string): void {
     safeSetLocalStorageItem(STORAGE_KEYS.ACTIVE_PROGRAM_ID, programId);
     safeSetLocalStorageItem(STORAGE_KEYS.ACTIVE_YEAR_ID, yearId);
+    void saveKeyToIndexedDB(IDB_CONFIG.ACTIVE_SELECTION_KEY, { programId, yearId });
   },
 
   resetAll(): void {

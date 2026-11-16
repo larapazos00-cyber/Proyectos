@@ -33,6 +33,7 @@ import {
   StudyProgram,
   ForgettingCurveProfile,
   SpacedRepetitionConfig,
+  InterfaceDesignMode,
 } from '../types';
 import { notificationService, DEFAULT_CONTEXTUAL_RULES } from '../services/notificationService';
 import { schedulerService } from '../services/schedulerService';
@@ -182,6 +183,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       ]
     );
     setNavigationPosition(preferences.navigationPosition || 'top');
+    setInterfaceDesignMode(preferences.interfaceDesignMode || 'complete');
     setPomodoroFocus(preferences.pomodoroConfig?.focusMinutes || 25);
     setPomodoroShortBreak(preferences.pomodoroConfig?.shortBreakMinutes || 5);
     setPomodoroLongBreak(preferences.pomodoroConfig?.longBreakMinutes || 15);
@@ -194,6 +196,9 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
   );
   const [navigationPosition, setNavigationPosition] = useState<'top' | 'sidebar'>(
     preferences.navigationPosition || 'top'
+  );
+  const [interfaceDesignMode, setInterfaceDesignMode] = useState<InterfaceDesignMode>(
+    preferences.interfaceDesignMode || 'complete'
   );
   const [pomodoroFocus, setPomodoroFocus] = useState<number>(
     preferences.pomodoroConfig?.focusMinutes || 25
@@ -519,6 +524,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       weeklyFixedObligations: weeklyObligations,
       enabledTabs,
       navigationPosition,
+      interfaceDesignMode,
       pomodoroConfig: {
         focusMinutes: pomodoroFocus,
         shortBreakMinutes: pomodoroShortBreak,
@@ -573,6 +579,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       ...preferences,
       enabledTabs: nextTabs,
       navigationPosition,
+      interfaceDesignMode,
     });
   };
 
@@ -582,6 +589,24 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       ...preferences,
       enabledTabs,
       navigationPosition: pos,
+      interfaceDesignMode,
+    });
+  };
+
+  const handleInterfaceDesignModeChange = (mode: InterfaceDesignMode) => {
+    setInterfaceDesignMode(mode);
+    const recommendedTabsByMode: Record<InterfaceDesignMode, string[]> = {
+      complete: ['curso', 'asignaturas', 'calendario', 'cuestionarios', 'pomodoro', 'estadisticas'],
+      intermediate: ['curso', 'asignaturas', 'calendario', 'cuestionarios', 'pomodoro'],
+      minimal: ['curso', 'asignaturas', 'calendario', 'pomodoro'],
+    };
+    const nextTabs = recommendedTabsByMode[mode];
+    setEnabledTabs(nextTabs);
+    onSavePreferences({
+      ...preferences,
+      interfaceDesignMode: mode,
+      enabledTabs: nextTabs,
+      navigationPosition,
     });
   };
 
@@ -1174,19 +1199,147 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
           {activePrefView === 'general' && (
             <>
           {/* Section 0: Personalización de Interfaz y Pestañas del Sistema (Prominent at Top) */}
-          <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-blue-50/80 via-slate-50 to-indigo-50/50 dark:from-slate-800/80 dark:via-slate-900 dark:to-slate-800/80 border border-blue-200/80 dark:border-slate-700 space-y-3 shadow-2xs">
+          <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-blue-50/80 via-slate-50 to-indigo-50/50 dark:from-slate-800/80 dark:via-slate-900 dark:to-slate-800/80 border border-blue-200/80 dark:border-slate-700 space-y-4 shadow-2xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-xs font-bold uppercase tracking-wider text-blue-950 dark:text-blue-300 flex items-center gap-1.5">
                 <Layout className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span>Personalización de Interfaz y Pestañas del Sistema</span>
+                <span>Modelo de Diseño de toda la Interfaz y Navegación</span>
               </h4>
-              <span className="text-[11px] text-blue-700 dark:text-blue-300 bg-blue-100/80 dark:bg-blue-950/60 px-2 py-0.5 rounded-full font-mono-numbers font-bold">
-                {enabledTabs.length} de {DEFAULT_TABS.length} pestañas activas
+              <span className="text-[11px] text-emerald-800 dark:text-emerald-300 bg-emerald-100/90 dark:bg-emerald-950/60 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                <Check className="w-3 h-3" />
+                <span>100% documentos y materias intactos</span>
               </span>
             </div>
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Activa o desactiva las pestañas visibles en la barra de navegación y elige la posición del menú (los cambios se aplican al instante):
-            </p>
+
+            {/* Selector de los 3 Modelos de Interfaz */}
+            <div className="space-y-2">
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                Escoge el modelo visual y funcional de toda la aplicación. Puedes cambiar de diseño cuando quieras <strong>sin que afecte a tus cursos, materias, documentos PDF, apuntes o progreso</strong> (todo se visualiza al estilo elegido):
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                {/* Modelo 1: Completo */}
+                <button
+                  type="button"
+                  onClick={() => handleInterfaceDesignModeChange('complete')}
+                  className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
+                    interfaceDesignMode === 'complete'
+                      ? 'bg-white dark:bg-slate-900 border-blue-600 dark:border-blue-500 ring-2 ring-blue-500/20 shadow-md'
+                      : 'bg-white/70 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700 hover:border-blue-300'
+                  }`}
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                        <span>1. Completo</span>
+                      </span>
+                      {interfaceDesignMode === 'complete' && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white">
+                          Activo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                      Todo visible sin restricciones: hábitos, logros, reto Feynman, proyectos, calificaciones, previsión detallada, gráficos, control visual de vueltas y estadísticas.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-100 dark:border-slate-800">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 font-semibold">
+                      Todas las herramientas
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                      Vista total
+                    </span>
+                  </div>
+                </button>
+
+                {/* Modelo 2: Intermedio (Equilibrado) */}
+                <button
+                  type="button"
+                  onClick={() => handleInterfaceDesignModeChange('intermediate')}
+                  className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
+                    interfaceDesignMode === 'intermediate'
+                      ? 'bg-white dark:bg-slate-900 border-indigo-600 dark:border-indigo-500 ring-2 ring-indigo-500/20 shadow-md'
+                      : 'bg-white/70 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700 hover:border-indigo-300'
+                  }`}
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <Sliders className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                        <span>2. Intermedio</span>
+                      </span>
+                      {interfaceDesignMode === 'intermediate' && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-600 text-white">
+                          Activo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                      Punto medio equilibrado: materias, vueltas, apuntes, calendario con objetivos SMART y desplegables, cuestionarios, tareas y mapas mentales sin gráficos pesados ni hábitos/Feynman.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-100 dark:border-slate-800">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-semibold">
+                      Equilibrio ideal
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                      Datos 100% intactos
+                    </span>
+                  </div>
+                </button>
+
+                {/* Modelo 3: Minimalista (Esencial) */}
+                <button
+                  type="button"
+                  onClick={() => handleInterfaceDesignModeChange('minimal')}
+                  className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
+                    interfaceDesignMode === 'minimal'
+                      ? 'bg-white dark:bg-slate-900 border-emerald-600 dark:border-emerald-500 ring-2 ring-emerald-500/20 shadow-md'
+                      : 'bg-white/70 dark:bg-slate-900/50 border-slate-200 dark:border-slate-700 hover:border-emerald-300'
+                  }`}
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <RotateCw className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>3. Minimalista (Básico)</span>
+                      </span>
+                      {interfaceDesignMode === 'minimal' && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-600 text-white">
+                          Activo
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                      Muy sencillo y con lo esencial: Inicio con repasos de hoy, Materias (temario, apuntes y PDFs), Calendario básico y Pomodoro. Tus vueltas y apuntes siguen intactos.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-100 dark:border-slate-800">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold">
+                      Solo lo esencial
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                      Sin pérdida de datos
+                    </span>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-blue-200/50 dark:border-slate-700/70 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                  Pestañas Visibles en la Navegación
+                </span>
+                <span className="text-[11px] text-blue-700 dark:text-blue-300 bg-blue-100/80 dark:bg-blue-950/60 px-2 py-0.5 rounded-full font-mono-numbers font-bold">
+                  {enabledTabs.length} de {DEFAULT_TABS.length} pestañas activas
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                También puedes mostrar u ocultar pestañas individualmente dentro del modelo elegido:
+              </p>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1">
               {DEFAULT_TABS.map(({ id, defaultLabel }) => {
@@ -1215,6 +1368,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
                   </button>
                 );
               })}
+            </div>
             </div>
 
             <div className="pt-2.5 border-t border-blue-200/50 dark:border-slate-700/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

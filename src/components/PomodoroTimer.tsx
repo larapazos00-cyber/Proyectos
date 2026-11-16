@@ -30,7 +30,10 @@ import {
   CheckCircle2,
   Clock,
   ListChecks,
+  Users,
+  Radio,
 } from 'lucide-react';
+import type { User } from 'firebase/auth';
 import { Subject, PomodoroLog, StudyPreferences } from '../types';
 import { notificationService } from '../services/notificationService';
 import {
@@ -41,6 +44,18 @@ import {
   AmbientLayerKey,
   AmbientPresetMix,
 } from '../services/ambientAudioService';
+import { PomodoroStudyRoomPanel } from './PomodoroStudyRoomPanel';
+import {
+  PomodoroRoom,
+  PomodoroRoomParticipant,
+  PomodoroRoomNote,
+  PomodoroPhaseMode,
+  subscribeToRoom,
+  subscribeToRoomParticipants,
+  subscribeToRoomMessages,
+  syncRoomTimerState,
+  updateParticipantStatus,
+} from '../services/pomodoroRoomService';
 
 interface PomodoroTimerProps {
   subjects: Subject[];
@@ -50,6 +65,10 @@ interface PomodoroTimerProps {
   pomodoroConfig: StudyPreferences['pomodoroConfig'];
   onUpdatePomodoroConfig?: (newConfig: StudyPreferences['pomodoroConfig']) => void;
   onFocusModeChange?: (isActive: boolean) => void;
+  isHiddenTab?: boolean;
+  onNavigateToPomodoro?: () => void;
+  currentUser?: User | null;
+  onOpenAuthModal?: () => void;
 }
 
 export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
@@ -60,6 +79,10 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   pomodoroConfig,
   onUpdatePomodoroConfig,
   onFocusModeChange,
+  isHiddenTab = false,
+  onNavigateToPomodoro,
+  currentUser = null,
+  onOpenAuthModal,
 }) => {
   const [mode, setMode] = useState<'focus' | 'shortBreak' | 'longBreak'>('focus');
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
@@ -139,17 +162,30 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   const [queuedGoalTopicIds, setQueuedGoalTopicIds] = useState<string[]>([]);
   const [completedGoalTopicIds, setCompletedGoalTopicIds] = useState<string[]>([]);
 
-  // Modo Enfoque: oculta menú de navegación y silencia notificaciones del sistema mientras el temporizador corre
+  // Modo Enfoque: opcional para ocultar menú de navegación si el usuario quiere pantalla inmersiva (por defecto desactivado para permitir cambiar de pestaña libremente mientras corre el Pomodoro)
   const [isFocusModeEnabled, setIsFocusModeEnabled] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('studyflow_pomodoro_focus_mode');
-      return saved ? JSON.parse(saved) : true;
+      const saved = localStorage.getItem('studyflow_pomodoro_focus_mode_v2');
+      return saved ? JSON.parse(saved) : false;
     } catch {
-      return true;
+      return false;
     }
   });
 
-  const isDistractionFreeActive = isFocusModeEnabled && isRunning;
+  const isDistractionFreeActive = isFocusModeEnabled && isRunning && !isHiddenTab;
+
+  // Salas Virtuales Sincronizadas (funcionalidad 100% opcional)
+  const [showRoomPanel, setShowRoomPanel] = useState<boolean>(false);
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+  const [activeRoom, setActiveRoom] = useState<PomodoroRoom | null>(null);
+  const [roomParticipants, setRoomParticipants] = useState<PomodoroRoomParticipant[]>([]);
+  const [roomMessages, setRoomMessages] = useState<PomodoroRoomNote[]>([]);
+  const [roomError, setRoomError] = useState<string | null>(null);
+
+  const isInSyncedRoom = Boolean(activeRoom && activeRoom.status === 'active');
+  const isRoomHost = Boolean(
+    activeRoom && currentUser && activeRoom.hostUid === currentUser.uid
+  );
 
   // Local editable draft values for quick adjustments
   const [customFocus, setCustomFocus] = useState<number>(pomodoroConfig.focusMinutes || 52);
@@ -233,7 +269,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   // Persistir preferencia de Modo Enfoque y Avisos de fin de sesión
   useEffect(() => {
     try {
-      localStorage.setItem('studyflow_pomodoro_focus_mode', JSON.stringify(isFocusModeEnabled));
+      localStorage.setItem('studyflow_pomodoro_focus_mode_v2', JSON.stringify(isFocusModeEnabled));
       localStorage.setItem('studyflow_pomodoro_chime_enabled', JSON.stringify(sessionEndChimeEnabled));
       localStorage.setItem('studyflow_pomodoro_chime_volume', String(sessionEndChimeVolume));
       localStorage.setItem('studyflow_pomodoro_chime_type', sessionEndChimeType);
@@ -290,15 +326,35 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   }, [pomodoroConfig]);
 
   const effectiveFocusMinutes = topicGoalCustomMinutes ?? pomodoroConfig.focusMinutes;
+  const activeDisplayFocusMinutes = isInSyncedRoom && activeRoom
+    ? activeRoom.focusMinutes
+    : pomodoroConfig.focusMinutes;
+  const activeDisplayShortBreakMinutes = isInSyncedRoom && activeRoom
+    ? activeRoom.shortBreakMinutes
+    : pomodoroConfig.shortBreakMinutes;
+  const activeDisplayLongBreakMinutes = isInSyncedRoom && activeRoom
+    ? activeRoom.longBreakMinutes
+    : pomodoroConfig.longBreakMinutes;
 
-  const getDurationSeconds = (currentMode: 'focus' | 'shortBreak' | 'longBreak') => {
+  const getDurationSeconds = (
+    currentMode: 'focus' | 'shortBreak' | 'longBreak',
+    roomOverride?: PomodoroRoom | null
+  ) => {
+    const refRoom = roomOverride !== undefined ? roomOverride : activeRoom;
+    if (refRoom && refRoom.status === 'active') {
+      if (currentMode === 'focus') return refRoom.focusMinutes * 60;
+      if (currentMode === 'shortBreak') return refRoom.shortBreakMinutes * 60;
+      return refRoom.longBreakMinutes * 60;
+    }
     if (currentMode === 'focus') return effectiveFocusMinutes * 60;
     if (currentMode === 'shortBreak') return pomodoroConfig.shortBreakMinutes * 60;
     return pomodoroConfig.longBreakMinutes * 60;
   };
 
-  const [timeLeft, setTimeLeft] = useState<number>(getDurationSeconds('focus'));
+  const [timeLeft, setTimeLeft] = useState<number>(getDurationSeconds('focus', null));
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const targetEndTimestampRef = useRef<number | null>(null);
+  const lastCompletedRoomCycleKeyRef = useRef<string | null>(null);
 
   const playChime = (
     overrideType?: 'campana_zen' | 'acorde_cristal' | 'doble_pulso',
@@ -424,32 +480,187 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     }
   };
 
+  // Reset timeLeft when mode changes (solo mode only; room mode is driven by Firestore snapshot)
+  const prevModeRef = useRef(mode);
   useEffect(() => {
-    setTimeLeft(getDurationSeconds(mode));
-    setIsRunning(false);
-  }, [mode, pomodoroConfig, topicGoalCustomMinutes]);
+    if (isInSyncedRoom) {
+      prevModeRef.current = mode;
+      return;
+    }
+    if (prevModeRef.current !== mode) {
+      prevModeRef.current = mode;
+      targetEndTimestampRef.current = null;
+      setTimeLeft(getDurationSeconds(mode, null));
+      setIsRunning(false);
+    }
+  }, [mode, isInSyncedRoom]);
+
+  // Update duration when config or custom goal duration changes ONLY if timer is not running in solo mode
+  useEffect(() => {
+    if (!isRunning && !isInSyncedRoom) {
+      setTimeLeft(getDurationSeconds(mode, null));
+    }
+  }, [
+    pomodoroConfig.focusMinutes,
+    pomodoroConfig.shortBreakMinutes,
+    pomodoroConfig.longBreakMinutes,
+    topicGoalCustomMinutes,
+    isInSyncedRoom,
+  ]);
 
   useEffect(() => {
-    if (defaultSubId) setSelectedSubjectId(defaultSubId);
-    if (defaultTopId) setSelectedTopicId(defaultTopId);
+    if (defaultSubId && !isRunning) setSelectedSubjectId(defaultSubId);
+    if (defaultTopId && !isRunning) setSelectedTopicId(defaultTopId);
   }, [defaultSubId, defaultTopId]);
 
   const selectedSubject = subjects.find((s) => s.id === selectedSubjectId);
   const selectedTopic = selectedSubject?.topics.find((t) => t.id === selectedTopicId);
 
+  // Limpiar sala activa si el usuario cierra sesión
+  useEffect(() => {
+    if (!currentUser && activeRoomId) {
+      setActiveRoomId(null);
+      setActiveRoom(null);
+      setRoomParticipants([]);
+      setRoomMessages([]);
+      setIsRunning(false);
+      targetEndTimestampRef.current = null;
+    }
+  }, [currentUser, activeRoomId]);
+
+  // Suscripción en tiempo real a la sala activa, participantes y mensajes
+  useEffect(() => {
+    if (!activeRoomId || !currentUser) return;
+
+    const applyRoomSnapshot = (room: PomodoroRoom) => {
+      setActiveRoom(room);
+      prevModeRef.current = room.mode;
+      setMode(room.mode);
+      setCycleCount(room.cycleCount);
+
+      if (room.isRunning && room.targetEndTimeMs > 0) {
+        const remaining = Math.max(0, Math.round((room.targetEndTimeMs - Date.now()) / 1000));
+        targetEndTimestampRef.current = room.targetEndTimeMs;
+        setTimeLeft(remaining);
+        setIsRunning(remaining > 0);
+      } else {
+        targetEndTimestampRef.current = null;
+        setIsRunning(false);
+        setTimeLeft(room.pausedRemainingSeconds);
+      }
+    };
+
+    const unsubRoom = subscribeToRoom(
+      activeRoomId,
+      (room) => {
+        if (!room || room.status === 'closed') {
+          setActiveRoomId(null);
+          setActiveRoom(null);
+          setRoomParticipants([]);
+          setRoomMessages([]);
+          setIsRunning(false);
+          targetEndTimestampRef.current = null;
+          setShowRoomPanel(true);
+          setRoomError('La sala de estudio ha finalizado o fue cerrada por el anfitrión.');
+          return;
+        }
+        applyRoomSnapshot(room);
+      },
+      (err) => {
+        setRoomError(err?.message || 'Error al sincronizar con la sala.');
+      }
+    );
+
+    const unsubParticipants = subscribeToRoomParticipants(
+      activeRoomId,
+      (list) => setRoomParticipants(list),
+      () => {}
+    );
+
+    const unsubMessages = subscribeToRoomMessages(
+      activeRoomId,
+      (list) => setRoomMessages(list),
+      () => {}
+    );
+
+    return () => {
+      unsubRoom();
+      unsubParticipants();
+      unsubMessages();
+    };
+  }, [activeRoomId, currentUser]);
+
+  // Sincronizar presencia, estado y tema seleccionado dentro de la sala
+  const currentDefaultTaskLabel = selectedSubject
+    ? selectedTopic
+      ? `${selectedSubject.name} · ${selectedTopic.title}`
+      : selectedSubject.name
+    : 'Estudio general';
+
+  useEffect(() => {
+    if (!activeRoomId || !currentUser || !activeRoom || activeRoom.status !== 'active') return;
+    const nextFocusState = activeRoom.isRunning
+      ? activeRoom.mode === 'focus'
+        ? 'studying'
+        : 'break'
+      : 'ready';
+
+    updateParticipantStatus(activeRoomId, currentUser.uid, {
+      focusState: nextFocusState,
+    });
+  }, [activeRoomId, currentUser, activeRoom?.isRunning, activeRoom?.mode, activeRoom?.status]);
+
+  useEffect(() => {
+    if (!activeRoomId || !currentUser || !activeRoom || activeRoom.status !== 'active') return;
+    if (!selectedSubject && !selectedTopic) return;
+    updateParticipantStatus(activeRoomId, currentUser.uid, {
+      currentTask: currentDefaultTaskLabel,
+    });
+  }, [activeRoomId, currentUser, selectedSubjectId, selectedTopicId]);
+
+  useEffect(() => {
+    if (!activeRoomId || !currentUser) return;
+    const heartbeat = setInterval(() => {
+      updateParticipantStatus(activeRoomId, currentUser.uid, {});
+    }, 60000);
+    return () => clearInterval(heartbeat);
+  }, [activeRoomId, currentUser]);
+
   useEffect(() => {
     if (isRunning) {
+      if (
+        activeRoom &&
+        activeRoom.status === 'active' &&
+        activeRoom.isRunning &&
+        activeRoom.targetEndTimeMs > 0
+      ) {
+        targetEndTimestampRef.current = activeRoom.targetEndTimeMs;
+      } else if (targetEndTimestampRef.current === null) {
+        targetEndTimestampRef.current = Date.now() + timeLeft * 1000;
+      }
+
       timerRef.current = setInterval(() => {
-        setTimeLeft((prev) => (prev <= 1 ? 0 : prev - 1));
-      }, 1000);
-    } else if (timerRef.current) {
-      clearInterval(timerRef.current);
+        if (targetEndTimestampRef.current !== null) {
+          const remainingSecs = Math.max(
+            0,
+            Math.round((targetEndTimestampRef.current - Date.now()) / 1000)
+          );
+          setTimeLeft(remainingSecs);
+        } else {
+          setTimeLeft((prev) => (prev <= 1 ? 0 : prev - 1));
+        }
+      }, 500);
+    } else {
+      targetEndTimestampRef.current = null;
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
     }
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isRunning, mode]);
+  }, [isRunning, mode, activeRoom?.id, activeRoom?.isRunning, activeRoom?.targetEndTimeMs]);
 
   useEffect(() => {
     return () => {
@@ -600,11 +811,45 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     ambientAudioService.setBassBoost(newBass);
   };
 
+  const pushHostRoomState = (next: {
+    mode: PomodoroPhaseMode;
+    isRunning: boolean;
+    pausedRemainingSeconds: number;
+    targetEndTimeMs: number;
+    cycleCount?: number;
+    focusMinutes?: number;
+    shortBreakMinutes?: number;
+    longBreakMinutes?: number;
+  }) => {
+    if (!activeRoom || !isRoomHost) return;
+    syncRoomTimerState(activeRoom.id, {
+      mode: next.mode,
+      isRunning: next.isRunning,
+      focusMinutes: next.focusMinutes ?? activeRoom.focusMinutes,
+      shortBreakMinutes: next.shortBreakMinutes ?? activeRoom.shortBreakMinutes,
+      longBreakMinutes: next.longBreakMinutes ?? activeRoom.longBreakMinutes,
+      pausedRemainingSeconds: next.pausedRemainingSeconds,
+      targetEndTimeMs: next.targetEndTimeMs,
+      cycleCount: next.cycleCount ?? activeRoom.cycleCount,
+    }).catch((err) => {
+      setRoomError(err?.message || 'Error al sincronizar el temporizador de la sala.');
+    });
+  };
+
   const handleComplete = () => {
+    if (isInSyncedRoom && activeRoom) {
+      const cycleKey = `${activeRoom.id}-${activeRoom.mode}-${activeRoom.targetEndTimeMs}`;
+      if (lastCompletedRoomCycleKeyRef.current === cycleKey) {
+        return;
+      }
+      lastCompletedRoomCycleKeyRef.current = cycleKey;
+    }
+
     if (sessionEndChimeEnabled) {
       playChime();
     }
     setIsRunning(false);
+    targetEndTimestampRef.current = null;
     notificationService.setFocusModeSilenced(false);
 
     if (sessionEndBrowserNotifEnabled) {
@@ -613,7 +858,8 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
       });
     }
 
-    const completedMinutes = effectiveFocusMinutes;
+    const completedMinutes =
+      isInSyncedRoom && activeRoom ? activeRoom.focusMinutes : effectiveFocusMinutes;
     const willAutoMarkTopic = Boolean(
       mode === 'focus' && autoMarkTopicStudied && selectedSubject && selectedTopic
     );
@@ -643,9 +889,12 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
       }
     }
 
+    let nextMode: PomodoroPhaseMode = 'focus';
+    let nextCycles = cycleCount;
+
     if (mode === 'focus') {
-      const newCycles = cycleCount + 1;
-      setCycleCount(newCycles);
+      nextCycles = cycleCount + 1;
+      setCycleCount(nextCycles);
 
       if (selectedSubject) {
         onSessionComplete({
@@ -676,16 +925,28 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
         }
       }
 
-      if (newCycles % pomodoroConfig.longBreakInterval === 0) {
-        setMode('longBreak');
-        setTimeLeft(getDurationSeconds('longBreak'));
+      if (nextCycles % pomodoroConfig.longBreakInterval === 0) {
+        nextMode = 'longBreak';
       } else {
-        setMode('shortBreak');
-        setTimeLeft(getDurationSeconds('shortBreak'));
+        nextMode = 'shortBreak';
       }
     } else {
-      setMode('focus');
-      setTimeLeft(getDurationSeconds('focus'));
+      nextMode = 'focus';
+    }
+
+    const nextSecs = getDurationSeconds(nextMode);
+    prevModeRef.current = nextMode;
+    setMode(nextMode);
+    setTimeLeft(nextSecs);
+
+    if (isInSyncedRoom && isRoomHost && activeRoom) {
+      pushHostRoomState({
+        mode: nextMode,
+        isRunning: false,
+        pausedRemainingSeconds: nextSecs,
+        targetEndTimeMs: 0,
+        cycleCount: nextCycles,
+      });
     }
   };
 
@@ -698,16 +959,96 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     }
   }, [timeLeft, isRunning]);
 
+  const handlePhaseSwitch = (nextMode: PomodoroPhaseMode) => {
+    if (isInSyncedRoom) {
+      if (!isRoomHost || !activeRoom) return;
+      const secs = getDurationSeconds(nextMode, activeRoom);
+      prevModeRef.current = nextMode;
+      targetEndTimestampRef.current = null;
+      setIsRunning(false);
+      setMode(nextMode);
+      setTimeLeft(secs);
+      pushHostRoomState({
+        mode: nextMode,
+        isRunning: false,
+        pausedRemainingSeconds: secs,
+        targetEndTimeMs: 0,
+      });
+      return;
+    }
+    setMode(nextMode);
+  };
+
   const handleToggle = () => {
+    if (isInSyncedRoom) {
+      if (!isRoomHost || !activeRoom) return;
+      if (isRunning) {
+        const remaining = Math.max(0, timeLeft);
+        targetEndTimestampRef.current = null;
+        setIsRunning(false);
+        pushHostRoomState({
+          mode,
+          isRunning: false,
+          pausedRemainingSeconds: remaining,
+          targetEndTimeMs: 0,
+        });
+      } else {
+        const secs = timeLeft > 0 ? timeLeft : getDurationSeconds(mode, activeRoom);
+        const endMs = Date.now() + secs * 1000;
+        targetEndTimestampRef.current = endMs;
+        setTimeLeft(secs);
+        setIsRunning(true);
+        pushHostRoomState({
+          mode,
+          isRunning: true,
+          pausedRemainingSeconds: secs,
+          targetEndTimeMs: endMs,
+        });
+      }
+      return;
+    }
     setIsRunning(!isRunning);
   };
 
   const handleReset = () => {
+    if (isInSyncedRoom) {
+      if (!isRoomHost || !activeRoom) return;
+      const secs = getDurationSeconds(mode, activeRoom);
+      targetEndTimestampRef.current = null;
+      setIsRunning(false);
+      setTimeLeft(secs);
+      pushHostRoomState({
+        mode,
+        isRunning: false,
+        pausedRemainingSeconds: secs,
+        targetEndTimeMs: 0,
+      });
+      return;
+    }
+    targetEndTimestampRef.current = null;
     setIsRunning(false);
-    setTimeLeft(getDurationSeconds(mode));
+    setTimeLeft(getDurationSeconds(mode, null));
   };
 
   const handleSkip = () => {
+    if (isInSyncedRoom) {
+      if (!isRoomHost || !activeRoom) return;
+      const nextMode: PomodoroPhaseMode = mode === 'focus' ? 'shortBreak' : 'focus';
+      const secs = getDurationSeconds(nextMode, activeRoom);
+      prevModeRef.current = nextMode;
+      targetEndTimestampRef.current = null;
+      setIsRunning(false);
+      setMode(nextMode);
+      setTimeLeft(secs);
+      pushHostRoomState({
+        mode: nextMode,
+        isRunning: false,
+        pausedRemainingSeconds: secs,
+        targetEndTimeMs: 0,
+      });
+      return;
+    }
+    targetEndTimestampRef.current = null;
     setIsRunning(false);
     if (mode === 'focus') {
       setMode('shortBreak');
@@ -717,6 +1058,8 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
   };
 
   const applyPreset = (focus: number, shortBreak: number, longBreak: number = 25) => {
+    if (isInSyncedRoom && !isRoomHost) return;
+
     const updated = {
       ...pomodoroConfig,
       focusMinutes: focus,
@@ -724,14 +1067,33 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
       longBreakMinutes: longBreak,
     };
     onUpdatePomodoroConfig?.(updated);
+
+    const nextSecs =
+      mode === 'focus' ? focus * 60 : mode === 'shortBreak' ? shortBreak * 60 : longBreak * 60;
+
     if (!isRunning) {
-      if (mode === 'focus') setTimeLeft(focus * 60);
-      else if (mode === 'shortBreak') setTimeLeft(shortBreak * 60);
-      else setTimeLeft(longBreak * 60);
+      setTimeLeft(nextSecs);
+    }
+
+    if (isInSyncedRoom && isRoomHost && activeRoom) {
+      pushHostRoomState({
+        mode,
+        isRunning: false,
+        focusMinutes: focus,
+        shortBreakMinutes: shortBreak,
+        longBreakMinutes: longBreak,
+        pausedRemainingSeconds: nextSecs,
+        targetEndTimeMs: 0,
+      });
+      setIsRunning(false);
+      setTimeLeft(nextSecs);
+      targetEndTimestampRef.current = null;
     }
   };
 
   const handleSaveCustom = (focus: number, shortBreak: number, longBreak: number) => {
+    if (isInSyncedRoom && !isRoomHost) return;
+
     const validFocus = Math.max(1, Math.min(180, focus));
     const validBreak = Math.max(1, Math.min(60, shortBreak));
     const validLongBreak = Math.max(1, Math.min(90, longBreak));
@@ -743,10 +1105,31 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
       longBreakMinutes: validLongBreak,
     };
     onUpdatePomodoroConfig?.(updated);
+
+    const nextSecs =
+      mode === 'focus'
+        ? validFocus * 60
+        : mode === 'shortBreak'
+        ? validBreak * 60
+        : validLongBreak * 60;
+
     if (!isRunning) {
-      if (mode === 'focus') setTimeLeft(validFocus * 60);
-      else if (mode === 'shortBreak') setTimeLeft(validBreak * 60);
-      else setTimeLeft(validLongBreak * 60);
+      setTimeLeft(nextSecs);
+    }
+
+    if (isInSyncedRoom && isRoomHost && activeRoom) {
+      setIsRunning(false);
+      setTimeLeft(nextSecs);
+      targetEndTimestampRef.current = null;
+      pushHostRoomState({
+        mode,
+        isRunning: false,
+        focusMinutes: validFocus,
+        shortBreakMinutes: validBreak,
+        longBreakMinutes: validLongBreak,
+        pausedRemainingSeconds: nextSecs,
+        targetEndTimeMs: 0,
+      });
     }
   };
 
@@ -871,9 +1254,149 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
     return { angle, isMajor, isLit };
   });
 
+  const isSessionPartiallyElapsed = timeLeft < totalDuration && timeLeft > 0;
+  const showFloatingMiniTimer =
+    isHiddenTab && (isRunning || isSessionPartiallyElapsed || Boolean(sessionAlertBanner));
+
   return (
-    <div className="max-w-6xl mx-auto space-y-5">
-      {/* Banner de Modo Enfoque Activo mientras el temporizador está corriendo */}
+    <>
+      {/* Floating Mini-Timer Widget when the user navigates to another tab while a Pomodoro is active */}
+      {showFloatingMiniTimer && (
+        <div className="fixed bottom-4 right-4 z-50 max-w-sm w-[calc(100vw-2rem)] sm:w-auto animate-in fade-in slide-in-from-bottom-3 duration-200">
+          {sessionAlertBanner && (
+            <div className="mb-2 p-3 rounded-2xl bg-emerald-950/95 text-white border border-emerald-500/50 shadow-xl text-xs space-y-1">
+              <div className="flex items-start justify-between gap-2">
+                <span className="font-bold text-emerald-300">{sessionAlertBanner.title}</span>
+                <button
+                  type="button"
+                  onClick={() => setSessionAlertBanner(null)}
+                  className="text-emerald-200 hover:text-white text-[11px] font-bold cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-[11px] text-emerald-100/90 leading-snug">
+                {sessionAlertBanner.subtitle}
+              </p>
+            </div>
+          )}
+
+          <div className="bg-slate-900/95 dark:bg-slate-900 text-white rounded-2xl p-3 px-4 shadow-2xl border border-slate-700/80 backdrop-blur-md flex items-center justify-between gap-3.5">
+            <div
+              onClick={onNavigateToPomodoro}
+              className="flex items-center gap-3 min-w-0 cursor-pointer group"
+              title="Haz clic para abrir la pestaña Pomodoro"
+            >
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 font-mono-numbers font-extrabold text-xs border ${
+                  isRunning
+                    ? mode === 'focus'
+                      ? 'bg-blue-600/25 border-blue-400/50 text-blue-300'
+                      : 'bg-emerald-600/25 border-emerald-400/50 text-emerald-300'
+                    : 'bg-amber-500/20 border-amber-400/40 text-amber-300'
+                }`}
+              >
+                <span className="relative flex h-2.5 w-2.5">
+                  {isRunning && (
+                    <span
+                      className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                        mode === 'focus' ? 'bg-blue-400' : 'bg-emerald-400'
+                      }`}
+                    />
+                  )}
+                  <span
+                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                      isRunning
+                        ? mode === 'focus'
+                          ? 'bg-blue-400'
+                          : 'bg-emerald-400'
+                        : 'bg-amber-400'
+                    }`}
+                  />
+                </span>
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono-numbers text-base font-black tracking-tight text-white">
+                    {formattedTime}
+                  </span>
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      mode === 'focus'
+                        ? 'bg-blue-500/20 text-blue-300'
+                        : 'bg-emerald-500/20 text-emerald-300'
+                    }`}
+                  >
+                    {mode === 'focus'
+                      ? isRunning
+                        ? 'Enfoque activo'
+                        : 'En pausa'
+                      : 'Descanso'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-300 truncate max-w-[180px] group-hover:text-blue-300 transition-colors">
+                  {isInSyncedRoom && activeRoom
+                    ? `Sala ${activeRoom.id} · ${roomParticipants.length} conectados`
+                    : `${selectedSubject ? selectedSubject.name : 'Pomodoro'}${
+                        selectedTopic ? ` · ${selectedTopic.title}` : ''
+                      }`}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleToggle}
+                disabled={isInSyncedRoom && !isRoomHost}
+                className={`p-2 rounded-xl font-bold text-xs transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
+                  isRunning
+                    ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
+                title={
+                  isInSyncedRoom && !isRoomHost
+                    ? `Controlado por ${activeRoom?.hostName}`
+                    : isRunning
+                    ? 'Pausar Pomodoro'
+                    : 'Reanudar Pomodoro'
+                }
+              >
+                {isRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleReset}
+                disabled={isInSyncedRoom && !isRoomHost}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                title={
+                  isInSyncedRoom && !isRoomHost
+                    ? `Controlado por ${activeRoom?.hostName}`
+                    : 'Reiniciar temporizador'
+                }
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+
+              {onNavigateToPomodoro && (
+                <button
+                  type="button"
+                  onClick={onNavigateToPomodoro}
+                  className="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold transition-colors cursor-pointer"
+                  title="Ver pantalla completa del Pomodoro"
+                >
+                  Abrir
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className={isHiddenTab ? 'hidden' : 'max-w-6xl mx-auto space-y-5'}>
+        {/* Banner de Modo Enfoque Activo mientras el temporizador está corriendo */}
       {isDistractionFreeActive && (
         <div className="bg-slate-900 dark:bg-slate-950 text-white rounded-2xl p-4 border border-indigo-500/40 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in duration-200">
           <div className="flex items-center gap-3">
@@ -908,6 +1431,57 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
         </div>
       )}
 
+      {/* Panel Opcional de Salas Virtuales Sincronizadas */}
+      {showRoomPanel && !isDistractionFreeActive && (
+        <PomodoroStudyRoomPanel
+          currentUser={currentUser}
+          onOpenAuthModal={onOpenAuthModal}
+          activeRoom={activeRoom}
+          participants={roomParticipants}
+          messages={roomMessages}
+          isRoomHost={isRoomHost}
+          currentMode={mode}
+          focusMinutes={activeDisplayFocusMinutes}
+          shortBreakMinutes={activeDisplayShortBreakMinutes}
+          longBreakMinutes={activeDisplayLongBreakMinutes}
+          defaultSubjectLabel={selectedSubject?.name}
+          defaultTaskLabel={currentDefaultTaskLabel}
+          roomError={roomError}
+          onClearRoomError={() => setRoomError(null)}
+          onRoomJoined={(room) => {
+            lastCompletedRoomCycleKeyRef.current = null;
+            setRoomError(null);
+            setActiveRoomId(room.id);
+            setActiveRoom(room);
+            setShowRoomPanel(true);
+            prevModeRef.current = room.mode;
+            setMode(room.mode);
+            setCycleCount(room.cycleCount);
+            if (room.isRunning && room.targetEndTimeMs > 0) {
+              const rem = Math.max(0, Math.round((room.targetEndTimeMs - Date.now()) / 1000));
+              targetEndTimestampRef.current = room.targetEndTimeMs;
+              setTimeLeft(rem);
+              setIsRunning(rem > 0);
+            } else {
+              targetEndTimestampRef.current = null;
+              setIsRunning(false);
+              setTimeLeft(room.pausedRemainingSeconds);
+            }
+          }}
+          onRoomExited={() => {
+            lastCompletedRoomCycleKeyRef.current = null;
+            setActiveRoomId(null);
+            setActiveRoom(null);
+            setRoomParticipants([]);
+            setRoomMessages([]);
+            setIsRunning(false);
+            targetEndTimestampRef.current = null;
+            setTimeLeft(getDurationSeconds(mode, null));
+          }}
+          onClosePanel={() => setShowRoomPanel(false)}
+        />
+      )}
+
       {/* MAIN 2-COLUMN VISUAL STUDIO */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         {/* ================================================================== */}
@@ -938,50 +1512,73 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
             }`}
           />
 
-          {/* Top Bar: Mode Pills + Focus Shield & Customizer */}
+          {/* Top Bar: Mode Pills + Room Toggle + Focus Shield & Customizer */}
           <div className="relative z-10 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               {/* Visual Phase Switcher */}
               <div className="flex items-center p-1 bg-slate-100 dark:bg-slate-800 rounded-2xl border border-slate-200/70 dark:border-slate-700">
                 <button
                   type="button"
-                  onClick={() => setMode('focus')}
-                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+                  disabled={isInSyncedRoom && !isRoomHost}
+                  onClick={() => handlePhaseSwitch('focus')}
+                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5 ${
                     mode === 'focus'
                       ? 'bg-blue-600 text-white shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   <Flame className="w-3.5 h-3.5" />
-                  <span>Enfoque ({pomodoroConfig.focusMinutes}m)</span>
+                  <span>Enfoque ({activeDisplayFocusMinutes}m)</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMode('shortBreak')}
-                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+                  disabled={isInSyncedRoom && !isRoomHost}
+                  onClick={() => handlePhaseSwitch('shortBreak')}
+                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5 ${
                     mode === 'shortBreak'
                       ? 'bg-emerald-600 text-white shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
                   <Coffee className="w-3.5 h-3.5" />
-                  <span>Descanso ({pomodoroConfig.shortBreakMinutes}m)</span>
+                  <span>Descanso ({activeDisplayShortBreakMinutes}m)</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setMode('longBreak')}
-                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                  disabled={isInSyncedRoom && !isRoomHost}
+                  onClick={() => handlePhaseSwitch('longBreak')}
+                  className={`px-3.5 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
                     mode === 'longBreak'
                       ? 'bg-purple-600 text-white shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
-                  Pausa Larga ({pomodoroConfig.longBreakMinutes}m)
+                  Pausa Larga ({activeDisplayLongBreakMinutes}m)
                 </button>
               </div>
 
-              {/* Focus Mode & Rhythm Settings */}
-              <div className="flex items-center gap-1.5">
+              {/* Study Room, Focus Mode & Rhythm Settings */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowRoomPanel((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                    isInSyncedRoom
+                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                      : showRoomPanel
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                      : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100'
+                  }`}
+                  title="Opcional: crea o únete a una sala virtual sincronizada para estudiar en grupo"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>
+                    {isInSyncedRoom
+                      ? `Sala · ${roomParticipants.length}`
+                      : 'Sala Grupal'}
+                  </span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setIsFocusModeEnabled((prev) => !prev)}
@@ -996,7 +1593,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
                   <span>Enfoque {isFocusModeEnabled ? 'ON' : 'OFF'}</span>
                 </button>
 
-                {!isDistractionFreeActive && (
+                {!isDistractionFreeActive && (!isInSyncedRoom || isRoomHost) && (
                   <button
                     type="button"
                     onClick={() => setIsCustomizing(!isCustomizing)}
@@ -1026,19 +1623,24 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
                   { f: 90, b: 20, l: 30, tag: '90/20m', desc: 'Ultradiano' },
                 ].map((preset) => {
                   const isActivePreset =
-                    pomodoroConfig.focusMinutes === preset.f &&
-                    pomodoroConfig.shortBreakMinutes === preset.b;
+                    activeDisplayFocusMinutes === preset.f &&
+                    activeDisplayShortBreakMinutes === preset.b;
                   return (
                     <button
                       key={preset.tag}
                       type="button"
+                      disabled={isInSyncedRoom && !isRoomHost}
                       onClick={() => applyPreset(preset.f, preset.b, preset.l)}
-                      className={`px-2.5 py-1 rounded-xl text-xs font-mono-numbers font-bold border transition-all cursor-pointer ${
+                      className={`px-2.5 py-1 rounded-xl text-xs font-mono-numbers font-bold border transition-all cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed ${
                         isActivePreset
                           ? 'bg-blue-50 dark:bg-blue-950/70 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
                           : 'bg-slate-50/80 dark:bg-slate-800/60 border-slate-200/80 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                       }`}
-                      title={preset.desc}
+                      title={
+                        isInSyncedRoom && !isRoomHost
+                          ? `Ritmo controlado por ${activeRoom?.hostName}`
+                          : preset.desc
+                      }
                     >
                       {preset.tag}
                     </button>
@@ -1229,6 +1831,15 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
                       : 'Pausa Larga'}
                   </span>
 
+                  {isInSyncedRoom && activeRoom && (
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-200 dark:border-emerald-800 text-[10px] font-bold text-emerald-700 dark:text-emerald-300">
+                      <Radio className="w-3 h-3 animate-pulse" />
+                      <span>
+                        {isRoomHost ? 'Anfitrión' : 'En sala'} · {activeRoom.id}
+                      </span>
+                    </div>
+                  )}
+
                   {isAmbientPlaying && mode === 'focus' && (
                     <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/80 border border-indigo-200 dark:border-indigo-800 text-[10px] font-bold text-indigo-700 dark:text-indigo-300">
                       <span className="flex items-end gap-0.5 h-2.5">
@@ -1248,23 +1859,34 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
             <div className="flex items-center justify-center gap-4 mt-2">
               <button
                 type="button"
+                disabled={isInSyncedRoom && !isRoomHost}
                 onClick={handleReset}
-                className="p-3.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-2xl transition-colors cursor-pointer"
-                title="Reiniciar reloj"
+                className="p-3.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-2xl transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                title={
+                  isInSyncedRoom && !isRoomHost
+                    ? `Controlado por ${activeRoom?.hostName}`
+                    : 'Reiniciar reloj'
+                }
               >
                 <RotateCcw className="w-5 h-5" />
               </button>
 
               <button
                 type="button"
+                disabled={isInSyncedRoom && !isRoomHost}
                 onClick={handleToggle}
-                className={`px-9 py-4 rounded-2xl font-extrabold text-sm text-white shadow-md flex items-center gap-2.5 transition-all cursor-pointer ${
+                className={`px-9 py-4 rounded-2xl font-extrabold text-sm text-white shadow-md flex items-center gap-2.5 transition-all cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed ${
                   isRunning
                     ? 'bg-amber-500 hover:bg-amber-600'
                     : mode === 'focus'
                     ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700'
                     : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700'
                 }`}
+                title={
+                  isInSyncedRoom && !isRoomHost
+                    ? `Controlado por ${activeRoom?.hostName}`
+                    : undefined
+                }
               >
                 {isRunning ? (
                   <>
@@ -1281,13 +1903,28 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
 
               <button
                 type="button"
+                disabled={isInSyncedRoom && !isRoomHost}
                 onClick={handleSkip}
-                className="p-3.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-2xl transition-colors cursor-pointer"
-                title="Saltar a la siguiente fase"
+                className="p-3.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-2xl transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+                title={
+                  isInSyncedRoom && !isRoomHost
+                    ? `Controlado por ${activeRoom?.hostName}`
+                    : 'Saltar a la siguiente fase'
+                }
               >
                 <SkipForward className="w-5 h-5" />
               </button>
             </div>
+
+            {isInSyncedRoom && !isRoomHost && activeRoom && (
+              <p className="mt-2.5 text-[11px] font-medium text-slate-500 dark:text-slate-400 text-center">
+                Reloj sincronizado y controlado en directo por{' '}
+                <strong className="text-slate-700 dark:text-slate-200">
+                  {activeRoom.hostName}
+                </strong>
+                .
+              </p>
+            )}
           </div>
 
           {/* Bottom Bar: Visual Subject & Topic Selector Cards */}
@@ -2171,6 +2808,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 };

@@ -62,5 +62,144 @@ service cloud.firestore {
         allow delete: if isOwner(userId);
       }
     }
+
+    // Validation for PomodoroRoom
+    function isValidPomodoroRoom(data, roomId) {
+      return data.keys().hasAll([
+               'id', 'name', 'subjectLabel', 'hostUid', 'hostName', 'isPublic',
+               'mode', 'isRunning', 'focusMinutes', 'shortBreakMinutes',
+               'longBreakMinutes', 'pausedRemainingSeconds', 'targetEndTimeMs',
+               'cycleCount', 'status', 'createdAt', 'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'name', 'subjectLabel', 'hostUid', 'hostName', 'isPublic',
+               'mode', 'isRunning', 'focusMinutes', 'shortBreakMinutes',
+               'longBreakMinutes', 'pausedRemainingSeconds', 'targetEndTimeMs',
+               'cycleCount', 'status', 'createdAt', 'updatedAt'
+             ]) &&
+             data.id is string && data.id == roomId && data.id.size() >= 3 && data.id.size() <= 64 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.subjectLabel is string && data.subjectLabel.size() <= 100 &&
+             data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             data.hostName is string && data.hostName.size() >= 1 && data.hostName.size() <= 80 &&
+             data.isPublic is bool &&
+             data.mode in ['focus', 'shortBreak', 'longBreak'] &&
+             data.isRunning is bool &&
+             data.focusMinutes is number && data.focusMinutes >= 1 && data.focusMinutes <= 180 &&
+             data.shortBreakMinutes is number && data.shortBreakMinutes >= 1 && data.shortBreakMinutes <= 60 &&
+             data.longBreakMinutes is number && data.longBreakMinutes >= 1 && data.longBreakMinutes <= 90 &&
+             data.pausedRemainingSeconds is number && data.pausedRemainingSeconds >= 0 && data.pausedRemainingSeconds <= 10800 &&
+             data.targetEndTimeMs is number && data.targetEndTimeMs >= 0 &&
+             data.cycleCount is number && data.cycleCount >= 0 && data.cycleCount <= 500 &&
+             data.status in ['active', 'closed'] &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    // Validation for PomodoroRoomParticipant
+    function isValidPomodoroParticipant(data, roomId, participantId) {
+      return data.keys().hasAll([
+               'id', 'roomId', 'userId', 'displayName',
+               'currentTask', 'focusState', 'joinedAt', 'lastActiveAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'roomId', 'userId', 'displayName',
+               'currentTask', 'focusState', 'joinedAt', 'lastActiveAt'
+             ]) &&
+             data.id is string && data.id == participantId && data.id.size() <= 128 &&
+             data.roomId is string && data.roomId == roomId && data.roomId.size() <= 64 &&
+             data.userId is string && data.userId == request.auth.uid && data.userId == participantId && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.currentTask is string && data.currentTask.size() <= 120 &&
+             data.focusState in ['studying', 'break', 'ready'] &&
+             data.joinedAt is string && data.joinedAt.size() <= 64 &&
+             data.lastActiveAt is string && data.lastActiveAt.size() <= 64;
+    }
+
+    // Validation for PomodoroRoomNote
+    function isValidPomodoroMessage(data, roomId, messageId) {
+      return data.keys().hasAll([
+               'id', 'roomId', 'userId', 'authorName', 'text', 'kind', 'createdAt'
+             ]) &&
+             data.keys().hasOnly([
+               'id', 'roomId', 'userId', 'authorName', 'text', 'kind', 'createdAt'
+             ]) &&
+             data.id is string && data.id == messageId && data.id.size() <= 128 &&
+             data.roomId is string && data.roomId == roomId && data.roomId.size() <= 64 &&
+             data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80 &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 240 &&
+             data.kind in ['message', 'cheer'] &&
+             data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // Virtual synchronized Pomodoro study rooms
+    match /pomodoroRooms/{roomId} {
+      allow get: if isSignedIn() && isValidId(roomId);
+      allow list: if isSignedIn() && resource.data.status == 'active' &&
+        (resource.data.isPublic == true || resource.data.hostUid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(roomId) &&
+        isValidPomodoroRoom(incoming(), roomId) &&
+        incoming().hostUid == request.auth.uid &&
+        incoming().status == 'active';
+      allow update: if isSignedIn() && isValidId(roomId) &&
+        isValidPomodoroRoom(incoming(), roomId) &&
+        existing().status == 'active' &&
+        existing().hostUid == request.auth.uid &&
+        incoming().id == existing().id &&
+        incoming().hostUid == existing().hostUid &&
+        incoming().createdAt == existing().createdAt && (
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'mode', 'isRunning', 'focusMinutes', 'shortBreakMinutes',
+            'longBreakMinutes', 'pausedRemainingSeconds', 'targetEndTimeMs',
+            'cycleCount', 'updatedAt'
+          ]) ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'subjectLabel', 'isPublic', 'updatedAt'
+          ]) ||
+          (incoming().status == 'closed' && incoming().isRunning == false &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'isRunning', 'targetEndTimeMs', 'updatedAt'
+            ]))
+        );
+      allow delete: if isSignedIn() && isValidId(roomId) && existing().hostUid == request.auth.uid;
+
+      match /participants/{participantId} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(participantId);
+        allow list: if isSignedIn() && resource.data.roomId == roomId;
+        allow create: if isSignedIn() && isValidId(roomId) && isValidId(participantId) &&
+          isValidPomodoroParticipant(incoming(), roomId, participantId) &&
+          exists(/databases/$(database)/documents/pomodoroRooms/$(roomId)) &&
+          get(/databases/$(database)/documents/pomodoroRooms/$(roomId)).data.status == 'active';
+        allow update: if isSignedIn() && isValidId(roomId) && isValidId(participantId) &&
+          isValidPomodoroParticipant(incoming(), roomId, participantId) &&
+          existing().userId == request.auth.uid &&
+          incoming().id == existing().id &&
+          incoming().roomId == existing().roomId &&
+          incoming().userId == existing().userId &&
+          incoming().joinedAt == existing().joinedAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'currentTask', 'focusState', 'lastActiveAt'
+          ]);
+        allow delete: if isSignedIn() && isValidId(roomId) && isValidId(participantId) && (
+          existing().userId == request.auth.uid ||
+          get(/databases/$(database)/documents/pomodoroRooms/$(roomId)).data.hostUid == request.auth.uid
+        );
+      }
+
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(messageId);
+        allow list: if isSignedIn() && resource.data.roomId == roomId;
+        allow create: if isSignedIn() && isValidId(roomId) && isValidId(messageId) &&
+          isValidPomodoroMessage(incoming(), roomId, messageId) &&
+          exists(/databases/$(database)/documents/pomodoroRooms/$(roomId)) &&
+          get(/databases/$(database)/documents/pomodoroRooms/$(roomId)).data.status == 'active';
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(roomId) && isValidId(messageId) && (
+          existing().userId == request.auth.uid ||
+          get(/databases/$(database)/documents/pomodoroRooms/$(roomId)).data.hostUid == request.auth.uid
+        );
+      }
+    }
   }
 }
