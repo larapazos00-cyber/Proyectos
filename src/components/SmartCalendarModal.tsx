@@ -55,6 +55,7 @@ import {
   SchedulingPriorityLevel,
   TopicSchedulingPriorityInfo,
   SubjectSchedulingPriorityInfo,
+  SubjectAllocationStrategy,
   PartialSessionCompletionRecord,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
@@ -502,8 +503,18 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
   });
 
   const relevantSubjects = useMemo(
-    () => schedulerService.sortSubjectsBySchedulingPriority(filteredRelevantSubjects, todayStr),
-    [filteredRelevantSubjects, todayStr, smartGoalsRevision]
+    () =>
+      schedulerService.sortSubjectsBySchedulingPriority(
+        filteredRelevantSubjects,
+        todayStr,
+        preferences.subjectAllocationStrategy
+      ),
+    [
+      filteredRelevantSubjects,
+      todayStr,
+      smartGoalsRevision,
+      preferences.subjectAllocationStrategy,
+    ]
   );
 
   const subjectColorById = useMemo(() => {
@@ -1847,7 +1858,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
     }> = [];
 
     sourceSubjects.forEach((sub) => {
-      const subInfo = schedulerService.calculateSubjectSchedulingPriority(sub, todayStr);
+      const subInfo = schedulerService.calculateSubjectSchedulingPriority(
+        sub,
+        todayStr,
+        undefined,
+        preferences.subjectAllocationStrategy
+      );
       (sub.topics || []).forEach((t) => {
         const attachedP = (t.attachedFiles || []).reduce(
           (sum, f) => sum + (f.includeInOrganization !== false ? f.pageCount || 0 : 0),
@@ -3327,7 +3343,12 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
       info: SubjectSchedulingPriorityInfo;
     }> = relevantSubjects.map((sub) => ({
       subject: sub,
-      info: schedulerService.calculateSubjectSchedulingPriority(sub, todayStr),
+      info: schedulerService.calculateSubjectSchedulingPriority(
+        sub,
+        todayStr,
+        undefined,
+        preferences.subjectAllocationStrategy
+      ),
     }));
 
     const topicItems: Array<{
@@ -4678,6 +4699,52 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
               </div>
             </div>
 
+            {/* Selector de Estrategia de Relevancia (Importantes vs Sacarse más asignaturas) */}
+            {onUpdatePreferences && (
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="text-[11px]">
+                  <span className="font-bold text-slate-800 dark:text-slate-200 block">
+                    Criterio de reparto según créditos y horas dedicadas (opcional)
+                  </span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    Prioriza las materias clave o completa un mayor número de asignaturas rápidamente.
+                  </span>
+                </div>
+                <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shrink-0 flex-wrap">
+                  {(
+                    [
+                      { id: 'balanced', label: 'Equilibrado' },
+                      { id: 'important_first', label: 'Asignaturas importantes' },
+                      { id: 'more_subjects', label: 'Más asignaturas' },
+                    ] as const
+                  ).map((opt) => {
+                    const activeStrategy: SubjectAllocationStrategy =
+                      preferences.subjectAllocationStrategy || 'balanced';
+                    const isSelected = activeStrategy === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() =>
+                          onUpdatePreferences({
+                            ...preferences,
+                            subjectAllocationStrategy: opt.id,
+                          })
+                        }
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                          isSelected
+                            ? 'bg-amber-600 text-white shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {priorityTabMode === 'temas' ? (
               <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
                 {schedulingPriorityData.topicItems.length === 0 ? (
@@ -4935,6 +5002,16 @@ export const SmartCalendarModal: React.FC<SmartCalendarModalProps> = ({
                             </span>
                           </div>
                           <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500 dark:text-slate-400 font-mono-numbers mt-1">
+                            {subject.credits ? (
+                              <span className="font-bold text-blue-700 dark:text-blue-300">
+                                {subject.credits} ECTS
+                              </span>
+                            ) : null}
+                            {subject.allocatedHours ? (
+                              <span className="font-bold text-indigo-700 dark:text-indigo-300">
+                                {subject.allocatedHours}h ded.
+                              </span>
+                            ) : null}
                             <span>📝 Exámenes: <strong>{info.examWeightPct}%</strong></span>
                             <span>🚀 Proyectos: <strong>{info.projectWeightPct}%</strong></span>
                             <span>✅ Tareas: <strong>{info.taskWeightPct}%</strong></span>

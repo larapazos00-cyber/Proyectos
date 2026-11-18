@@ -34,6 +34,7 @@ import {
   ForgettingCurveProfile,
   SpacedRepetitionConfig,
   InterfaceDesignMode,
+  SubjectAllocationStrategy,
 } from '../types';
 import { notificationService, DEFAULT_CONTEXTUAL_RULES } from '../services/notificationService';
 import { schedulerService } from '../services/schedulerService';
@@ -184,6 +185,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
     );
     setNavigationPosition(preferences.navigationPosition || 'top');
     setInterfaceDesignMode(preferences.interfaceDesignMode || 'complete');
+    setSubjectAllocationStrategy(preferences.subjectAllocationStrategy || 'balanced');
     setPomodoroFocus(preferences.pomodoroConfig?.focusMinutes || 25);
     setPomodoroShortBreak(preferences.pomodoroConfig?.shortBreakMinutes || 5);
     setPomodoroLongBreak(preferences.pomodoroConfig?.longBreakMinutes || 15);
@@ -200,6 +202,8 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
   const [interfaceDesignMode, setInterfaceDesignMode] = useState<InterfaceDesignMode>(
     preferences.interfaceDesignMode || 'complete'
   );
+  const [subjectAllocationStrategy, setSubjectAllocationStrategy] =
+    useState<SubjectAllocationStrategy>(preferences.subjectAllocationStrategy || 'balanced');
   const [pomodoroFocus, setPomodoroFocus] = useState<number>(
     preferences.pomodoroConfig?.focusMinutes || 25
   );
@@ -525,6 +529,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       enabledTabs,
       navigationPosition,
       interfaceDesignMode,
+      subjectAllocationStrategy,
       pomodoroConfig: {
         focusMinutes: pomodoroFocus,
         shortBreakMinutes: pomodoroShortBreak,
@@ -615,9 +620,9 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
     >
-      <div className="bg-white dark:bg-slate-900 w-full max-w-3xl rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-8 transition-colors">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-4xl max-h-[92dvh] flex flex-col rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden my-2 transition-colors">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex flex-col gap-3 bg-slate-50 dark:bg-slate-800/60">
           <div className="flex items-center justify-between">
@@ -720,7 +725,7 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
           </div>
         </div>
 
-        <div className="p-6 max-h-[75vh] overflow-y-auto space-y-6">
+        <div className="p-5 sm:p-6 flex-1 overflow-y-auto space-y-6">
           {activePrefView === 'reglas_repeticion' ? (
             <SpacedRepetitionPreferencesPanel
               customIntervals={customIntervals}
@@ -1831,6 +1836,57 @@ export const StudyPreferencesModal: React.FC<StudyPreferencesModalProps> = ({
                       <span className="text-slate-400 italic text-[11px]">Descanso</span>
                     )}
                   </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 1.7: Estrategia de Priorización entre Asignaturas */}
+          <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-800">
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
+                Estrategia de Reparto y Prioridad de Asignaturas
+              </h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                Combina los créditos ECTS y las horas dedicadas (opcionales) de cada asignatura para decidir cómo priorizar tus bloques en el calendario.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {([
+                {
+                  id: 'balanced',
+                  title: 'Equilibrado',
+                  desc: 'Peso equilibrado entre nota final, exámenes próximos, créditos y horas.',
+                },
+                {
+                  id: 'important_first',
+                  title: 'Asignaturas más importantes',
+                  desc: 'Prioriza primero las asignaturas con más créditos, horas dedicadas y mayor % de nota.',
+                },
+                {
+                  id: 'more_subjects',
+                  title: 'Sacarse más asignaturas',
+                  desc: 'Prioriza asignaturas más cortas o avanzadas para completar un mayor nº de materias.',
+                },
+              ] as const).map((option) => {
+                const isSelected = subjectAllocationStrategy === option.id;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setSubjectAllocationStrategy(option.id)}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-500 text-blue-950 dark:text-blue-100 shadow-2xs'
+                        : 'bg-slate-50/70 dark:bg-slate-800/40 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-blue-300'
+                    }`}
+                  >
+                    <div className="text-xs font-bold">{option.title}</div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-snug">
+                      {option.desc}
+                    </p>
+                  </button>
                 );
               })}
             </div>

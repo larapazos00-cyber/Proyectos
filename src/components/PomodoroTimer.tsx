@@ -1395,7 +1395,7 @@ export const PomodoroTimer: React.FC<PomodoroTimerProps> = ({
         </div>
       )}
 
-      <div className={isHiddenTab ? 'hidden' : 'max-w-6xl mx-auto space-y-5'}>
+      <div className={isHiddenTab ? 'hidden' : 'max-w-[1680px] mx-auto space-y-5'}>
         {/* Banner de Modo Enfoque Activo mientras el temporizador está corriendo */}
       {isDistractionFreeActive && (
         <div className="bg-slate-900 dark:bg-slate-950 text-white rounded-2xl p-4 border border-indigo-500/40 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in duration-200">

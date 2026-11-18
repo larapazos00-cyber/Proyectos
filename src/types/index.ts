@@ -192,6 +192,8 @@ export interface SubjectSchedulingPriorityInfo {
   summaryLabel: string;
 }
 
+export type AcademicTerm = '1T' | '2T' | '3T' | '1C' | '2C' | 'anual';
+
 export interface Task {
   id: string;
   title: string;
@@ -215,6 +217,7 @@ export interface Task {
   maxScore?: number; // Puntuación máxima de referencia (ej: 10)
   weightPercentage?: number; // Ponderación en la nota final o continua (ej: 15%)
   isGraded?: boolean; // Indica si la tarea es evaluable o puntúa
+  academicTerm?: AcademicTerm; // Trimestre, cuatrimestre o periodo al que pertenece (ej: '1T', '2T', '3T', '1C', '2C', 'anual')
   manualPriorityOrder?: number; // Posición manual en la cola de prioridad académica de la asignatura (1 = más prioritario)
   smartGoalId?: string; // ID del Objetivo SMART asociado (si se creó desde un objetivo SMART)
   smartGoalTitle?: string; // Título del Objetivo SMART asociado
@@ -236,6 +239,7 @@ export interface Exam {
   completed: boolean;
   notes?: string;
   convocatoria?: string; // ej: "Ordinaria", "Extraordinaria", "Parcial 1", "Parcial 2", "Final", "Recuperación"
+  academicTerm?: AcademicTerm; // Trimestre, cuatrimestre o periodo al que pertenece (ej: '1T', '2T', '3T', '1C', '2C', 'anual')
   location?: string; // Aula o ubicación del examen
 }
 
@@ -435,7 +439,8 @@ export interface Subject {
   name: string;
   code?: string; // Código de asignatura opcional
   color: string; // Hex color o clase de color
-  credits?: number;
+  credits?: number; // Créditos ECTS opcionales
+  allocatedHours?: number; // Horas dedicadas / objetivo opcional por asignatura
   professor?: string; // Profesor principal (compatibilidad)
   professors?: string[]; // Múltiples profesores de la asignatura
   classroom?: string;
@@ -603,12 +608,16 @@ export interface ContextualNotificationRule {
 
 export type InterfaceDesignMode = 'complete' | 'intermediate' | 'minimal';
 
+export type SubjectAllocationStrategy = 'balanced' | 'important_first' | 'more_subjects';
+
 export interface StudyPreferences {
   availableDays: number[]; // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
   hoursPerDay: Record<number, number>; // Horas disponibles calculadas o manuales por día de la semana
   dailyGoalHours?: number; // Meta diaria de estudio configurada en preferencias (en horas, ej: 3.0)
   dailyGoalTopics?: number; // Meta diaria de temas completados o repasados (ej: 2 temas/día)
   dailyGoalMode?: 'hours' | 'topics' | 'both'; // Modo de seguimiento de la meta diaria en la vista General
+  // Estrategia de reparto y prioridad de asignaturas (importantes vs mayor nº de asignaturas)
+  subjectAllocationStrategy?: SubjectAllocationStrategy;
   // Velocidad de lectura y estudio por página (Factor determinante en la planificación)
   readingSpeedPagesPerHour?: number; // Velocidad de lectura promedio en páginas por hora (ej: 8 págs/hora)
   averageMinutesPerPage?: number; // Minutos promedio de estudio/lectura por página (ej: 7.5 min/pág)
@@ -621,6 +630,7 @@ export interface StudyPreferences {
   enabledTabs?: string[]; // Pestañas activas/visibles configuradas por el usuario
   navigationPosition?: 'top' | 'sidebar'; // Posición del menú: superior o lateral a decisión del usuario
   interfaceDesignMode?: InterfaceDesignMode; // Modelo de diseño de toda la interfaz: 'complete' (Completo/Actual), 'intermediate' (Intermedio), 'minimal' (Minimalista/Esencial)
+  updatedAt?: string; // Marca temporal de última modificación para conciliación segura entre dispositivos/actualizaciones
   pomodoroConfig: {
     focusMinutes: number;
     shortBreakMinutes: number;

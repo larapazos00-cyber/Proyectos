@@ -1,6 +1,8 @@
 import { StudyProgram, StudyPreferences, PomodoroLog, BlockedTimeEvent, AttachedTopicFile, Topic } from '../types';
 import { initialStudyPrograms, blankStudyPrograms, initialPreferences, initialPomodoroLogs, initialBlockedEvents } from '../data/initialData';
 
+const CURRENT_SCHEMA_VERSION = 2;
+
 const STORAGE_KEYS = {
   PROGRAMS: 'studyflow_programs_v1',
   PREFERENCES: 'studyflow_preferences_v1',
@@ -8,6 +10,11 @@ const STORAGE_KEYS = {
   BLOCKED_EVENTS: 'studyflow_blocked_events_v1',
   ACTIVE_PROGRAM_ID: 'studyflow_active_program_id',
   ACTIVE_YEAR_ID: 'studyflow_active_year_id',
+  SCHEMA_VERSION: 'studyflow_schema_version_v1',
+  PREFS_USER_MODIFIED: 'studyflow_prefs_user_modified_v1',
+  HABITS: 'studyflow_user_habits_v1',
+  MOODS: 'studyflow_user_moods_v1',
+  SMART_GOALS: 'studyflow_smart_goals_v1',
 };
 
 const IDB_CONFIG = {
@@ -20,7 +27,74 @@ const IDB_CONFIG = {
   ACTIVE_SELECTION_KEY: 'active_selection_full_v1',
   SWR_META_KEY: 'swr_cache_meta_v1',
   OFFLINE_MUTATIONS_KEY: 'offline_pending_mutations_v1',
+  PRE_UPDATE_BACKUP_KEY: 'pre_update_backup_v1',
 };
+
+export function hasMeaningfulUserPrograms(programs: StudyProgram[] | null | undefined): boolean {
+  if (!Array.isArray(programs) || programs.length === 0) return false;
+  if (programs.length > 1) return true;
+  const first = programs[0];
+  if (!first) return false;
+  if (first.id !== 'prog-custom-1') return true;
+  if (first.name && first.name !== 'Mi Plan de Estudios') return true;
+  const years = Array.isArray(first.years) ? first.years : [];
+  if (years.length > 1) return true;
+  return years.some((y) => (Array.isArray(y.subjects) ? y.subjects.length > 0 : false));
+}
+
+export function migrateProgramsSchema(programs: StudyProgram[]): StudyProgram[] {
+  if (!Array.isArray(programs)) return [];
+  return programs.map((prog) => ({
+    ...prog,
+    years: (Array.isArray(prog.years) ? prog.years : []).map((yr) => ({
+      ...yr,
+      targetWeeklyHours: yr.targetWeeklyHours ?? 20,
+      subjects: (Array.isArray(yr.subjects) ? yr.subjects : []).map((sub) => ({
+        ...sub,
+        topics: Array.isArray(sub.topics) ? sub.topics : [],
+        tasks: Array.isArray(sub.tasks) ? sub.tasks : [],
+        exams: Array.isArray(sub.exams) ? sub.exams : [],
+        projects: Array.isArray(sub.projects) ? sub.projects : [],
+        smartGoals: Array.isArray(sub.smartGoals) ? sub.smartGoals : [],
+        cornellNotes: Array.isArray(sub.cornellNotes) ? sub.cornellNotes : [],
+        flashcards: Array.isArray(sub.flashcards) ? sub.flashcards : [],
+        quizzes: Array.isArray(sub.quizzes) ? sub.quizzes : [],
+        feynmanSessions: Array.isArray(sub.feynmanSessions) ? sub.feynmanSessions : [],
+        mindmaps: Array.isArray(sub.mindmaps) ? sub.mindmaps : [],
+        errorLogs: Array.isArray(sub.errorLogs) ? sub.errorLogs : [],
+      })),
+    })),
+  }));
+}
+
+export function migratePreferencesSchema(prefs: Partial<StudyPreferences> | null | undefined): StudyPreferences {
+  if (!prefs || typeof prefs !== 'object') {
+    return { ...initialPreferences };
+  }
+  return {
+    ...initialPreferences,
+    ...prefs,
+    availableDays:
+      Array.isArray(prefs.availableDays) && prefs.availableDays.length > 0
+        ? prefs.availableDays
+        : initialPreferences.availableDays,
+    hoursPerDay:
+      prefs.hoursPerDay && typeof prefs.hoursPerDay === 'object'
+        ? { ...initialPreferences.hoursPerDay, ...prefs.hoursPerDay }
+        : { ...initialPreferences.hoursPerDay },
+    pomodoroConfig: {
+      ...initialPreferences.pomodoroConfig,
+      ...(prefs.pomodoroConfig || {}),
+    },
+    weeklyFixedObligations: Array.isArray(prefs.weeklyFixedObligations)
+      ? prefs.weeklyFixedObligations
+      : initialPreferences.weeklyFixedObligations || [],
+    contextualNotificationRules: Array.isArray(prefs.contextualNotificationRules)
+      ? prefs.contextualNotificationRules
+      : initialPreferences.contextualNotificationRules,
+    subjectAllocationStrategy: prefs.subjectAllocationStrategy || 'balanced',
+  };
+}
 
 interface SwrCacheMeta {
   lastUpdatedAt: string;
@@ -102,7 +176,38 @@ async function saveProgramsToIndexedDB(programs: StudyProgram[]): Promise<void> 
 
 async function loadProgramsFromIndexedDB(): Promise<StudyProgram[] | null> {
   const result = await loadKeyFromIndexedDB<StudyProgram[]>(IDB_CONFIG.PROGRAMS_KEY);
-  return Array.isArray(result) && result.length > 0 ? result : null;
+  return Array.isArray(result) && result.length > 0 ? migrateProgramsSchema(result) : null;
+}
+
+async function ensureSchemaUpgradedAndBackedUp(): Promise<void> {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const rawVer = localStorage.getItem(STORAGE_KEYS.SCHEMA_VERSION);
+    const prevVer = rawVer ? parseInt(rawVer, 10) : 0;
+    if (prevVer >= CURRENT_SCHEMA_VERSION) return;
+
+    // Si existían datos previos de una publicación anterior, crear una instantánea de respaldo en IndexedDB antes de migrar
+    const rawPrograms = localStorage.getItem(STORAGE_KEYS.PROGRAMS);
+    const rawPrefs = localStorage.getItem(STORAGE_KEYS.PREFERENCES);
+    const rawBlocked = localStorage.getItem(STORAGE_KEYS.BLOCKED_EVENTS);
+    const rawPomodoro = localStorage.getItem(STORAGE_KEYS.POMODORO_LOGS);
+    const idbPrograms = await loadKeyFromIndexedDB<StudyProgram[]>(IDB_CONFIG.PROGRAMS_KEY);
+
+    if (rawPrograms || idbPrograms || rawPrefs || rawBlocked) {
+      await saveKeyToIndexedDB(IDB_CONFIG.PRE_UPDATE_BACKUP_KEY, {
+        backedUpAt: new Date().toISOString(),
+        fromSchemaVersion: prevVer,
+        toSchemaVersion: CURRENT_SCHEMA_VERSION,
+        programs: idbPrograms || (rawPrograms ? JSON.parse(rawPrograms) : null),
+        preferences: rawPrefs ? JSON.parse(rawPrefs) : null,
+        blockedEvents: rawBlocked ? JSON.parse(rawBlocked) : null,
+        pomodoroLogs: rawPomodoro ? JSON.parse(rawPomodoro) : null,
+      });
+    }
+    localStorage.setItem(STORAGE_KEYS.SCHEMA_VERSION, String(CURRENT_SCHEMA_VERSION));
+  } catch {
+    // Non-fatal
+  }
 }
 
 async function touchSwrMetadataInIndexedDB(): Promise<void> {
@@ -394,21 +499,56 @@ function safeSetLocalStorageItem(key: string, value: string): void {
 }
 
 export const storageService = {
+  hasPersistedPrograms(): boolean {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.PROGRAMS);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return hasMeaningfulUserPrograms(parsed);
+    } catch {
+      return false;
+    }
+  },
+
+  hasPersistedUserPreferences(): boolean {
+    try {
+      if (localStorage.getItem(STORAGE_KEYS.PREFS_USER_MODIFIED) === '1') return true;
+      const raw = localStorage.getItem(STORAGE_KEYS.PREFERENCES);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return Boolean(
+        parsed?.updatedAt ||
+          (Array.isArray(parsed?.weeklyFixedObligations) && parsed.weeklyFixedObligations.length > 0) ||
+          (Array.isArray(parsed?.moodEntries) && parsed.moodEntries.length > 0) ||
+          (Array.isArray(parsed?.habits) && parsed.habits.length > 0)
+      );
+    } catch {
+      return false;
+    }
+  },
+
+  async runSchemaMigrationAndBackup(): Promise<void> {
+    await ensureSchemaUpgradedAndBackedUp();
+  },
+
   getPrograms(): StudyProgram[] {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.PROGRAMS);
       if (data) {
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return migrateProgramsSchema(parsed);
+        }
       }
     } catch (e) {
       console.warn('Error loading programs from localStorage', e);
     }
-    // Default fallback en blanco para que cada usuario comience con sus propios datos personalizados
-    this.savePrograms(blankStudyPrograms, { skipIndexedDB: true });
-    return blankStudyPrograms;
+    // No sobrescribir IndexedDB ni localStorage si aún no existían datos: devolver estructura inicial segura
+    return migrateProgramsSchema(blankStudyPrograms);
   },
 
   async hydrateProgramsFromIndexedDB(): Promise<StudyProgram[] | null> {
+    await ensureSchemaUpgradedAndBackedUp();
     return await loadProgramsFromIndexedDB();
   },
 
@@ -418,7 +558,8 @@ export const storageService = {
   },
 
   async hydratePreferencesFromIndexedDB(): Promise<StudyPreferences | null> {
-    return await loadKeyFromIndexedDB<StudyPreferences>(IDB_CONFIG.PREFERENCES_KEY);
+    const res = await loadKeyFromIndexedDB<StudyPreferences>(IDB_CONFIG.PREFERENCES_KEY);
+    return res ? migratePreferencesSchema(res) : null;
   },
 
   async hydratePomodoroLogsFromIndexedDB(): Promise<PomodoroLog[] | null> {
@@ -454,16 +595,34 @@ export const storageService = {
   },
 
   resetToBlank(): StudyProgram[] {
-    this.savePrograms(blankStudyPrograms);
-    return blankStudyPrograms;
+    this.savePrograms(blankStudyPrograms, { allowBlankOverwrite: true });
+    return migrateProgramsSchema(blankStudyPrograms);
   },
 
   loadDemoData(): StudyProgram[] {
-    this.savePrograms(initialStudyPrograms);
-    return initialStudyPrograms;
+    this.savePrograms(initialStudyPrograms, { allowBlankOverwrite: true });
+    return migrateProgramsSchema(initialStudyPrograms);
   },
 
-  savePrograms(programs: StudyProgram[], options?: { skipIndexedDB?: boolean }): void {
+  savePrograms(
+    programs: StudyProgram[],
+    options?: { skipIndexedDB?: boolean; allowBlankOverwrite?: boolean }
+  ): void {
+    // Protección anti-pérdida: nunca sobrescribir datos reales ya guardados con la plantilla en blanco por error de hidratación
+    if (!options?.allowBlankOverwrite && !hasMeaningfulUserPrograms(programs)) {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEYS.PROGRAMS);
+        if (raw) {
+          const existingParsed = JSON.parse(raw);
+          if (hasMeaningfulUserPrograms(existingParsed)) {
+            return;
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
     // 1. Save full uncompacted data in IndexedDB (supports large PDFs & images without 5MB cap)
     if (!options?.skipIndexedDB) {
       void saveProgramsToIndexedDB(programs).then(() => touchSwrMetadataInIndexedDB());
@@ -476,34 +635,46 @@ export const storageService = {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.PREFERENCES);
       if (data) {
-        return JSON.parse(data);
+        return migratePreferencesSchema(JSON.parse(data));
       }
     } catch (e) {
       console.warn('Error loading preferences', e);
     }
-    this.savePreferences(initialPreferences, { skipIndexedDB: true });
-    return initialPreferences;
+    return { ...initialPreferences };
   },
 
-  savePreferences(prefs: StudyPreferences, options?: { skipIndexedDB?: boolean }): void {
+  savePreferences(
+    prefs: StudyPreferences,
+    options?: { skipIndexedDB?: boolean; preserveTimestamp?: boolean }
+  ): void {
+    const nextPrefs: StudyPreferences =
+      !options?.skipIndexedDB && !options?.preserveTimestamp
+        ? { ...prefs, updatedAt: new Date().toISOString() }
+        : prefs;
+
     if (!options?.skipIndexedDB) {
-      void saveKeyToIndexedDB(IDB_CONFIG.PREFERENCES_KEY, prefs).then(() =>
+      try {
+        localStorage.setItem(STORAGE_KEYS.PREFS_USER_MODIFIED, '1');
+      } catch {
+        // Ignore
+      }
+      void saveKeyToIndexedDB(IDB_CONFIG.PREFERENCES_KEY, nextPrefs).then(() =>
         touchSwrMetadataInIndexedDB()
       );
     }
-    safeSetLocalStorageItem(STORAGE_KEYS.PREFERENCES, JSON.stringify(prefs));
+    safeSetLocalStorageItem(STORAGE_KEYS.PREFERENCES, JSON.stringify(nextPrefs));
   },
 
   getBlockedEvents(): BlockedTimeEvent[] {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.BLOCKED_EVENTS);
       if (data) {
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch (e) {
       console.warn('Error loading blocked events', e);
     }
-    this.saveBlockedEvents(initialBlockedEvents, { skipIndexedDB: true });
     return initialBlockedEvents;
   },
 
@@ -532,12 +703,12 @@ export const storageService = {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.POMODORO_LOGS);
       if (data) {
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch (e) {
       console.warn('Error loading pomodoro logs', e);
     }
-    this.savePomodoroLogs(initialPomodoroLogs);
     return initialPomodoroLogs;
   },
 
@@ -594,15 +765,33 @@ export const storageService = {
     localStorage.removeItem(STORAGE_KEYS.BLOCKED_EVENTS);
     localStorage.removeItem(STORAGE_KEYS.ACTIVE_PROGRAM_ID);
     localStorage.removeItem(STORAGE_KEYS.ACTIVE_YEAR_ID);
+    localStorage.removeItem(STORAGE_KEYS.PREFS_USER_MODIFIED);
     void clearProgramsFromIndexedDB();
   },
 
   exportJSON(): string {
+    let habits: any = null;
+    let moods: any = null;
+    let smartGoals: any = null;
+    try {
+      const h = localStorage.getItem(STORAGE_KEYS.HABITS);
+      if (h) habits = JSON.parse(h);
+      const m = localStorage.getItem(STORAGE_KEYS.MOODS);
+      if (m) moods = JSON.parse(m);
+      const sg = localStorage.getItem(STORAGE_KEYS.SMART_GOALS);
+      if (sg) smartGoals = JSON.parse(sg);
+    } catch {
+      // Ignore
+    }
     const dump = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       programs: this.getPrograms(),
       preferences: this.getPreferences(),
       blockedEvents: this.getBlockedEvents(),
       pomodoroLogs: this.getPomodoroLogs(),
+      habits,
+      moods,
+      smartGoals,
       exportedAt: new Date().toISOString(),
     };
     return JSON.stringify(dump, null, 2);
@@ -612,10 +801,14 @@ export const storageService = {
     try {
       const parsed = JSON.parse(jsonString);
       if (parsed.programs && Array.isArray(parsed.programs)) {
-        this.savePrograms(parsed.programs);
-        if (parsed.preferences) this.savePreferences(parsed.preferences);
+        const migratedPrograms = migrateProgramsSchema(parsed.programs);
+        this.savePrograms(migratedPrograms, { allowBlankOverwrite: true });
+        if (parsed.preferences) this.savePreferences(migratePreferencesSchema(parsed.preferences));
         if (parsed.blockedEvents) this.saveBlockedEvents(parsed.blockedEvents);
         if (parsed.pomodoroLogs) this.savePomodoroLogs(parsed.pomodoroLogs);
+        if (parsed.habits) safeSetLocalStorageItem(STORAGE_KEYS.HABITS, JSON.stringify(parsed.habits));
+        if (parsed.moods) safeSetLocalStorageItem(STORAGE_KEYS.MOODS, JSON.stringify(parsed.moods));
+        if (parsed.smartGoals) safeSetLocalStorageItem(STORAGE_KEYS.SMART_GOALS, JSON.stringify(parsed.smartGoals));
         return true;
       }
       return false;

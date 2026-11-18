@@ -526,7 +526,7 @@ export const Navigation: React.FC<NavigationProps> = ({
     return (
       <>
         {/* Desktop Vertical Left Sidebar */}
-        <aside className="hidden md:flex md:w-64 lg:w-72 shrink-0 self-start bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex-col justify-between sticky top-0 h-screen z-40 p-4 select-none transition-colors">
+        <aside className="hidden md:flex md:w-56 lg:w-60 xl:w-64 2xl:w-72 shrink-0 self-start bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex-col justify-between sticky top-0 h-screen z-40 p-3.5 lg:p-4 select-none transition-colors">
           {renderSidebarInner()}
         </aside>
 
@@ -685,7 +685,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   return (
     <>
       <header className="sticky top-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 transition-colors">
-        <div className="max-w-6xl mx-auto px-3 sm:px-6 lg:px-8">
+        <div className="max-w-[1680px] mx-auto px-3 sm:px-5 lg:px-7 2xl:px-10">
           {/* Row 1: Brand, Active Study Context & Utility Cluster + "+ Estudios" Button */}
           <div className="flex items-center justify-between gap-2 sm:gap-4 min-h-14 py-1.5">
             {/* Zone 1: Brand logo & contextual breadcrumb */}

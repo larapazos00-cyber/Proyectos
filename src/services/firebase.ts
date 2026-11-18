@@ -20,7 +20,12 @@ import {
   Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { compactProgramsForLocalStorage } from './storageService';
+import {
+  compactProgramsForLocalStorage,
+  hasMeaningfulUserPrograms,
+  migrateProgramsSchema,
+  migratePreferencesSchema,
+} from './storageService';
 
 // Silence internal @firebase/firestore WebChannel backoff console.error spam when free-tier daily quota is reached
 try {
@@ -205,6 +210,16 @@ export interface UserCloudState {
   blockedEvents: any[];
 }
 
+export interface FetchUserCloudResult {
+  exists: boolean;
+  state: UserCloudState | null;
+  chunkAssemblyFailed?: boolean;
+  error?: boolean;
+  quotaExhausted?: boolean;
+}
+
+const cloudKnownMeaningfulByUid = new Map<string, boolean>();
+
 const BASE64_BLOB_REGEX = /data:[a-zA-Z0-9.+/-]+;base64,[A-Za-z0-9+/=\s]{512,}/g;
 const utf8Encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
 
@@ -244,9 +259,9 @@ function estimateFirestoreBytes(value: any): number {
   return 8;
 }
 
-export async function fetchUserStudyData(userId: string): Promise<UserCloudState | null> {
+export async function fetchUserStudyData(userId: string): Promise<FetchUserCloudResult> {
   if (isFirestoreQuotaExhausted()) {
-    return null;
+    return { exists: false, state: null, error: true, quotaExhausted: true };
   }
   const path = `users/${userId}/studyData/main`;
   try {
@@ -255,6 +270,7 @@ export async function fetchUserStudyData(userId: string): Promise<UserCloudState
     if (snap.exists()) {
       const data = snap.data();
       let loadedPrograms: any[] = Array.isArray(data.programs) ? data.programs : [];
+      let chunkAssemblyFailed = false;
 
       const chunkCount = typeof data.chunkCount === 'number' ? data.chunkCount : 0;
       if (chunkCount > 0 && chunkCount <= 40) {
@@ -270,27 +286,45 @@ export async function fetchUserStudyData(userId: string): Promise<UserCloudState
             if (Array.isArray(parsedPrograms) && parsedPrograms.length > 0) {
               loadedPrograms = parsedPrograms;
             }
+          } else if (loadedPrograms.length === 0) {
+            chunkAssemblyFailed = true;
           }
         } catch (chunkErr) {
           console.warn('Could not reassemble studyData chunks, using main programs fallback:', chunkErr);
+          if (loadedPrograms.length === 0) {
+            chunkAssemblyFailed = true;
+          }
         }
       }
 
+      const migratedPrograms = migrateProgramsSchema(loadedPrograms);
+      if (hasMeaningfulUserPrograms(migratedPrograms)) {
+        cloudKnownMeaningfulByUid.set(userId, true);
+      }
+
       return {
-        programs: loadedPrograms,
-        preferences: data.preferences || null,
-        pomodoroLogs: data.pomodoroLogs || [],
-        blockedEvents: data.blockedEvents || [],
+        exists: true,
+        chunkAssemblyFailed,
+        state: {
+          programs: migratedPrograms,
+          preferences: data.preferences ? migratePreferencesSchema(data.preferences) : null,
+          pomodoroLogs: Array.isArray(data.pomodoroLogs) ? data.pomodoroLogs : [],
+          blockedEvents: Array.isArray(data.blockedEvents) ? data.blockedEvents : [],
+        },
       };
     }
-    return null;
+    return { exists: false, state: null };
   } catch (error) {
     if (isQuotaExhaustedError(error)) {
       markFirestoreQuotaExhausted();
-      return null;
+      return { exists: false, state: null, error: true, quotaExhausted: true };
     }
-    handleFirestoreError(error, OperationType.GET, path);
-    return null;
+    try {
+      handleFirestoreError(error, OperationType.GET, path);
+    } catch {
+      // Preserve error signal instead of failing open as missing user
+    }
+    return { exists: false, state: null, error: true };
   }
 }
 
@@ -358,16 +392,32 @@ async function writeProgramsChunks(
   return chunks.length;
 }
 
-export async function saveUserStudyData(userId: string, state: UserCloudState): Promise<void> {
+export async function saveUserStudyData(
+  userId: string,
+  state: UserCloudState,
+  options?: { allowBlankOverwrite?: boolean }
+): Promise<void> {
   if (isFirestoreQuotaExhausted()) {
     return;
+  }
+
+  const rawPrograms = Array.isArray(state.programs) ? state.programs : [];
+  if (
+    !options?.allowBlankOverwrite &&
+    cloudKnownMeaningfulByUid.get(userId) &&
+    !hasMeaningfulUserPrograms(rawPrograms)
+  ) {
+    console.warn('Skipped Firestore write: prevented blank template from overwriting existing user programs.');
+    return;
+  }
+  if (hasMeaningfulUserPrograms(rawPrograms)) {
+    cloudKnownMeaningfulByUid.set(userId, true);
   }
 
   const path = `users/${userId}/studyData/main`;
   const docRef = doc(db, 'users', userId, 'studyData', 'main');
   const nowIso = new Date().toISOString();
 
-  const rawPrograms = Array.isArray(state.programs) ? state.programs : [];
   const tier1Programs = sanitizeForFirestore(compactProgramsForLocalStorage(rawPrograms, 1));
   const safePreferences = sanitizeForFirestore(state.preferences || null);
   const safePomodoroLogs = sanitizeForFirestore(

@@ -89,6 +89,18 @@ export const HabitsAndMoodTrackerBar: React.FC<HabitsAndMoodTrackerBarProps> = (
   const [moodEntries, setMoodEntries] = useState<MoodEntry[]>(loadMoods);
 
   useEffect(() => {
+    if (Array.isArray(preferences.habits) && preferences.habits.length > 0) {
+      setHabits((prev) => (prev === preferences.habits ? prev : preferences.habits!));
+    }
+  }, [preferences.habits]);
+
+  useEffect(() => {
+    if (Array.isArray(preferences.moodEntries) && preferences.moodEntries.length > 0) {
+      setMoodEntries((prev) => (prev === preferences.moodEntries ? prev : preferences.moodEntries!));
+    }
+  }, [preferences.moodEntries]);
+
+  useEffect(() => {
     const syncH = () => setHabits(loadHabits());
     const syncM = () => setMoodEntries(loadMoods());
     window.addEventListener('studyflow-habits-updated', syncH);

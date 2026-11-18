@@ -24,8 +24,21 @@ import {
   Info,
   ArrowUpRight,
 } from 'lucide-react';
-import { Subject, Exam, ExamType, Task, TaskPriority, TaskType } from '../types';
-import { calculateSubjectGradeSummary } from '../utils/gradeCalculations';
+import {
+  Subject,
+  Exam,
+  ExamType,
+  Task,
+  TaskPriority,
+  TaskType,
+  AcademicTerm,
+} from '../types';
+import {
+  calculateSubjectGradeSummary,
+  calculateCourseGradeSummary,
+  ACADEMIC_TERM_OPTIONS,
+  getAcademicTermLabel,
+} from '../utils/gradeCalculations';
 
 interface ExamsManagerModalProps {
   isOpen: boolean;
@@ -63,6 +76,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>(
     initialSubjectId || 'all'
   );
+  const [selectedTermFilter, setSelectedTermFilter] = useState<AcademicTerm | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'completed'>('all');
   const [deleteConfirmKey, setDeleteConfirmKey] = useState<string | null>(null);
@@ -86,6 +100,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
   );
   const [examTitle, setExamTitle] = useState<string>('');
   const [examConvocatoria, setExamConvocatoria] = useState<string>('Convocatoria Ordinaria (Mayo/Junio)');
+  const [examAcademicTerm, setExamAcademicTerm] = useState<AcademicTerm | ''>('');
   const [examDate, setExamDate] = useState<string>('');
   const [examTime, setExamTime] = useState<string>('');
   const [examLocation, setExamLocation] = useState<string>('');
@@ -105,6 +120,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
   const [taskDueDate, setTaskDueDate] = useState<string>('');
   const [taskPriority, setTaskPriority] = useState<TaskPriority>('media');
   const [taskType, setTaskType] = useState<TaskType>('practica');
+  const [taskAcademicTerm, setTaskAcademicTerm] = useState<AcademicTerm | ''>('');
   const [taskWeight, setTaskWeight] = useState<string>('15');
   const [taskScore, setTaskScore] = useState<string>('');
   const [taskIsGraded, setTaskIsGraded] = useState<boolean>(true);
@@ -148,20 +164,25 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
     return list;
   }, [subjects]);
 
-  // Grade summaries calculated for all subjects
+  // Grade summaries calculated for all subjects (respecting selectedTermFilter)
   const subjectSummaries = useMemo(() => {
     const map = new Map<string, ReturnType<typeof calculateSubjectGradeSummary>>();
     subjects.forEach((sub) => {
-      map.set(sub.id, calculateSubjectGradeSummary(sub));
+      map.set(sub.id, calculateSubjectGradeSummary(sub, 5.0, selectedTermFilter));
     });
     return map;
-  }, [subjects]);
+  }, [subjects, selectedTermFilter]);
+
+  const courseGradeSummary = useMemo(
+    () => calculateCourseGradeSummary(subjects, selectedTermFilter),
+    [subjects, selectedTermFilter]
+  );
 
   // Combined list of items for 'all' tab
   const combinedEvaluations = useMemo(() => {
     type UnifiedItem =
-      | { type: 'exam'; subject: Subject; exam: Exam; date: string; title: string; completed: boolean; weight?: number; grade?: number }
-      | { type: 'task'; subject: Subject; task: Task; date: string; title: string; completed: boolean; weight?: number; grade?: number };
+      | { type: 'exam'; subject: Subject; exam: Exam; date: string; title: string; completed: boolean; weight?: number; grade?: number; academicTerm?: AcademicTerm }
+      | { type: 'task'; subject: Subject; task: Task; date: string; title: string; completed: boolean; weight?: number; grade?: number; academicTerm?: AcademicTerm };
 
     const list: UnifiedItem[] = [];
 
@@ -176,6 +197,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
         completed: grade !== undefined || !!exam.completed,
         weight: exam.weightPercentage,
         grade,
+        academicTerm: exam.academicTerm,
       });
     });
 
@@ -189,6 +211,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
         completed: task.score !== undefined || !!task.completed,
         weight: task.weightPercentage,
         grade: task.score,
+        academicTerm: task.academicTerm,
       });
     });
 
@@ -202,6 +225,9 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
       if (selectedSubjectFilter !== 'all' && item.subject.id !== selectedSubjectFilter) {
         return false;
       }
+      if (selectedTermFilter !== 'all' && item.academicTerm !== selectedTermFilter) {
+        return false;
+      }
       if (activeTab === 'exams' && item.type !== 'exam') return false;
       if (activeTab === 'tasks' && item.type !== 'task') return false;
       if (filterStatus === 'pending' && item.completed) return false;
@@ -212,6 +238,9 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
         const matchesTitle = item.title.toLowerCase().includes(q);
         const matchesSub = item.subject.name.toLowerCase().includes(q);
         const matchesDate = (item.date || '').toLowerCase().includes(q);
+        const matchesTerm = item.academicTerm
+          ? getAcademicTermLabel(item.academicTerm).toLowerCase().includes(q)
+          : false;
         let matchesExtra = false;
         if (item.type === 'exam') {
           matchesExtra =
@@ -221,13 +250,13 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
         } else {
           matchesExtra = (item.task.notes || '').toLowerCase().includes(q) || (item.task.subtopic || '').toLowerCase().includes(q);
         }
-        if (!matchesTitle && !matchesSub && !matchesDate && !matchesExtra) {
+        if (!matchesTitle && !matchesSub && !matchesDate && !matchesTerm && !matchesExtra) {
           return false;
         }
       }
       return true;
     });
-  }, [combinedEvaluations, selectedSubjectFilter, activeTab, filterStatus, searchQuery]);
+  }, [combinedEvaluations, selectedSubjectFilter, selectedTermFilter, activeTab, filterStatus, searchQuery]);
 
   if (!isOpen) return null;
 
@@ -249,6 +278,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
     setExamSubjectId(targetSubId);
     setExamTitle('');
     setExamConvocatoria('Convocatoria Ordinaria (Mayo/Junio)');
+    setExamAcademicTerm(selectedTermFilter !== 'all' ? selectedTermFilter : '');
     setExamDate(new Date().toISOString().split('T')[0]);
     setExamTime('');
     setExamLocation('');
@@ -273,6 +303,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
     setExamSubjectId(subjectId);
     setExamTitle(ex.title);
     setExamConvocatoria(ex.convocatoria || 'Convocatoria Ordinaria');
+    setExamAcademicTerm(ex.academicTerm || '');
     setExamDate(ex.date);
     setExamTime(ex.time || '');
     setExamLocation(ex.location || '');
@@ -307,6 +338,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
     setTaskDueDate(new Date().toISOString().split('T')[0]);
     setTaskPriority('media');
     setTaskType('practica');
+    setTaskAcademicTerm(selectedTermFilter !== 'all' ? selectedTermFilter : '');
     setTaskWeight('15');
     setTaskScore('');
     setTaskIsGraded(true);
@@ -328,6 +360,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
     setTaskDueDate(tsk.dueDate);
     setTaskPriority(tsk.priority || 'media');
     setTaskType(tsk.type || 'practica');
+    setTaskAcademicTerm(tsk.academicTerm || '');
     setTaskWeight(tsk.weightPercentage !== undefined ? String(tsk.weightPercentage) : '');
     setTaskScore(tsk.score !== undefined ? String(tsk.score) : '');
     setTaskIsGraded(tsk.isGraded ?? (tsk.score !== undefined || tsk.weightPercentage !== undefined));
@@ -366,6 +399,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
       id: editingExam.exam.id || `exam-${Date.now()}`,
       title: examTitle.trim(),
       convocatoria: examConvocatoria.trim() || undefined,
+      academicTerm: examAcademicTerm || undefined,
       date: examDate,
       time: examTime.trim() || undefined,
       location: examLocation.trim() || undefined,
@@ -454,6 +488,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
       maxScore: 10,
       weightPercentage: weightNum,
       isGraded: isGradedBool,
+      academicTerm: taskAcademicTerm || undefined,
     };
 
     if (editingTask.isNew) {
@@ -747,34 +782,57 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                 />
               </div>
 
-              <div className="sm:col-span-2">
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Convocatoria / Llamamiento
-                </label>
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    value={examConvocatoria}
-                    onChange={(e) => setExamConvocatoria(e.target.value)}
-                    placeholder="Convocatoria Ordinaria, Extraordinaria, Recuperación..."
-                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                  <div className="flex flex-wrap gap-1.5">
-                    {CONVOCATORIA_PRESETS.map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() => setExamConvocatoria(preset)}
-                        className={`px-2 py-0.5 rounded-lg text-[10px] font-medium transition-colors cursor-pointer ${
-                          examConvocatoria === preset
-                            ? 'bg-purple-600 text-white'
-                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-purple-100/60'
-                        }`}
-                      >
-                        {preset}
-                      </button>
-                    ))}
+              <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Convocatoria / Llamamiento
+                  </label>
+                  <div className="space-y-2">
+                    <input
+                      type="text"
+                      value={examConvocatoria}
+                      onChange={(e) => setExamConvocatoria(e.target.value)}
+                      placeholder="Convocatoria Ordinaria, Extraordinaria, Recuperación..."
+                      className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                    <div className="flex flex-wrap gap-1.5">
+                      {CONVOCATORIA_PRESETS.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => setExamConvocatoria(preset)}
+                          className={`px-2 py-0.5 rounded-lg text-[10px] font-medium transition-colors cursor-pointer ${
+                            examConvocatoria === preset
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-purple-100/60'
+                          }`}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Trimestre / Cuatrimestre (opcional)
+                  </label>
+                  <select
+                    value={examAcademicTerm}
+                    onChange={(e) => setExamAcademicTerm(e.target.value as AcademicTerm | '')}
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-slate-800 dark:text-slate-100 font-semibold focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  >
+                    <option value="">— Sin periodo específico —</option>
+                    {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Permite calcular la nota media por trimestre o cuatrimestre.
+                  </span>
                 </div>
               </div>
 
@@ -1073,7 +1131,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
                     Tipo de Tarea
@@ -1088,6 +1146,23 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                     <option value="proyecto">Proyecto</option>
                     <option value="lectura">Lectura</option>
                     <option value="repaso">Repaso</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Trimestre / Cuatrimestre
+                  </label>
+                  <select
+                    value={taskAcademicTerm}
+                    onChange={(e) => setTaskAcademicTerm(e.target.value as AcademicTerm | '')}
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-slate-800 dark:text-slate-100 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">— Sin periodo —</option>
+                    {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -1259,36 +1334,101 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
         {/* Dedicated Calculator Tab View */}
         {!editingExam && !editingTask && activeTab === 'grade_calc' && (
           <div className="p-6 overflow-y-auto space-y-6">
-            <div className="bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-start gap-3">
-                <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
-                  <Calculator className="w-5 h-5" />
+            {/* Course-Wide Average Card + Period Selector */}
+            <div className="bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-4 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0">
+                    <Calculator className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-emerald-950 dark:text-emerald-200">
+                      Nota Media del Curso y Cálculo Ponderado
+                    </h4>
+                    <p className="text-xs text-emerald-800/80 dark:text-emerald-300/80 mt-0.5">
+                      Combina exámenes y tareas evaluables por trimestre, cuatrimestre o curso completo.
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-950 dark:text-emerald-200">
-                    Cálculo Automático de Nota Final Ponderada
-                  </h4>
-                  <p className="text-xs text-emerald-800/80 dark:text-emerald-300/80 mt-0.5">
-                    Se calcula combinando los exámenes y tareas evaluables según su ponderación asignada:
-                    <span className="font-mono font-bold ml-1">Nota Ponderada = Σ (Nota × Peso) / Σ Peso</span>.
-                  </p>
+
+                {/* Term + Subject filters */}
+                <div className="flex items-center gap-2 flex-wrap shrink-0">
+                  <select
+                    value={selectedTermFilter}
+                    onChange={(e) => setSelectedTermFilter(e.target.value as AcademicTerm | 'all')}
+                    className="bg-white dark:bg-slate-800 border border-emerald-300 dark:border-emerald-700 rounded-xl px-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 font-bold focus:outline-none"
+                  >
+                    <option value="all">Todo el curso (Global)</option>
+                    {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={selectedSubjectFilter}
+                    onChange={(e) => setSelectedSubjectFilter(e.target.value)}
+                    className="bg-white dark:bg-slate-800 border border-emerald-300 dark:border-emerald-700 rounded-xl px-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 font-bold focus:outline-none"
+                  >
+                    <option value="all">Todas las Asignaturas ({subjects.length})</option>
+                    {subjects.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              {/* Subject filter for calculator */}
-              <div className="shrink-0">
-                <select
-                  value={selectedSubjectFilter}
-                  onChange={(e) => setSelectedSubjectFilter(e.target.value)}
-                  className="bg-white dark:bg-slate-800 border border-emerald-300 dark:border-emerald-700 rounded-xl px-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 font-bold focus:outline-none"
-                >
-                  <option value="all">Todas las Asignaturas ({subjects.length})</option>
-                  {subjects.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+              {/* Course Average Summary Row */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-emerald-200/70 dark:border-emerald-800/70">
+                <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200/80 dark:border-emerald-800">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                    {selectedTermFilter === 'all'
+                      ? 'Nota Media del Curso'
+                      : `Media · ${getAcademicTermLabel(selectedTermFilter)}`}
+                  </span>
+                  <div className="text-2xl font-black font-mono-numbers text-emerald-700 dark:text-emerald-400 mt-0.5">
+                    {courseGradeSummary.effectiveCourseAverage !== null
+                      ? `${courseGradeSummary.effectiveCourseAverage.toFixed(2)} / 10`
+                      : 'Sin notas'}
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono-numbers">
+                    {courseGradeSummary.creditsWeightedCourseAverage !== null &&
+                    courseGradeSummary.simpleCourseAverage !== null
+                      ? `Ponderada ECTS · Simple: ${courseGradeSummary.simpleCourseAverage.toFixed(2)}/10`
+                      : `${courseGradeSummary.gradedSubjectsCount} de ${courseGradeSummary.totalSubjects} asignaturas evaluadas`}
+                  </span>
+                </div>
+
+                <div className="sm:col-span-2 flex flex-wrap gap-2 items-center">
+                  {courseGradeSummary.termBreakdowns.length > 0 ? (
+                    courseGradeSummary.termBreakdowns.map((tc) => (
+                      <button
+                        key={tc.term}
+                        type="button"
+                        onClick={() =>
+                          setSelectedTermFilter(selectedTermFilter === tc.term ? 'all' : tc.term)
+                        }
+                        className={`px-3 py-2 rounded-xl border text-left transition-all cursor-pointer ${
+                          selectedTermFilter === tc.term
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                            : 'bg-white dark:bg-slate-900 border-emerald-200 dark:border-emerald-800 text-slate-800 dark:text-slate-100 hover:border-emerald-400'
+                        }`}
+                      >
+                        <div className="text-[10px] font-bold opacity-80">{tc.label}</div>
+                        <div className="text-sm font-black font-mono-numbers">
+                          {tc.averageGrade !== null ? `${tc.averageGrade.toFixed(2)} / 10` : 'Pendiente'}
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <span className="text-xs text-emerald-800/70 dark:text-emerald-300/70">
+                      Asigna un trimestre o cuatrimestre al crear/editar exámenes o tareas para ver su media desglosada aquí.
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1297,7 +1437,9 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
               {subjects
                 .filter((s) => selectedSubjectFilter === 'all' || s.id === selectedSubjectFilter)
                 .map((sub) => {
-                  const summary = subjectSummaries.get(sub.id) || calculateSubjectGradeSummary(sub);
+                  const summary =
+                    subjectSummaries.get(sub.id) ||
+                    calculateSubjectGradeSummary(sub, 5.0, selectedTermFilter);
 
                   return (
                     <div
@@ -1412,7 +1554,7 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                               <tr className="border-b border-slate-100 dark:border-slate-800 text-slate-400 font-medium">
                                 <th className="pb-2">Elemento</th>
                                 <th className="pb-2">Tipo</th>
-                                <th className="pb-2">Convocatoria / Fecha</th>
+                                <th className="pb-2">Periodo / Convocatoria</th>
                                 <th className="pb-2 text-right">Ponderación</th>
                                 <th className="pb-2 text-right">Nota Obtenida</th>
                                 <th className="pb-2 text-right">Aportación a Final</th>
@@ -1437,6 +1579,11 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                                     </span>
                                   </td>
                                   <td className="py-2.5 font-sans text-slate-500 text-[11px]">
+                                    {item.academicTerm && (
+                                      <span className="mr-1.5 px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold text-[10px]">
+                                        {getAcademicTermLabel(item.academicTerm)}
+                                      </span>
+                                    )}
                                     {item.convocatoriaOrDueDate || '—'}
                                   </td>
                                   <td className="py-2.5 text-right font-bold text-slate-700 dark:text-slate-300">
@@ -1588,6 +1735,20 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                     </option>
                   ))}
                 </select>
+
+                <select
+                  value={selectedTermFilter}
+                  onChange={(e) => setSelectedTermFilter(e.target.value as AcademicTerm | 'all')}
+                  aria-label="Filtrar evaluaciones por trimestre o cuatrimestre"
+                  className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-1.5 text-slate-800 dark:text-slate-200 font-semibold focus:outline-none"
+                >
+                  <option value="all">Todos los periodos</option>
+                  {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div className="flex items-center gap-1 bg-white dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700 shrink-0">
@@ -1681,6 +1842,12 @@ export const ExamsManagerModal: React.FC<ExamsManagerModalProps> = ({
                           >
                             {isExam ? 'Examen' : 'Tarea'}
                           </span>
+
+                          {item.academicTerm && (
+                            <span className="px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800 text-[10px] font-bold">
+                              {getAcademicTermLabel(item.academicTerm)}
+                            </span>
+                          )}
 
                           {isExam && item.exam.convocatoria && (
                             <span className="px-2 py-0.5 rounded-md bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 text-[10px] font-semibold">

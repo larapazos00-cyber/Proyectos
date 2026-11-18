@@ -173,9 +173,7 @@ export default function App() {
     }
     setPreferences((prev) => {
       if (prev.hasSeenOnboarding) return prev;
-      const updated = { ...prev, hasSeenOnboarding: true };
-      storageService.savePreferences(updated);
-      return updated;
+      return { ...prev, hasSeenOnboarding: true };
     });
   };
 
@@ -270,99 +268,165 @@ export default function App() {
     return { filesCount, topicsCount };
   };
 
-  // Merge two program lists preserving any newly uploaded attachedFiles or topics from local state
+  // Merge two program lists with a true bidirectional ID-based union so neither local nor cloud entries are ever dropped
   const mergeProgramsPreservingFiles = (
     incomingPrograms: StudyProgram[],
     localPrograms: StudyProgram[]
   ): StudyProgram[] => {
+    const isMeaningful = (progs?: StudyProgram[]) => {
+      if (!Array.isArray(progs) || progs.length === 0) return false;
+      if (progs.length > 1) return true;
+      const p = progs[0];
+      if (!p) return false;
+      if (p.id !== 'prog-custom-1') return true;
+      if (p.name && p.name !== 'Mi Plan de Estudios') return true;
+      if ((p.years || []).length > 1) return true;
+      return (p.years || []).some((y) => (y.subjects || []).length > 0);
+    };
+
+    const incMeaningful = isMeaningful(incomingPrograms);
+    const locMeaningful = isMeaningful(localPrograms);
+    if (!incMeaningful && locMeaningful) return localPrograms;
+    if (!locMeaningful && incMeaningful) return incomingPrograms;
     if (!incomingPrograms || incomingPrograms.length === 0) return localPrograms;
     if (!localPrograms || localPrograms.length === 0) return incomingPrograms;
 
-    return incomingPrograms.map((incProg) => {
-      const locProg = localPrograms.find((p) => p.id === incProg.id);
-      if (!locProg) return incProg;
+    const unionById = <T extends { id?: string }>(incArr?: T[], locArr?: T[]): T[] => {
+      const map = new Map<string, T>();
+      for (const item of incArr || []) {
+        if (item?.id) map.set(item.id, item);
+      }
+      for (const item of locArr || []) {
+        if (item?.id) {
+          const existing = map.get(item.id);
+          map.set(item.id, existing ? { ...existing, ...item } : item);
+        }
+      }
+      return Array.from(map.values());
+    };
+
+    const mergeTopicPair = (incTop: any, locTop: any) => {
+      const incFiles = incTop.attachedFiles || [];
+      const locFiles = locTop.attachedFiles || [];
+      const fileMap = new Map<string, any>();
+      for (const f of incFiles) if (f?.id) fileMap.set(f.id, f);
+      for (const f of locFiles) {
+        if (!f?.id) continue;
+        const existing = fileMap.get(f.id);
+        if (!existing || (f.content?.length || 0) >= (existing.content?.length || 0)) {
+          fileMap.set(f.id, { ...existing, ...f });
+        }
+      }
+      const combinedFiles = Array.from(fileMap.values());
+      const useLocalNotes = (locTop.notes?.length || 0) > (incTop.notes?.length || 0);
       return {
-        ...incProg,
-        years: (incProg.years || []).map((incYear) => {
-          const locYear = (locProg.years || []).find((y) => y.id === incYear.id);
-          if (!locYear) return incYear;
-          return {
-            ...incYear,
-            subjects: (incYear.subjects || []).map((incSub) => {
-              const locSub = (locYear.subjects || []).find((s) => s.id === incSub.id);
-              if (!locSub) return incSub;
-
-              // Merge topics: keep all incoming topics, enriched with any richer attachedFiles from local, plus any local-only topics
-              const incTopicIds = new Set((incSub.topics || []).map((t) => t.id));
-              const localOnlyTopics = (locSub.topics || []).filter(
-                (t) => !incTopicIds.has(t.id)
-              );
-
-              const mergedTopics = [
-                ...(incSub.topics || []).map((incTop) => {
-                  const locTop = (locSub.topics || []).find((t) => t.id === incTop.id);
-                  if (!locTop) return incTop;
-                  const incFiles = incTop.attachedFiles || [];
-                  const locFiles = locTop.attachedFiles || [];
-                  const fileMap = new Map<string, any>();
-                  for (const f of incFiles) fileMap.set(f.id, f);
-                  for (const f of locFiles) {
-                    const existing = fileMap.get(f.id);
-                    if (
-                      !existing ||
-                      (f.content?.length || 0) >= (existing.content?.length || 0)
-                    ) {
-                      fileMap.set(f.id, { ...existing, ...f });
-                    }
-                  }
-                  const combinedFiles = Array.from(fileMap.values());
-                  const useLocalNotes =
-                    (locTop.notes?.length || 0) > (incTop.notes?.length || 0);
-                  return {
-                    ...incTop,
-                    ...locTop,
-                    notes: useLocalNotes ? locTop.notes : incTop.notes,
-                    generalNotes: useLocalNotes
-                      ? locTop.generalNotes || locTop.notes
-                      : incTop.generalNotes || incTop.notes,
-                    richGeneralNotes:
-                      (locTop.richGeneralNotes?.length || 0) >=
-                      (incTop.richGeneralNotes?.length || 0)
-                        ? locTop.richGeneralNotes
-                        : incTop.richGeneralNotes,
-                    attachedFiles: combinedFiles,
-                    pageCount: Math.max(incTop.pageCount || 0, locTop.pageCount || 0),
-                    mindMap:
-                      (locTop.mindMap?.length || 0) >= (incTop.mindMap?.length || 0)
-                        ? locTop.mindMap || incTop.mindMap
-                        : incTop.mindMap || locTop.mindMap,
-                    mindMapSummary: locTop.mindMapSummary || incTop.mindMapSummary,
-                  };
-                }),
-                ...localOnlyTopics,
-              ];
-
-              // Also merge cornellNotes by ID
-              const noteMap = new Map<string, any>();
-              for (const n of incSub.cornellNotes || []) noteMap.set(n.id, n);
-              for (const n of locSub.cornellNotes || []) {
-                const existing = noteMap.get(n.id);
-                if (!existing || (n.notes?.length || 0) >= (existing.notes?.length || 0)) {
-                  noteMap.set(n.id, { ...existing, ...n });
-                }
-              }
-
-              return {
-                ...incSub,
-                ...locSub,
-                topics: mergedTopics,
-                cornellNotes: Array.from(noteMap.values()),
-              };
-            }),
-          };
-        }),
+        ...incTop,
+        ...locTop,
+        notes: useLocalNotes ? locTop.notes : incTop.notes,
+        generalNotes: useLocalNotes
+          ? locTop.generalNotes || locTop.notes
+          : incTop.generalNotes || incTop.notes,
+        richGeneralNotes:
+          (locTop.richGeneralNotes?.length || 0) >= (incTop.richGeneralNotes?.length || 0)
+            ? locTop.richGeneralNotes
+            : incTop.richGeneralNotes,
+        attachedFiles: combinedFiles,
+        pageCount: Math.max(incTop.pageCount || 0, locTop.pageCount || 0),
+        pagesRead: Math.max(incTop.pagesRead || 0, locTop.pagesRead || 0),
+        vueltasCount: Math.max(incTop.vueltasCount || 0, locTop.vueltasCount || 0),
+        mindMap:
+          (locTop.mindMap?.length || 0) >= (incTop.mindMap?.length || 0)
+            ? locTop.mindMap || incTop.mindMap
+            : incTop.mindMap || locTop.mindMap,
+        mindMapSummary: locTop.mindMapSummary || incTop.mindMapSummary,
       };
-    });
+    };
+
+    const mergeSubjectPair = (incSub: Subject, locSub: Subject): Subject => {
+      const topicMap = new Map<string, any>();
+      for (const t of incSub.topics || []) {
+        if (t?.id) topicMap.set(t.id, t);
+      }
+      for (const t of locSub.topics || []) {
+        if (!t?.id) continue;
+        const existing = topicMap.get(t.id);
+        topicMap.set(t.id, existing ? mergeTopicPair(existing, t) : t);
+      }
+
+      const noteMap = new Map<string, any>();
+      for (const n of incSub.cornellNotes || []) if (n?.id) noteMap.set(n.id, n);
+      for (const n of locSub.cornellNotes || []) {
+        if (!n?.id) continue;
+        const existing = noteMap.get(n.id);
+        if (!existing || (n.notes?.length || 0) >= (existing.notes?.length || 0)) {
+          noteMap.set(n.id, { ...existing, ...n });
+        }
+      }
+
+      return {
+        ...incSub,
+        ...locSub,
+        credits: locSub.credits ?? incSub.credits,
+        allocatedHours: locSub.allocatedHours ?? incSub.allocatedHours,
+        topics: Array.from(topicMap.values()),
+        tasks: unionById(incSub.tasks, locSub.tasks),
+        exams: unionById(incSub.exams, locSub.exams),
+        projects: unionById(incSub.projects, locSub.projects),
+        smartGoals: unionById(incSub.smartGoals, locSub.smartGoals),
+        cornellNotes: Array.from(noteMap.values()),
+        flashcards: unionById(incSub.flashcards, locSub.flashcards),
+        quizzes: unionById(incSub.quizzes, locSub.quizzes),
+        feynmanSessions: unionById(incSub.feynmanSessions, locSub.feynmanSessions),
+        mindmaps: unionById(incSub.mindmaps, locSub.mindmaps),
+        errorLogs: unionById(incSub.errorLogs, locSub.errorLogs),
+      };
+    };
+
+    const mergeYearPair = (incYear: AcademicYear, locYear: AcademicYear): AcademicYear => {
+      const subMap = new Map<string, Subject>();
+      for (const s of incYear.subjects || []) {
+        if (s?.id) subMap.set(s.id, s);
+      }
+      for (const s of locYear.subjects || []) {
+        if (!s?.id) continue;
+        const existing = subMap.get(s.id);
+        subMap.set(s.id, existing ? mergeSubjectPair(existing, s) : s);
+      }
+      return {
+        ...incYear,
+        ...locYear,
+        subjects: Array.from(subMap.values()),
+      };
+    };
+
+    const progMap = new Map<string, StudyProgram>();
+    for (const incProg of incomingPrograms) {
+      if (incProg?.id) progMap.set(incProg.id, incProg);
+    }
+    for (const locProg of localPrograms) {
+      if (!locProg?.id) continue;
+      const incProg = progMap.get(locProg.id);
+      if (!incProg) {
+        progMap.set(locProg.id, locProg);
+      } else {
+        const yearMap = new Map<string, AcademicYear>();
+        for (const y of incProg.years || []) {
+          if (y?.id) yearMap.set(y.id, y);
+        }
+        for (const y of locProg.years || []) {
+          if (!y?.id) continue;
+          const existingY = yearMap.get(y.id);
+          yearMap.set(y.id, existingY ? mergeYearPair(existingY, y) : y);
+        }
+        progMap.set(locProg.id, {
+          ...incProg,
+          ...locProg,
+          years: Array.from(yearMap.values()),
+        });
+      }
+    }
+
+    return Array.from(progMap.values());
   };
 
   const hasHydratedIdbRef = React.useRef(false);
@@ -444,19 +508,68 @@ export default function App() {
     const mergedMoods = Array.from(moodMap.values()).sort((a, b) =>
       b.date.localeCompare(a.date)
     );
+
+    // Union habits across incoming, local, and localStorage so hábitos never reset after updates
+    let storedLocalHabits: any[] = [];
     try {
-      if (mergedMoods.length > 0) {
-        localStorage.setItem('studyflow_user_moods_v1', JSON.stringify(mergedMoods));
+      const rawHabits = localStorage.getItem('studyflow_user_habits_v1');
+      if (rawHabits) {
+        const parsedH = JSON.parse(rawHabits);
+        if (Array.isArray(parsedH)) storedLocalHabits = parsedH;
       }
     } catch {
       // ignore
     }
+    const habitMap = new Map<string, any>();
+    for (const h of [
+      ...(Array.isArray(incoming.habits) ? incoming.habits : []),
+      ...(Array.isArray(local.habits) ? local.habits : []),
+      ...storedLocalHabits,
+    ]) {
+      if (h && h.id) {
+        const existing = habitMap.get(h.id);
+        if (!existing) {
+          habitMap.set(h.id, h);
+        } else {
+          const dates = Array.from(
+            new Set([...(existing.completedDates || []), ...(h.completedDates || [])])
+          );
+          habitMap.set(h.id, { ...existing, ...h, completedDates: dates });
+        }
+      }
+    }
+    const mergedHabits = Array.from(habitMap.values());
+
+    // Determine whether local scalars are untouched republish defaults vs user-modified
+    const localHasUserMods = storageService.hasPersistedUserPreferences();
+    const incUpdated = incoming.updatedAt || '';
+    const locUpdated = local.updatedAt || '';
+    const preferIncomingScalars =
+      !localHasUserMods || Boolean(incUpdated && (!locUpdated || incUpdated > locUpdated));
+
+    const scalarBase = preferIncomingScalars
+      ? { ...local, ...incoming }
+      : { ...incoming, ...local };
+
+    const rulesMap = new Map<string, any>();
+    for (const r of incoming.contextualNotificationRules || []) {
+      if (r?.id) rulesMap.set(r.id, r);
+    }
+    for (const r of local.contextualNotificationRules || []) {
+      if (r?.id) rulesMap.set(r.id, r);
+    }
 
     return {
-      ...incoming,
-      ...local,
+      ...scalarBase,
       weeklyFixedObligations: Array.from(obMap.values()),
       moodEntries: mergedMoods,
+      habits: mergedHabits.length > 0 ? mergedHabits : scalarBase.habits,
+      contextualNotificationRules:
+        rulesMap.size > 0 ? Array.from(rulesMap.values()) : scalarBase.contextualNotificationRules,
+      subjectWeeklyGoalHours: {
+        ...(incoming.subjectWeeklyGoalHours || {}),
+        ...(local.subjectWeeklyGoalHours || {}),
+      },
     };
   };
 
@@ -538,96 +651,107 @@ export default function App() {
     };
   }, []);
 
-  // Initialize Firebase Auth listener and Cloud sync
+  const cloudSyncReadyUidRef = React.useRef<string | null>(null);
+  const cloudSyncedUidForAutosaveRef = React.useRef<string | null>(null);
+
+  // Initialize Firebase Auth listener and Cloud sync with strict anti-overwrite gating
   useEffect(() => {
     testConnection();
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
-      if (user) {
-        setIsSyncingCloud(true);
-        try {
-          const cloudData = await fetchUserStudyData(user.uid);
-          if (cloudData && cloudData.programs && cloudData.programs.length > 0) {
-            setPrograms((currentLocal) =>
-              mergeProgramsPreservingFiles(cloudData.programs, currentLocal)
+      if (!user) {
+        cloudSyncReadyUidRef.current = null;
+        cloudSyncedUidForAutosaveRef.current = null;
+        return;
+      }
+
+      cloudSyncReadyUidRef.current = null;
+      setIsSyncingCloud(true);
+      try {
+        const cloudResult = await fetchUserStudyData(user.uid);
+        if (cloudResult.error || cloudResult.quotaExhausted || cloudResult.chunkAssemblyFailed) {
+          // CRITICAL: Keep cloudSyncReadyUidRef null so transient errors / missing chunks NEVER overwrite Firestore
+          console.warn(
+            'Cloud study data fetch incomplete; preserving local storage without overwriting cloud.'
+          );
+          return;
+        }
+
+        const cloudData = cloudResult.state;
+        if (cloudResult.exists && cloudData) {
+          setPrograms((currentLocal) =>
+            mergeProgramsPreservingFiles(cloudData.programs || [], currentLocal)
+          );
+
+          if (cloudData.preferences) {
+            setPreferences((currentLocalPrefs) =>
+              mergePreferencesPreservingObligations(cloudData.preferences, currentLocalPrefs)
             );
-            const cloudProgIds = cloudData.programs.map((p: StudyProgram) => p.id);
-            const cloudYearIds = cloudData.programs.flatMap((p: StudyProgram) =>
-              p.years.map((y) => y.id)
-            );
-            setSelectedProgramIds((prev) => {
-              const valid = prev.filter((id) => cloudProgIds.includes(id));
-              return valid.length > 0 ? valid : cloudProgIds;
-            });
-            setSelectedYearIds((prev) => {
-              const valid = prev.filter((id) => cloudYearIds.includes(id));
-              return valid.length > 0 ? valid : cloudYearIds;
-            });
-            if (cloudData.preferences) {
-              setPreferences((currentLocalPrefs) =>
-                mergePreferencesPreservingObligations(cloudData.preferences, currentLocalPrefs)
-              );
-            }
-            if (cloudData.pomodoroLogs && Array.isArray(cloudData.pomodoroLogs) && cloudData.pomodoroLogs.length > 0) {
-              setPomodoroLogs((currentLogs) => {
-                const byId = new Map<string, PomodoroLog>();
-                for (const l of cloudData.pomodoroLogs) if (l?.id) byId.set(l.id, l);
-                for (const l of currentLogs) if (l?.id) byId.set(l.id, l);
-                return Array.from(byId.values());
-              });
-            }
-            if (cloudData.blockedEvents) {
-              setBlockedEvents((currentLocalBlocked) =>
-                mergeBlockedEventsPreservingPlans(cloudData.blockedEvents, currentLocalBlocked)
-              );
-            }
-            // Existing cloud account already has data: ensure onboarding never auto-triggers
-            setIsOnboardingTourOpen(false);
-            try {
-              localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
-              localStorage.setItem(`studyflow_onboarding_first_register_done_${user.uid}`, 'true');
-            } catch {
-              // ignore
-            }
-          } else {
-            // First time registration / brand-new cloud account with no prior cloud study data:
-            // Show the interactive tutorial ONLY if this user has never seen it before, then immediately persist hasSeenOnboarding: true
-            let alreadySeenForUser = Boolean(cloudData?.preferences?.hasSeenOnboarding);
-            try {
-              if (
-                localStorage.getItem(`studyflow_onboarding_first_register_done_${user.uid}`) === 'true'
-              ) {
-                alreadySeenForUser = true;
-              }
-            } catch {
-              // ignore
-            }
+          }
 
-            const updatedFirstTimePrefs: StudyPreferences = {
-              ...preferences,
-              hasSeenOnboarding: true,
-            };
-
-            if (!alreadySeenForUser) {
-              resetOnboardingProgressToStart();
-              markOnboardingSeenPermanently(user.uid);
-              setIsOnboardingTourOpen(true);
-            } else {
-              markOnboardingSeenPermanently(user.uid);
-            }
-
-            await saveUserStudyData(user.uid, {
-              programs,
-              preferences: updatedFirstTimePrefs,
-              pomodoroLogs,
-              blockedEvents,
+          if (Array.isArray(cloudData.pomodoroLogs) && cloudData.pomodoroLogs.length > 0) {
+            setPomodoroLogs((currentLogs) => {
+              const byId = new Map<string, PomodoroLog>();
+              for (const l of cloudData.pomodoroLogs) if (l?.id) byId.set(l.id, l);
+              for (const l of currentLogs) if (l?.id) byId.set(l.id, l);
+              return Array.from(byId.values());
             });
           }
-        } catch (e) {
-          console.warn('Error synchronizing cloud data on sign-in:', e);
-        } finally {
-          setIsSyncingCloud(false);
+
+          if (Array.isArray(cloudData.blockedEvents) && cloudData.blockedEvents.length > 0) {
+            setBlockedEvents((currentLocalBlocked) =>
+              mergeBlockedEventsPreservingPlans(cloudData.blockedEvents, currentLocalBlocked)
+            );
+          }
+
+          // Existing cloud account already has data: ensure onboarding never auto-triggers
+          setIsOnboardingTourOpen(false);
+          try {
+            localStorage.setItem('studyflow_onboarding_completed_v1', 'true');
+            localStorage.setItem(`studyflow_onboarding_first_register_done_${user.uid}`, 'true');
+          } catch {
+            // ignore
+          }
+          cloudSyncReadyUidRef.current = user.uid;
+        } else {
+          // Brand-new cloud account with confirmed non-existence in Firestore
+          let alreadySeenForUser = false;
+          try {
+            if (
+              localStorage.getItem(`studyflow_onboarding_first_register_done_${user.uid}`) === 'true' ||
+              localStorage.getItem('studyflow_onboarding_completed_v1') === 'true'
+            ) {
+              alreadySeenForUser = true;
+            }
+          } catch {
+            // ignore
+          }
+
+          const updatedFirstTimePrefs: StudyPreferences = {
+            ...preferences,
+            hasSeenOnboarding: true,
+          };
+
+          if (!alreadySeenForUser) {
+            resetOnboardingProgressToStart();
+            markOnboardingSeenPermanently(user.uid);
+            setIsOnboardingTourOpen(true);
+          } else {
+            markOnboardingSeenPermanently(user.uid);
+          }
+
+          await saveUserStudyData(user.uid, {
+            programs,
+            preferences: updatedFirstTimePrefs,
+            pomodoroLogs,
+            blockedEvents,
+          });
+          cloudSyncReadyUidRef.current = user.uid;
         }
+      } catch (e) {
+        console.warn('Error synchronizing cloud data on sign-in:', e);
+      } finally {
+        setIsSyncingCloud(false);
       }
     });
 
@@ -656,6 +780,47 @@ export default function App() {
     }
     storageService.savePreferences(preferences, { skipIndexedDB: false });
   }, [preferences]);
+
+  // Keep local habits/moods caches & sibling widgets synced cleanly after commit (never inside render/updaters)
+  useEffect(() => {
+    try {
+      if (Array.isArray(preferences.habits) && preferences.habits.length > 0) {
+        const nextJson = JSON.stringify(preferences.habits);
+        if (localStorage.getItem('studyflow_user_habits_v1') !== nextJson) {
+          localStorage.setItem('studyflow_user_habits_v1', nextJson);
+          window.dispatchEvent(new CustomEvent('studyflow-habits-updated'));
+        }
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (Array.isArray(preferences.moodEntries) && preferences.moodEntries.length > 0) {
+        const nextMoodJson = JSON.stringify(preferences.moodEntries);
+        if (localStorage.getItem('studyflow_user_moods_v1') !== nextMoodJson) {
+          localStorage.setItem('studyflow_user_moods_v1', nextMoodJson);
+          window.dispatchEvent(new CustomEvent('studyflow-moods-updated'));
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [preferences.habits, preferences.moodEntries]);
+
+  // Ensure selected programs & years remain valid after cloud/IndexedDB merges
+  useEffect(() => {
+    if (programs.length === 0) return;
+    const progIds = programs.map((p) => p.id);
+    const yearIds = programs.flatMap((p) => p.years.map((y) => y.id));
+    setSelectedProgramIds((prev) => {
+      const valid = prev.filter((id) => progIds.includes(id));
+      return valid.length > 0 ? (valid.length === prev.length ? prev : valid) : progIds;
+    });
+    setSelectedYearIds((prev) => {
+      const valid = prev.filter((id) => yearIds.includes(id));
+      return valid.length > 0 ? (valid.length === prev.length ? prev : valid) : yearIds;
+    });
+  }, [programs]);
 
   useEffect(() => {
     if (isInitialBlockedMountRef.current) {
@@ -688,13 +853,12 @@ export default function App() {
     }
   }, [selectedYearIds]);
 
-  const hasInitializedCloudSyncRef = React.useRef(false);
-
-  // Synchronize changes to Firebase Firestore when user is logged in
+  // Synchronize changes to Firebase Firestore only after initial cloud fetch & merge succeeded
   useEffect(() => {
     if (!currentUser) return;
-    if (!hasInitializedCloudSyncRef.current) {
-      hasInitializedCloudSyncRef.current = true;
+    if (cloudSyncReadyUidRef.current !== currentUser.uid) return;
+    if (cloudSyncedUidForAutosaveRef.current !== currentUser.uid) {
+      cloudSyncedUidForAutosaveRef.current = currentUser.uid;
       return;
     }
 
@@ -732,7 +896,7 @@ export default function App() {
   useEffect(() => {
     const handleReconnectRevalidation = async () => {
       try {
-        if (currentUser) {
+        if (currentUser && cloudSyncReadyUidRef.current === currentUser.uid) {
           setIsSyncingCloud(true);
           await saveUserStudyData(currentUser.uid, {
             programs,
@@ -1190,24 +1354,22 @@ export default function App() {
 
   // Gestión de selección de cursos (1 curso exclusivo o varios cursos de uno o varios estudios)
   const handleToggleYearSelection = (yearId: string) => {
-    setSelectedYearIds((prev) => {
-      let nextYears: string[];
-      if (prev.includes(yearId)) {
-        if (prev.length === 1) return prev; // Mantener al menos uno activo
-        nextYears = prev.filter((id) => id !== yearId);
-      } else {
-        nextYears = [...prev, yearId];
-      }
+    let nextYears: string[];
+    if (selectedYearIds.includes(yearId)) {
+      if (selectedYearIds.length === 1) return; // Mantener al menos uno activo
+      nextYears = selectedYearIds.filter((id) => id !== yearId);
+    } else {
+      nextYears = [...selectedYearIds, yearId];
+    }
 
-      // Sincronizar estudios activos en base a los cursos marcados
-      const activeProgIds = programs
-        .filter((p) => p.years.some((y) => nextYears.includes(y.id)))
-        .map((p) => p.id);
-      if (activeProgIds.length > 0) {
-        setSelectedProgramIds(activeProgIds);
-      }
-      return nextYears;
-    });
+    setSelectedYearIds(nextYears);
+    // Sincronizar estudios activos en base a los cursos marcados
+    const activeProgIds = programs
+      .filter((p) => p.years.some((y) => nextYears.includes(y.id)))
+      .map((p) => p.id);
+    if (activeProgIds.length > 0) {
+      setSelectedProgramIds(activeProgIds);
+    }
   };
 
   // Activar o desactivar un estudio completo (añade o quita sus cursos del mix)
@@ -1255,6 +1417,18 @@ export default function App() {
     setSelectedProgramIds([blank[0].id]);
     setSelectedYearIds([blank[0].years[0].id]);
     setSelectedSubjectId(null);
+    if (currentUser && cloudSyncReadyUidRef.current === currentUser.uid) {
+      void saveUserStudyData(
+        currentUser.uid,
+        {
+          programs: blank,
+          preferences,
+          pomodoroLogs,
+          blockedEvents,
+        },
+        { allowBlankOverwrite: true }
+      );
+    }
   };
 
   const handleLoadDemoData = () => {
@@ -1368,7 +1542,7 @@ export default function App() {
       )}
 
       {/* Main Content Viewport */}
-      <main className="flex-1 min-w-0 w-full max-w-6xl overflow-x-hidden mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
+      <main className="flex-1 min-w-0 w-full max-w-[1680px] overflow-x-hidden mx-auto px-3 sm:px-5 lg:px-7 2xl:px-10 py-4 sm:py-6 lg:py-8">
         {/* Sección desplegable compacta de HabitsTracker y Logros (Badges) en el componente principal */}
         {!isPomodoroFocusMode &&
           activeTab !== 'calendario' &&
@@ -2207,6 +2381,7 @@ export default function App() {
                                     <span className="text-[11px] font-mono-numbers text-slate-400 shrink-0">
                                       · {currentVuelta}ª Vuelta
                                       {sub.credits ? ` · ${sub.credits} ECTS` : ''}
+                                      {sub.allocatedHours ? ` · ${sub.allocatedHours}h ded.` : ''}
                                       {subSmartPct !== null ? (
                                         <span className="text-blue-600 dark:text-blue-400 font-semibold">
                                           {' '}· SMART {subSmartPct}%
@@ -2335,7 +2510,7 @@ export default function App() {
                       </div>
                     ) : (
                       /* Grid de tarjetas visuales con Anillo SVG, Mapa Segmentado de Temas y Acciones Directas */
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4 sm:gap-5">
                         {activeSubjects.map((sub) => {
                           const subProg = schedulerService.calculateSubjectAcademicProgress(
                             sub.topics || [],
@@ -2428,6 +2603,14 @@ export default function App() {
                                         <>
                                           <span className="font-mono-numbers font-semibold">
                                             {sub.credits} ECTS
+                                          </span>
+                                          <span>·</span>
+                                        </>
+                                      ) : null}
+                                      {sub.allocatedHours ? (
+                                        <>
+                                          <span className="font-mono-numbers font-semibold text-indigo-600 dark:text-indigo-400">
+                                            {sub.allocatedHours}h ded.
                                           </span>
                                           <span>·</span>
                                         </>

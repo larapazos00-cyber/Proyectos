@@ -67,6 +67,7 @@ import {
   DifficultyLevel,
   SchedulingPriorityLevel,
   BlockedTimeEvent,
+  AcademicTerm,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
 import { storageService } from '../services/storageService';
@@ -76,7 +77,11 @@ import {
   convertMarkdownAndImagesToRichHtml,
   convertRichHtmlToPlainText,
 } from '../utils/documentParser';
-import { calculateSubjectGradeSummary } from '../utils/gradeCalculations';
+import {
+  calculateSubjectGradeSummary,
+  ACADEMIC_TERM_OPTIONS,
+  getAcademicTermLabel,
+} from '../utils/gradeCalculations';
 import { pdfCornellExportService } from '../services/pdfCornellExportService';
 import { CornellEditor } from './CornellEditor';
 import { CornellPdfExportModal } from './CornellPdfExportModal';
@@ -210,7 +215,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   useEffect(() => {
     const mode = preferences?.interfaceDesignMode || 'complete';
     if (mode === 'minimal') {
-      if (!['temario', 'objetivos_smart', 'apuntes', 'active_recall', 'examenes'].includes(activeTab)) {
+      if (!['temario', 'tareas', 'objetivos_smart', 'apuntes', 'active_recall', 'examenes'].includes(activeTab)) {
         setActiveTab('temario');
       }
       if (topicViewMode === 'kanban') {
@@ -240,9 +245,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [showHeaderToolsMenu, setShowHeaderToolsMenu] = useState(false);
   const [showMoreTabsMenu, setShowMoreTabsMenu] = useState(false);
   const [isGoalAssistantOpen, setIsGoalAssistantOpen] = useState(false);
+  const [subjectGradeTermFilter, setSubjectGradeTermFilter] = useState<AcademicTerm | 'all'>('all');
 
   // Automatic Weighted Grade Summary
-  const subjectGradeSummary = useMemo(() => calculateSubjectGradeSummary(subject), [subject]);
+  const subjectGradeSummary = useMemo(
+    () => calculateSubjectGradeSummary(subject, 5.0, subjectGradeTermFilter),
+    [subject, subjectGradeTermFilter]
+  );
 
   // Modals & FeynmanChallenge target state
   const [isFeynmanModalOpen, setIsFeynmanModalOpen] = useState(false);
@@ -258,6 +267,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [isErrorModalOpen, setIsErrorModalOpen] = useState(false);
   const [selectedNotesTopic, setSelectedNotesTopic] = useState<Topic | null>(null);
   const [isNotesModalOpen, setIsNotesModalOpen] = useState(false);
+  const [isCreatingTopicInNotesModal, setIsCreatingTopicInNotesModal] = useState(false);
   const [readingModeTopic, setReadingTopic] = useState<Topic | null>(null);
   const [isFlashcardGeneratorOpen, setIsFlashcardGeneratorOpen] = useState(false);
   const [flashcardGenTopicId, setFlashcardGenTopicId] = useState<string | undefined>(undefined);
@@ -379,6 +389,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [editCredits, setEditCredits] = useState(
     subject.credits !== undefined && subject.credits > 0 ? String(subject.credits) : ''
   );
+  const [editAllocatedHours, setEditAllocatedHours] = useState(
+    subject.allocatedHours !== undefined && subject.allocatedHours > 0
+      ? String(subject.allocatedHours)
+      : ''
+  );
   const [editProf, setEditProf] = useState(subject.professor || '');
   const [editProfessorsList, setEditProfessorsList] = useState<string[]>(() => {
     if (subject.professors && subject.professors.length > 0) return subject.professors;
@@ -399,7 +414,9 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [newExamType, setNewExamType] = useState<ExamType>('test');
   const [newExamDifficulty, setNewExamDifficulty] = useState<'basico' | 'intermedio' | 'avanzado'>('intermedio');
   const [newExamTargetGrade, setNewExamTargetGrade] = useState('');
+  const [newExamFinalGrade, setNewExamFinalGrade] = useState('');
   const [newExamWeight, setNewExamWeight] = useState('30');
+  const [newExamAcademicTerm, setNewExamAcademicTerm] = useState<AcademicTerm | ''>('');
   const [newExamNotes, setNewExamNotes] = useState('');
   const [newExamSelectedTopics, setNewExamSelectedTopics] = useState<string[]>([]);
 
@@ -407,6 +424,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [editingExam, setEditingExam] = useState<Exam | null>(null);
   const [editExamTitle, setEditExamTitle] = useState('');
   const [editExamConvocatoria, setEditExamConvocatoria] = useState('Convocatoria Ordinaria');
+  const [editExamAcademicTerm, setEditExamAcademicTerm] = useState<AcademicTerm | ''>('');
   const [editExamLocation, setEditExamLocation] = useState('');
   const [editExamDate, setEditExamDate] = useState('');
   const [editExamTime, setEditExamTime] = useState('');
@@ -467,7 +485,18 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
   const [newTaskScore, setNewTaskScore] = useState<string>('');
   const [newTaskMaxScore, setNewTaskMaxScore] = useState<string>('10');
   const [newTaskWeight, setNewTaskWeight] = useState<string>('');
+  const [newTaskAcademicTerm, setNewTaskAcademicTerm] = useState<AcademicTerm | ''>('');
   const [subtopicTaskNotice, setSubtopicTaskNotice] = useState<string | null>(null);
+
+  // Edit Task Modal State
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [editTaskTitle, setEditTaskTitle] = useState('');
+  const [editTaskDueDate, setEditTaskDueDate] = useState('');
+  const [editTaskPriority, setEditTaskPriority] = useState<'urgente' | 'alta' | 'media' | 'baja'>('media');
+  const [editTaskAcademicTerm, setEditTaskAcademicTerm] = useState<AcademicTerm | ''>('');
+  const [editTaskIsGraded, setEditTaskIsGraded] = useState(false);
+  const [editTaskScore, setEditTaskScore] = useState('');
+  const [editTaskWeight, setEditTaskWeight] = useState('');
 
   // Active Cornell Note
   const [activeNoteId, setActiveNoteId] = useState<string>(
@@ -779,7 +808,29 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     await handleGenerateTopicMermaidMindMap(topic);
   };
 
-  // Save notes, attached imported documents & page counts directly inside a topic & synchronize with Cornell notes
+  // Abrir directamente el modal de apuntes para crear un tema nuevo más rápido
+  const handleOpenCreateTopicModal = () => {
+    const draftTopic: Topic = {
+      id: `top-${Date.now()}`,
+      title: '',
+      description: '',
+      subtopics: [],
+      completedSubtopics: [],
+      difficulty: 'Intermedio',
+      estimatedHours: 1,
+      actualHoursSpent: 0,
+      status: 'pendiente',
+      reviewLevel: 0,
+      reviewsHistory: [],
+      attachedFiles: [],
+    };
+    setShowAddTopic(false);
+    setSelectedNotesTopic(draftTopic);
+    setIsCreatingTopicInNotesModal(true);
+    setIsNotesModalOpen(true);
+  };
+
+  // Save notes, attached imported documents & page counts directly inside a topic (creating if new) & synchronize with Cornell notes
   const handleSaveTopicNotes = (
     topicId: string,
     notes: string,
@@ -791,55 +842,119 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     generalImages?: DocumentImageAsset[],
     generalComments?: DocumentComment[],
     keyPoints?: EditableKeyPoint[],
-    difficulty?: DifficultyLevel
+    difficulty?: DifficultyLevel,
+    title?: string
   ) => {
     const nowIso = new Date().toISOString();
-    const updatedTopics = subject.topics.map((t) => {
-      if (t.id === topicId) {
-        const nextDifficulty = difficulty || t.difficulty;
-        const nextAttached = attachedFiles !== undefined ? attachedFiles : t.attachedFiles;
-        const orgPages = calculateOrganizedPagesFromFiles(nextAttached);
-        const nextPages =
-          pageCount !== undefined
-            ? pageCount
-            : orgPages > 0
-            ? Math.max(t.pageCount || 0, orgPages)
-            : t.pageCount;
+    const existingTopic = subject.topics.find((t) => t.id === topicId);
 
-        const nextEstimatedHours = schedulerService.calculateTopicTime(
-          nextDifficulty,
-          t.subtopics ? t.subtopics.length : 0,
-          notes ? notes.length : t.description.length,
-          nextPages,
-          preferences
-        );
+    let updatedTopics: Topic[];
+    let targetTitle = title?.trim() || existingTopic?.title || '';
 
-        return {
-          ...t,
-          difficulty: nextDifficulty,
-          notes,
-          generalNotes: notes,
-          richGeneralNotes:
-            richGeneralNotes !== undefined ? richGeneralNotes : t.richGeneralNotes,
-          generalImages: generalImages !== undefined ? generalImages : t.generalImages,
-          generalComments: generalComments !== undefined ? generalComments : t.generalComments,
-          cues,
-          summary,
-          keyPoints: keyPoints !== undefined ? keyPoints : t.keyPoints,
-          attachedFiles: nextAttached,
-          pageCount: nextPages,
-          paginasTotales: nextPages,
-          estimatedHours: nextEstimatedHours,
-          lastNotesUpdatedAt: nowIso,
-        };
-      }
-      return t;
-    });
+    if (existingTopic) {
+      updatedTopics = subject.topics.map((t) => {
+        if (t.id === topicId) {
+          const nextTitle = title?.trim() || t.title;
+          targetTitle = nextTitle;
+          const nextDifficulty = difficulty || t.difficulty;
+          const nextAttached = attachedFiles !== undefined ? attachedFiles : t.attachedFiles;
+          const orgPages = calculateOrganizedPagesFromFiles(nextAttached);
+          const nextPages =
+            pageCount !== undefined
+              ? pageCount
+              : orgPages > 0
+              ? Math.max(t.pageCount || 0, orgPages)
+              : t.pageCount;
+
+          const nextEstimatedHours = schedulerService.calculateTopicTime(
+            nextDifficulty,
+            t.subtopics ? t.subtopics.length : 0,
+            notes ? notes.length : t.description.length,
+            nextPages,
+            preferences
+          );
+
+          return {
+            ...t,
+            title: nextTitle,
+            difficulty: nextDifficulty,
+            notes,
+            generalNotes: notes,
+            richGeneralNotes:
+              richGeneralNotes !== undefined ? richGeneralNotes : t.richGeneralNotes,
+            generalImages: generalImages !== undefined ? generalImages : t.generalImages,
+            generalComments: generalComments !== undefined ? generalComments : t.generalComments,
+            cues,
+            summary,
+            keyPoints: keyPoints !== undefined ? keyPoints : t.keyPoints,
+            attachedFiles: nextAttached,
+            pageCount: nextPages,
+            paginasTotales: nextPages,
+            estimatedHours: nextEstimatedHours,
+            lastNotesUpdatedAt: nowIso,
+          };
+        }
+        return t;
+      });
+    } else {
+      const nextDifficulty = difficulty || 'Intermedio';
+      const nextAttached = attachedFiles || [];
+      const orgPages = calculateOrganizedPagesFromFiles(nextAttached);
+      const nextPages =
+        pageCount !== undefined && pageCount > 0
+          ? pageCount
+          : orgPages > 0
+          ? orgPages
+          : undefined;
+      const inferredFromFile = nextAttached[0]?.name
+        ? nextAttached[0].name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim()
+        : '';
+      targetTitle = title?.trim() || inferredFromFile || `Tema ${subject.topics.length + 1}`;
+      const nextEstimatedHours = schedulerService.calculateTopicTime(
+        nextDifficulty,
+        0,
+        notes ? notes.length : 0,
+        nextPages,
+        preferences
+      );
+
+      const newTopic: Topic = {
+        id: topicId,
+        title: targetTitle,
+        description: summary?.trim() || 'Sin descripción detallada.',
+        subtopics: [],
+        completedSubtopics: [],
+        difficulty: nextDifficulty,
+        pageCount: nextPages,
+        paginasTotales: nextPages,
+        pagesRead: 0,
+        estimatedHours: nextEstimatedHours,
+        actualHoursSpent: 0,
+        status: 'pendiente',
+        reviewLevel: 0,
+        reviewsHistory: [],
+        notes,
+        generalNotes: notes,
+        richGeneralNotes,
+        generalImages,
+        generalComments,
+        cues,
+        summary,
+        keyPoints,
+        attachedFiles: nextAttached,
+        lastNotesUpdatedAt: nowIso,
+      };
+      updatedTopics = [...subject.topics, newTopic];
+    }
 
     let updatedNotes = [...subject.cornellNotes];
     const existingIndex = updatedNotes.findIndex((n) => n.topicId === topicId);
-    const targetTopic = subject.topics.find((t) => t.id === topicId);
-    const topicTitle = targetTopic ? targetTopic.title : 'Apuntes del Tema';
+    const topicTitle = targetTitle || 'Apuntes del Tema';
+    const hasNoteContent =
+      Boolean(notes?.trim()) ||
+      Boolean(summary?.trim()) ||
+      Boolean(cues && cues.length > 0) ||
+      Boolean(keyPoints && keyPoints.length > 0);
 
     if (existingIndex >= 0) {
       updatedNotes[existingIndex] = {
@@ -852,7 +967,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         title: topicTitle,
         updatedAt: nowIso,
       };
-    } else {
+    } else if (hasNoteContent || existingTopic) {
       const newNote: CornellNote = {
         id: `cn-${Date.now()}`,
         topicId,
@@ -2501,6 +2616,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
       weightPercentage: newTaskWeight ? parseFloat(newTaskWeight) : undefined,
       score: newTaskScore ? parseFloat(newTaskScore) : undefined,
       maxScore: newTaskMaxScore ? parseFloat(newTaskMaxScore) : 10,
+      academicTerm: newTaskAcademicTerm || undefined,
     };
 
     onUpdateSubject({
@@ -2514,6 +2630,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     setNewTaskIsGraded(false);
     setNewTaskWeight('');
     setNewTaskScore('');
+    setNewTaskAcademicTerm('');
     setShowAddTask(false);
   };
 
@@ -2651,18 +2768,31 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                           ? String(subject.credits)
                           : ''
                       );
+                      setEditAllocatedHours(
+                        subject.allocatedHours !== undefined && subject.allocatedHours > 0
+                          ? String(subject.allocatedHours)
+                          : ''
+                      );
                       setEditProf(subject.professor || '');
                       setEditProfessorsList(allProfessors);
                       setShowEditSubjectModal(true);
                     }}
                     className="font-mono-numbers text-slate-700 hover:text-blue-700 font-semibold cursor-pointer inline-flex items-center gap-1.5 bg-slate-100 hover:bg-blue-50 px-2.5 py-0.5 rounded-md transition-colors"
-                    title="Editar créditos ECTS (opcional), docentes, color o datos de la asignatura"
+                    title="Editar créditos ECTS (opcional), horas dedicadas (opcional), docentes, color o datos de la asignatura"
                   >
                     {subject.credits !== undefined && subject.credits > 0 ? (
                       <span>{subject.credits} ECTS</span>
                     ) : (
                       <span className="font-sans text-slate-400 font-normal">
                         + Créditos (opcional)
+                      </span>
+                    )}
+                    <span className="text-slate-300 font-sans">·</span>
+                    {subject.allocatedHours !== undefined && subject.allocatedHours > 0 ? (
+                      <span className="text-indigo-700">{subject.allocatedHours}h ded.</span>
+                    ) : (
+                      <span className="font-sans text-slate-400 font-normal">
+                        + Horas (opc.)
                       </span>
                     )}
                     {allProfessors.length > 0 && (
@@ -3233,7 +3363,23 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         const gradePct =
           displayGrade !== null ? Math.min(100, Math.round((displayGrade / 10) * 100)) : 0;
 
-        const coreVisualTabs = [
+        interface CoreVisualTabItem {
+          id: string;
+          title: string;
+          metric: string;
+          sublabel: string;
+          pct: number;
+          isVueltas?: boolean;
+          v1Pct?: number;
+          v2Pct?: number;
+          v3Pct?: number;
+          icon: any;
+          activeBg: string;
+          iconBg: string;
+          barColor: string;
+        }
+
+        const coreVisualTabs: CoreVisualTabItem[] = [
           {
             id: 'temario',
             title: 'Temario',
@@ -3407,11 +3553,27 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
         const isSidebarNav = preferences?.navigationPosition === 'sidebar';
         const designMode = preferences?.interfaceDesignMode || 'complete';
 
+        const minimalTareasTab: CoreVisualTabItem = {
+          id: 'tareas',
+          title: 'Tareas',
+          metric: `${completedTasksCount}/${subject.tasks.length}`,
+          sublabel: `${tasksPct}% completadas`,
+          pct: tasksPct,
+          icon: LayoutList,
+          activeBg: 'bg-amber-50/90 border-amber-500 text-amber-950 ring-2 ring-amber-500/15',
+          iconBg: 'bg-amber-600 text-white',
+          barColor: 'bg-amber-500',
+        };
+
         const visibleCoreTabs =
           designMode === 'minimal'
-            ? coreVisualTabs.filter((t) =>
-                ['temario', 'apuntes', 'active_recall', 'examenes'].includes(t.id)
-              )
+            ? [
+                coreVisualTabs[0], // temario
+                minimalTareasTab, // tareas
+                ...coreVisualTabs.filter((t) =>
+                  ['apuntes', 'active_recall', 'examenes'].includes(t.id)
+                ),
+              ]
             : designMode === 'intermediate'
             ? coreVisualTabs.filter((t) => t.id !== 'feynman_challenge')
             : coreVisualTabs;
@@ -3422,7 +3584,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             <div
               className={`grid grid-cols-2 ${
                 designMode === 'minimal'
-                  ? 'sm:grid-cols-4'
+                  ? 'sm:grid-cols-3 lg:grid-cols-5'
                   : designMode === 'intermediate'
                   ? 'sm:grid-cols-3 lg:grid-cols-5'
                   : isSidebarNav
@@ -3773,7 +3935,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowAddTopic(!showAddTopic)}
+                onClick={handleOpenCreateTopicModal}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer shadow-2xs"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -6277,8 +6439,16 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             )}
 
             {subject.topics.length === 0 && (
-              <div className="text-center py-12 bg-white rounded-2xl border border-slate-200 text-xs text-slate-500">
-                No hay temas registrados en esta materia aún. Añade el primer tema para comenzar a planificar.
+              <div className="text-center py-12 bg-white rounded-2xl border border-slate-200 text-xs text-slate-500 space-y-3">
+                <p>No hay temas registrados en esta materia aún. Añade el primer tema para comenzar a planificar.</p>
+                <button
+                  type="button"
+                  onClick={handleOpenCreateTopicModal}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer shadow-2xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Añadir primer tema y subir apuntes</span>
+                </button>
               </div>
             )}
           </div>
@@ -6921,20 +7091,26 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           </div>
 
           {/* Automatic Calculated Weighted Final Grade Banner */}
-          {subjectGradeSummary.hasMetrics && (
+          {(subjectGradeSummary.hasMetrics || subject.exams.length > 0 || subject.tasks.length > 0) && (
             <div className="p-4 bg-gradient-to-r from-purple-50/90 via-emerald-50/80 to-blue-50/90 dark:from-purple-950/40 dark:via-emerald-950/30 dark:to-blue-950/40 rounded-2xl border border-purple-200 dark:border-purple-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
               <div className="space-y-0.5">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
                     <Calculator className="w-4 h-4 text-purple-600" />
-                    <span>Nota Ponderada Calculada:</span>
+                    <span>
+                      Nota Ponderada
+                      {subjectGradeTermFilter !== 'all'
+                        ? ` (${getAcademicTermLabel(subjectGradeTermFilter)})`
+                        : ''}
+                      :
+                    </span>
                   </span>
                   <span className="text-sm font-extrabold font-mono-numbers text-emerald-700 dark:text-emerald-400">
                     {subjectGradeSummary.weightedAverageGrade !== null
                       ? `${subjectGradeSummary.weightedAverageGrade.toFixed(2)} / 10`
                       : subjectGradeSummary.simpleAverageGraded !== null
                       ? `${subjectGradeSummary.simpleAverageGraded.toFixed(2)} / 10 (media simple)`
-                      : `${subjectGradeSummary.accumulatedPointsOn10.toFixed(2)} pts asegurados`}
+                      : 'Sin notas'}
                   </span>
                   {subjectGradeSummary.isPassingSecured && (
                     <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
@@ -6954,16 +7130,31 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </p>
               </div>
 
-              {onOpenExamsManager && (
-                <button
-                  type="button"
-                  onClick={() => onOpenExamsManager(subject.id)}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs shadow-2xs cursor-pointer self-start sm:self-auto shrink-0 transition-colors"
+              <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto shrink-0">
+                <select
+                  value={subjectGradeTermFilter}
+                  onChange={(e) => setSubjectGradeTermFilter(e.target.value as AcademicTerm | 'all')}
+                  aria-label="Filtrar exámenes por trimestre o cuatrimestre"
+                  className="bg-white border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none"
                 >
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>Gestor de Evaluaciones</span>
-                </button>
-              )}
+                  <option value="all">Todos los periodos</option>
+                  {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                {onOpenExamsManager && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenExamsManager(subject.id)}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs shadow-2xs cursor-pointer transition-colors"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Gestor de Evaluaciones</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -7001,7 +7192,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Convocatoria
@@ -7018,6 +7209,24 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     <option value="Examen Final">Examen Final</option>
                     <option value="Evaluación Continua">Evaluación Continua</option>
                     <option value="Fin de Grado / Máster">Fin de Grado / Máster</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Trimestre / Cuatrimestre (opcional)
+                  </label>
+                  <select
+                    value={newExamAcademicTerm}
+                    onChange={(e) => setNewExamAcademicTerm(e.target.value as AcademicTerm | '')}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none"
+                  >
+                    <option value="">— Sin periodo concreto —</option>
+                    {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -7067,7 +7276,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Hora (opcional)
@@ -7082,7 +7291,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Meta de Calificación (0 - 10)
+                    Meta (0 - 10)
                   </label>
                   <input
                     type="number"
@@ -7098,7 +7307,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Ponderación (% Nota Final)
+                    Ponderación (%)
                   </label>
                   <input
                     type="number"
@@ -7108,6 +7317,22 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     onChange={(e) => setNewExamWeight(e.target.value)}
                     placeholder="30"
                     className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Nota Obtenida (opc.)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={newExamFinalGrade}
+                    onChange={(e) => setNewExamFinalGrade(e.target.value)}
+                    placeholder="Pendiente"
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers font-bold"
                   />
                 </div>
               </div>
@@ -7137,19 +7362,26 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                   type="button"
                   onClick={() => {
                     if (!newExamTitle.trim() || !newExamDate) return;
+                    const parsedFinalGrade =
+                      newExamFinalGrade.trim() !== ''
+                        ? Math.min(10, Math.max(0, parseFloat(newExamFinalGrade) || 0))
+                        : undefined;
                     const newExam: Exam = {
                       id: `exam-${Date.now()}`,
                       title: newExamTitle.trim(),
                       date: newExamDate,
                       time: newExamTime || undefined,
                       convocatoria: newExamConvocatoria.trim() || undefined,
+                      academicTerm: newExamAcademicTerm || undefined,
                       location: newExamLocation.trim() || undefined,
                       examType: newExamType,
                       difficulty: newExamDifficulty,
                       topicIds: subject.topics.map((t) => t.id),
                       targetGrade: newExamTargetGrade ? parseFloat(newExamTargetGrade) : undefined,
+                      finalGrade: parsedFinalGrade,
+                      actualGrade: parsedFinalGrade,
                       weightPercentage: newExamWeight ? parseFloat(newExamWeight) : undefined,
-                      completed: false,
+                      completed: parsedFinalGrade !== undefined,
                       notes: newExamNotes.trim() || undefined,
                     };
                     onUpdateSubject({ ...subject, exams: [...subject.exams, newExam] });
@@ -7157,6 +7389,8 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     setNewExamDate('');
                     setNewExamTime('');
                     setNewExamLocation('');
+                    setNewExamFinalGrade('');
+                    setNewExamAcademicTerm('');
                     setNewExamNotes('');
                     setShowAddExam(false);
                   }}
@@ -7169,7 +7403,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {subject.exams.map((ex) => (
+            {subject.exams
+              .filter(
+                (ex) =>
+                  subjectGradeTermFilter === 'all' ||
+                  ex.academicTerm === subjectGradeTermFilter
+              )
+              .map((ex) => (
               <div
                 key={ex.id}
                 className="p-5 bg-white rounded-2xl border border-slate-200 shadow-2xs space-y-3.5 hover:border-slate-300 transition-all group"
@@ -7180,6 +7420,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                       <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 bg-purple-50 px-2 py-0.5 rounded">
                         {ex.examType.replace('_', ' ')}
                       </span>
+                      {ex.academicTerm && (
+                        <span className="text-[10px] font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded">
+                          {getAcademicTermLabel(ex.academicTerm)}
+                        </span>
+                      )}
                       {ex.convocatoria && (
                         <span className="text-[10px] font-bold text-purple-800 bg-purple-100 px-2 py-0.5 rounded">
                           {ex.convocatoria}
@@ -7199,6 +7444,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                           setEditingExam(ex);
                           setEditExamTitle(ex.title);
                           setEditExamConvocatoria(ex.convocatoria || 'Convocatoria Ordinaria');
+                          setEditExamAcademicTerm(ex.academicTerm || '');
                           setEditExamLocation(ex.location || '');
                           setEditExamDate(ex.date);
                           setEditExamTime(ex.time || '');
@@ -7270,6 +7516,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         setEditingExam(ex);
                         setEditExamTitle(ex.title);
                         setEditExamConvocatoria(ex.convocatoria || 'Convocatoria Ordinaria');
+                        setEditExamAcademicTerm(ex.academicTerm || '');
                         setEditExamLocation(ex.location || '');
                         setEditExamDate(ex.date);
                         setEditExamTime(ex.time || '');
@@ -7302,9 +7549,13 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               </div>
             ))}
 
-            {subject.exams.length === 0 && (
+            {subject.exams.filter(
+              (ex) =>
+                subjectGradeTermFilter === 'all' ||
+                ex.academicTerm === subjectGradeTermFilter
+            ).length === 0 && (
               <div className="col-span-full text-center py-12 bg-white rounded-2xl border border-slate-200 text-xs text-slate-400 italic">
-                No hay exámenes programados para esta materia. Pulsa "Programar Examen" o "Gestionar Convocatorias".
+                No hay exámenes programados{subjectGradeTermFilter !== 'all' ? ` en ${getAcademicTermLabel(subjectGradeTermFilter)}` : ' para esta materia'}. Pulsa "Programar Examen" o "Gestionar Convocatorias".
               </div>
             )}
           </div>
@@ -7337,7 +7588,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     />
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block font-medium text-slate-700 mb-1">Convocatoria</label>
                       <select
@@ -7352,6 +7603,22 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         <option value="Examen Final">Examen Final</option>
                         <option value="Evaluación Continua">Evaluación Continua</option>
                         <option value="Fin de Grado / Máster">Fin de Grado / Máster</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">Trimestre / Cuatrimestre</label>
+                      <select
+                        value={editExamAcademicTerm}
+                        onChange={(e) => setEditExamAcademicTerm(e.target.value as AcademicTerm | '')}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800"
+                      >
+                        <option value="">— Sin periodo —</option>
+                        {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
                       </select>
                     </div>
 
@@ -7489,6 +7756,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                               ...ex,
                               title: editExamTitle.trim(),
                               convocatoria: editExamConvocatoria.trim() || undefined,
+                              academicTerm: editExamAcademicTerm || undefined,
                               location: editExamLocation.trim() || undefined,
                               date: editExamDate,
                               time: editExamTime || undefined,
@@ -7571,20 +7839,26 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           </div>
 
           {/* Automatic Calculated Weighted Final Grade Banner */}
-          {subjectGradeSummary.hasMetrics && (
+          {(subjectGradeSummary.hasMetrics || subject.exams.length > 0 || subject.tasks.length > 0) && (
             <div className="p-4 bg-gradient-to-r from-blue-50/90 via-emerald-50/80 to-purple-50/90 dark:from-blue-950/40 dark:via-emerald-950/30 dark:to-purple-950/40 rounded-2xl border border-blue-200 dark:border-blue-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
               <div className="space-y-0.5">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
                     <Calculator className="w-4 h-4 text-blue-600" />
-                    <span>Nota Ponderada Calculada:</span>
+                    <span>
+                      Nota Ponderada
+                      {subjectGradeTermFilter !== 'all'
+                        ? ` (${getAcademicTermLabel(subjectGradeTermFilter)})`
+                        : ''}
+                      :
+                    </span>
                   </span>
                   <span className="text-sm font-extrabold font-mono-numbers text-emerald-700 dark:text-emerald-400">
                     {subjectGradeSummary.weightedAverageGrade !== null
                       ? `${subjectGradeSummary.weightedAverageGrade.toFixed(2)} / 10`
                       : subjectGradeSummary.simpleAverageGraded !== null
                       ? `${subjectGradeSummary.simpleAverageGraded.toFixed(2)} / 10 (media simple)`
-                      : `${subjectGradeSummary.accumulatedPointsOn10.toFixed(2)} pts asegurados`}
+                      : 'Sin notas'}
                   </span>
                   {subjectGradeSummary.isPassingSecured && (
                     <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
@@ -7604,16 +7878,31 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </p>
               </div>
 
-              {onOpenExamsManager && (
-                <button
-                  type="button"
-                  onClick={() => onOpenExamsManager(subject.id)}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-2xs cursor-pointer self-start sm:self-auto shrink-0 transition-colors"
+              <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto shrink-0">
+                <select
+                  value={subjectGradeTermFilter}
+                  onChange={(e) => setSubjectGradeTermFilter(e.target.value as AcademicTerm | 'all')}
+                  aria-label="Filtrar tareas por trimestre o cuatrimestre"
+                  className="bg-white border border-blue-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none"
                 >
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>Calcular Ponderación</span>
-                </button>
-              )}
+                  <option value="all">Todos los periodos</option>
+                  {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                {onOpenExamsManager && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenExamsManager(subject.id)}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-2xs cursor-pointer transition-colors"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Calcular Ponderación</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -7641,7 +7930,7 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">
                     Vincular a Tema (opcional)
@@ -7690,6 +7979,24 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         </option>
                       )
                     )}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Trimestre / Cuatrimestre (opc.)
+                  </label>
+                  <select
+                    value={newTaskAcademicTerm}
+                    onChange={(e) => setNewTaskAcademicTerm(e.target.value as AcademicTerm | '')}
+                    className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg p-2 text-slate-800 focus:outline-none"
+                  >
+                    <option value="">— Sin periodo —</option>
+                    {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -7783,7 +8090,14 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
           )}
 
           <div className="space-y-2">
-            {schedulerService.sortTasksByAcademicPriority(subject.tasks).map((task) => {
+            {schedulerService
+              .sortTasksByAcademicPriority(subject.tasks)
+              .filter(
+                (t) =>
+                  subjectGradeTermFilter === 'all' ||
+                  t.academicTerm === subjectGradeTermFilter
+              )
+              .map((task) => {
               const linkedTopic = task.topicId
                 ? subject.topics.find((t) => t.id === task.topicId)
                 : undefined;
@@ -7836,6 +8150,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                         >
                           {task.title}
                         </span>
+                        {task.academicTerm && (
+                          <span className="text-[10px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200 px-1.5 py-0.5 rounded">
+                            {getAcademicTermLabel(task.academicTerm)}
+                          </span>
+                        )}
                         {task.manualPriorityOrder !== undefined && (
                           <span className="text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.5 rounded font-mono-numbers">
                             Orden #{task.manualPriorityOrder}
@@ -7907,6 +8226,32 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     )}
 
                     <button
+                      type="button"
+                      onClick={() => {
+                        setEditingTask(task);
+                        setEditTaskTitle(task.title);
+                        setEditTaskDueDate(task.dueDate);
+                        setEditTaskPriority(task.priority);
+                        setEditTaskAcademicTerm(task.academicTerm || '');
+                        setEditTaskIsGraded(
+                          Boolean(
+                            task.isGraded ||
+                              task.score !== undefined ||
+                              task.weightPercentage !== undefined
+                          )
+                        );
+                        setEditTaskScore(task.score !== undefined ? String(task.score) : '');
+                        setEditTaskWeight(
+                          task.weightPercentage !== undefined ? String(task.weightPercentage) : ''
+                        );
+                      }}
+                      className="text-slate-400 hover:text-blue-600 p-1 cursor-pointer"
+                      title="Editar tarea, trimestre o puntuación"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
                       onClick={() => {
                         const filtered = subject.tasks.filter((t) => t.id !== task.id);
                         onUpdateSubject({ ...subject, tasks: filtered });
@@ -7921,22 +8266,199 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               );
             })}
 
-            {subject.tasks.length === 0 && (
+            {subject.tasks.filter(
+              (t) =>
+                subjectGradeTermFilter === 'all' ||
+                t.academicTerm === subjectGradeTermFilter
+            ).length === 0 && (
               <div className="text-center py-10 bg-white rounded-2xl border border-slate-200 text-xs text-slate-400">
-                No hay tareas pendientes. Puedes crear una tarea aquí o desglosar los subtemas de cualquier tema desde la pestaña Temario.
+                No hay tareas pendientes{subjectGradeTermFilter !== 'all' ? ` en ${getAcademicTermLabel(subjectGradeTermFilter)}` : ''}. Puedes crear una tarea aquí o desglosar los subtemas de cualquier tema desde la pestaña Temario.
               </div>
             )}
           </div>
+
+          {/* Edit Task Modal */}
+          {editingTask && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+              <div className="bg-white rounded-3xl shadow-xl border border-slate-200 w-full max-w-md p-6 space-y-4 animate-in fade-in duration-150">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Edit3 className="w-4 h-4 text-blue-600" />
+                    <span>Modificar Tarea</span>
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTask(null)}
+                    className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">Título *</label>
+                    <input
+                      type="text"
+                      value={editTaskTitle}
+                      onChange={(e) => setEditTaskTitle(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">Fecha límite</label>
+                      <input
+                        type="date"
+                        value={editTaskDueDate}
+                        onChange={(e) => setEditTaskDueDate(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">Prioridad</label>
+                      <select
+                        value={editTaskPriority}
+                        onChange={(e) =>
+                          setEditTaskPriority(e.target.value as 'urgente' | 'alta' | 'media' | 'baja')
+                        }
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800"
+                      >
+                        <option value="baja">Baja</option>
+                        <option value="media">Media</option>
+                        <option value="alta">Alta</option>
+                        <option value="urgente">Urgente</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Trimestre / Cuatrimestre (opcional)
+                    </label>
+                    <select
+                      value={editTaskAcademicTerm}
+                      onChange={(e) => setEditTaskAcademicTerm(e.target.value as AcademicTerm | '')}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800"
+                    >
+                      <option value="">— Sin periodo —</option>
+                      {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editTaskIsGraded}
+                        onChange={(e) => setEditTaskIsGraded(e.target.checked)}
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300"
+                      />
+                      <span className="font-semibold text-slate-800">
+                        Tarea evaluable / puntúa en la nota
+                      </span>
+                    </label>
+
+                    {editTaskIsGraded && (
+                      <div className="grid grid-cols-2 gap-3 pl-6">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                            Nota Obtenida (0-10)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="10"
+                            step="0.1"
+                            value={editTaskScore}
+                            onChange={(e) => setEditTaskScore(e.target.value)}
+                            placeholder="Ej: 8.5"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-slate-800 font-mono-numbers font-bold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                            Ponderación %
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={editTaskWeight}
+                            onChange={(e) => setEditTaskWeight(e.target.value)}
+                            placeholder="Ej: 15"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-slate-800 font-mono-numbers"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setEditingTask(null)}
+                    className="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-800 cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!editTaskTitle.trim()) return;
+                      const parsedScore =
+                        editTaskScore.trim() !== ''
+                          ? Math.min(10, Math.max(0, parseFloat(editTaskScore) || 0))
+                          : undefined;
+                      const parsedWeight =
+                        editTaskWeight.trim() !== ''
+                          ? Math.min(100, Math.max(0, parseFloat(editTaskWeight) || 0))
+                          : undefined;
+                      const updatedTasks = subject.tasks.map((t) =>
+                        t.id === editingTask.id
+                          ? {
+                              ...t,
+                              title: editTaskTitle.trim(),
+                              dueDate: editTaskDueDate || t.dueDate,
+                              priority: editTaskPriority,
+                              academicTerm: editTaskAcademicTerm || undefined,
+                              isGraded: editTaskIsGraded || parsedScore !== undefined || parsedWeight !== undefined,
+                              score: editTaskIsGraded ? parsedScore : undefined,
+                              weightPercentage: editTaskIsGraded ? parsedWeight : undefined,
+                            }
+                          : t
+                      );
+                      onUpdateSubject({ ...subject, tasks: updatedTasks });
+                      setEditingTask(null);
+                    }}
+                    className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl cursor-pointer shadow-2xs"
+                  >
+                    Guardar Cambios
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Topic Notes Modal (Write or OCR Import) */}
+      {/* Topic Notes Modal (Write, Upload PDF/Docs, or Create New Topic Directly) */}
       {isNotesModalOpen && selectedNotesTopic && (
         <TopicNotesModal
           isOpen={isNotesModalOpen}
+          isNewTopic={isCreatingTopicInNotesModal}
+          suggestedTopicNumber={subject.topics.length + 1}
+          preferences={preferences}
           onClose={() => {
             setIsNotesModalOpen(false);
             setSelectedNotesTopic(null);
+            setIsCreatingTopicInNotesModal(false);
           }}
           subjectName={subject.name}
           topic={
@@ -7957,7 +8479,10 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
             }));
           }}
           onAiError={(actionTitle, errorMessage) =>
-            reportCentralizedAiError(`${actionTitle} (${selectedNotesTopic.title})`, errorMessage)
+            reportCentralizedAiError(
+              `${actionTitle} (${selectedNotesTopic.title || 'Nuevo tema'})`,
+              errorMessage
+            )
           }
           onOpenReadingMode={() => {
             if (selectedNotesTopic) {
@@ -7979,12 +8504,14 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               data.generalImages,
               data.generalComments,
               data.keyPoints,
-              data.difficulty
+              data.difficulty,
+              data.title
             );
             const currentBase =
               subject.topics.find((t) => t.id === topicId) || selectedNotesTopic;
             setSelectedNotesTopic({
               ...currentBase,
+              title: data.title?.trim() || currentBase.title,
               difficulty: data.difficulty || currentBase.difficulty,
               notes: data.notes,
               generalNotes: data.notes,
@@ -8150,20 +8677,38 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-medium mb-1">
-                  Número de Créditos ECTS <span className="text-slate-400 font-normal">(opcional)</span>
-                </label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0.5"
-                  max="60"
-                  value={editCredits}
-                  onChange={(e) => setEditCredits(e.target.value)}
-                  placeholder="Dejar en blanco o indicar créditos (opcional)"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 font-mono-numbers focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-medium mb-1">
+                    Créditos ECTS <span className="text-slate-400 font-normal">(opcional)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0.5"
+                    max="60"
+                    value={editCredits}
+                    onChange={(e) => setEditCredits(e.target.value)}
+                    placeholder="Ej: 6 (opcional)"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 font-mono-numbers focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-medium mb-1">
+                    Horas dedicadas <span className="text-slate-400 font-normal">(opcional)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0.5"
+                    max="500"
+                    value={editAllocatedHours}
+                    onChange={(e) => setEditAllocatedHours(e.target.value)}
+                    placeholder="Ej: 40 (opcional)"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 font-mono-numbers focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
               </div>
 
               <div>
@@ -8237,6 +8782,8 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                   if (!editName.trim()) return;
                   const parsedCredits =
                     editCredits.trim() !== '' ? parseFloat(editCredits) : NaN;
+                  const parsedAllocatedHours =
+                    editAllocatedHours.trim() !== '' ? parseFloat(editAllocatedHours) : NaN;
                   const validProfs = editProfessorsList.filter(p => p.trim().length > 0);
                   if (newProfInput.trim() && !validProfs.includes(newProfInput.trim())) {
                     validProfs.push(newProfInput.trim());
@@ -8248,6 +8795,10 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
                     code: editCode.trim() || undefined,
                     color: editColor,
                     credits: !isNaN(parsedCredits) && parsedCredits > 0 ? parsedCredits : undefined,
+                    allocatedHours:
+                      !isNaN(parsedAllocatedHours) && parsedAllocatedHours > 0
+                        ? parsedAllocatedHours
+                        : undefined,
                     professor: validProfs[0] || undefined,
                     professors: validProfs.length > 0 ? validProfs : undefined,
                   });

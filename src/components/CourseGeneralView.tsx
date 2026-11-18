@@ -36,11 +36,13 @@ import {
   StudyPreferences,
   BlockedTimeEvent,
   PomodoroLog,
+  AcademicTerm,
 } from '../types';
 import { schedulerService } from '../services/schedulerService';
 import { storageService } from '../services/storageService';
 import { getSubjectSpacedRepetitionAlert } from '../utils/courseAlerts';
 import { upsertGoalOnSubject } from '../utils/smartGoalsUtils';
+import { ACADEMIC_TERM_OPTIONS } from '../utils/gradeCalculations';
 import { StreakModal } from './StreakModal';
 import { StreakHeatmapPanel } from './StreakHeatmapPanel';
 import { DashboardStudyStreakCard } from './DashboardStudyStreakCard';
@@ -48,6 +50,7 @@ import { SubjectStudyHoursChart } from './SubjectStudyHoursChart';
 import { SubjectQuickReviewOverlay } from './SubjectQuickReviewOverlay';
 import { SmartGoalsDashboardCard } from './SmartGoalsDashboardCard';
 import { GoalAssistantModal } from './GoalAssistantModal';
+import { CourseGradeAverageCard } from './CourseGradeAverageCard';
 
 interface CourseGeneralViewProps {
   programName: string;
@@ -653,6 +656,10 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
   const [taskTitle, setTaskTitle] = useState<string>('');
   const [taskDueDate, setTaskDueDate] = useState<string>(today);
   const [taskPriority, setTaskPriority] = useState<Task['priority']>('media');
+  const [taskAcademicTerm, setTaskAcademicTerm] = useState<AcademicTerm | ''>('');
+  const [taskIsGraded, setTaskIsGraded] = useState<boolean>(false);
+  const [taskWeight, setTaskWeight] = useState<string>('');
+  const [taskScore, setTaskScore] = useState<string>('');
 
   const [showAddExamModal, setShowAddExamModal] = useState<boolean>(false);
   const [examSubjectId, setExamSubjectId] = useState<string>(allSubjects[0]?.id || '');
@@ -661,6 +668,8 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
   const [examTime, setExamTime] = useState<string>('09:00');
   const [examType, setExamType] = useState<ExamType>('test');
   const [examWeight, setExamWeight] = useState<string>('40');
+  const [examAcademicTerm, setExamAcademicTerm] = useState<AcademicTerm | ''>('');
+  const [examFinalGrade, setExamFinalGrade] = useState<string>('');
 
   // Estado y lógica para insertar Bloques de Estudio Personalizados (60 min) en un hueco libre (guardados en blockedEvents)
   const [selectedFreeSlotDate, setSelectedFreeSlotDate] = useState<string>(today);
@@ -830,23 +839,44 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
 
   const handleCreateTask = () => {
     if (!taskTitle.trim() || !taskSubjectId) return;
+    const parsedScore =
+      taskScore.trim() !== ''
+        ? Math.min(10, Math.max(0, parseFloat(taskScore) || 0))
+        : undefined;
+    const parsedWeight =
+      taskWeight.trim() !== ''
+        ? Math.min(100, Math.max(0, parseFloat(taskWeight) || 0))
+        : undefined;
     const newTask: Task = {
       id: `task-${Date.now()}`,
       title: taskTitle.trim(),
       dueDate: taskDueDate || today,
       priority: taskPriority,
       type: 'entrega',
-      completed: false,
+      completed: parsedScore !== undefined,
       reminder: false,
+      academicTerm: taskAcademicTerm || undefined,
+      isGraded: taskIsGraded || parsedScore !== undefined || parsedWeight !== undefined,
+      weightPercentage: parsedWeight,
+      score: parsedScore,
+      maxScore: 10,
     };
     onAddTaskToSubject?.(taskSubjectId, newTask);
     setTaskTitle('');
+    setTaskAcademicTerm('');
+    setTaskIsGraded(false);
+    setTaskWeight('');
+    setTaskScore('');
     setShowAddTaskModal(false);
   };
 
   const handleCreateExam = () => {
     if (!examTitle.trim() || !examSubjectId || !examDate) return;
     const targetSub = allSubjects.find((s) => s.id === examSubjectId);
+    const parsedFinalGrade =
+      examFinalGrade.trim() !== ''
+        ? Math.min(10, Math.max(0, parseFloat(examFinalGrade) || 0))
+        : undefined;
     const newExam: Exam = {
       id: `exam-${Date.now()}`,
       title: examTitle.trim(),
@@ -856,10 +886,15 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
       difficulty: 'intermedio',
       topicIds: targetSub ? targetSub.topics.map((t) => t.id) : [],
       weightPercentage: examWeight ? parseFloat(examWeight) : undefined,
-      completed: false,
+      academicTerm: examAcademicTerm || undefined,
+      finalGrade: parsedFinalGrade,
+      actualGrade: parsedFinalGrade,
+      completed: parsedFinalGrade !== undefined,
     };
     onAddExamToSubject?.(examSubjectId, newExam);
     setExamTitle('');
+    setExamAcademicTerm('');
+    setExamFinalGrade('');
     setShowAddExamModal(false);
   };
 
@@ -1201,7 +1236,15 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           </div>
         </div>
 
-        {/* 4. OBJETIVOS SMART POR ASIGNATURA */}
+        {/* 4. NOTA MEDIA DEL CURSO (MINIMALISTA) */}
+        <CourseGradeAverageCard
+          subjects={allSubjects}
+          compact
+          onSelectSubject={onSelectSubject}
+          onOpenExamsManager={onOpenExamsManager}
+        />
+
+        {/* 5. OBJETIVOS SMART POR ASIGNATURA */}
         <SmartGoalsDashboardCard
           subjects={allSubjects}
           onUpdateSubject={onUpdateSubject}
@@ -1473,6 +1516,13 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 2.5 NOTA MEDIA DEL CURSO (GLOBAL Y POR TRIMESTRE/CUATRIMESTRE) */}
+      <CourseGradeAverageCard
+        subjects={allSubjects}
+        onSelectSubject={onSelectSubject}
+        onOpenExamsManager={onOpenExamsManager}
+      />
 
       {/* 3. TARJETA VISUAL DE PROGRESO: OBJETIVOS SMART POR ASIGNATURA */}
       <SmartGoalsDashboardCard
@@ -2282,7 +2332,7 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3.5">
           {allSubjects.map((sub) => {
             const subAcademicProg = schedulerService.calculateSubjectAcademicProgress(
               sub.topics || [],
@@ -2304,16 +2354,28 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
               >
                 <div>
                   <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                       <span
                         className="w-2.5 h-2.5 rounded-full shrink-0"
                         style={{ backgroundColor: sub.color || '#3b82f6' }}
                       />
-                      <span className="text-[10px] font-mono-numbers font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200">
-                        {sub.code}
-                      </span>
+                      {sub.code && (
+                        <span className="text-[10px] font-mono-numbers font-bold text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                          {sub.code}
+                        </span>
+                      )}
+                      {sub.credits ? (
+                        <span className="text-[10px] font-mono-numbers font-semibold text-slate-500">
+                          {sub.credits} ECTS
+                        </span>
+                      ) : null}
+                      {sub.allocatedHours ? (
+                        <span className="text-[10px] font-mono-numbers font-semibold text-indigo-600">
+                          {sub.allocatedHours}h ded.
+                        </span>
+                      ) : null}
                     </div>
-                    <span className="text-xs font-mono-numbers font-bold text-slate-900">
+                    <span className="text-xs font-mono-numbers font-bold text-slate-900 shrink-0">
                       {subProg}%
                     </span>
                   </div>
@@ -2602,6 +2664,71 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                   </select>
                 </div>
               </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Trimestre / Cuatrimestre (opcional)
+                </label>
+                <select
+                  value={taskAcademicTerm}
+                  onChange={(e) => setTaskAcademicTerm(e.target.value as AcademicTerm | '')}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 focus:outline-none"
+                >
+                  <option value="">— Sin periodo concreto —</option>
+                  {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="pt-1 border-t border-slate-100 space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={taskIsGraded}
+                    onChange={(e) => setTaskIsGraded(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300"
+                  />
+                  <span className="font-semibold text-slate-700">
+                    Tarea evaluable (cuenta para la nota media)
+                  </span>
+                </label>
+                {taskIsGraded && (
+                  <div className="grid grid-cols-2 gap-3 pl-5">
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">
+                        Nota Obtenida (0-10)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="10"
+                        step="0.1"
+                        value={taskScore}
+                        onChange={(e) => setTaskScore(e.target.value)}
+                        placeholder="Pendiente"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">
+                        Ponderación %
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={taskWeight}
+                        onChange={(e) => setTaskWeight(e.target.value)}
+                        placeholder="Ej: 15"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
@@ -2690,9 +2817,27 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Trimestre / Cuatrimestre (opcional)
+                </label>
+                <select
+                  value={examAcademicTerm}
+                  onChange={(e) => setExamAcademicTerm(e.target.value as AcademicTerm | '')}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 focus:outline-none"
+                >
+                  <option value="">— Sin periodo concreto —</option>
+                  {ACADEMIC_TERM_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Tipo de Examen</label>
+                  <label className="block font-medium text-slate-700 mb-1">Tipo</label>
                   <select
                     value={examType}
                     onChange={(e) => setExamType(e.target.value as any)}
@@ -2701,14 +2846,14 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                     <option value="test">Tipo Test</option>
                     <option value="desarrollo">Desarrollo</option>
                     <option value="oral">Oral</option>
-                    <option value="preguntas_cortas">Preguntas Cortas</option>
+                    <option value="preguntas_cortas">Preg. Cortas</option>
                     <option value="calculo">Cálculo</option>
                     <option value="practico">Práctico</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">Ponderación (%)</label>
+                  <label className="block font-medium text-slate-700 mb-1">Peso (%)</label>
                   <input
                     type="number"
                     min="0"
@@ -2716,6 +2861,20 @@ export const CourseGeneralView: React.FC<CourseGeneralViewProps> = ({
                     value={examWeight}
                     onChange={(e) => setExamWeight(e.target.value)}
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">Nota (opc.)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="10"
+                    step="0.1"
+                    value={examFinalGrade}
+                    onChange={(e) => setExamFinalGrade(e.target.value)}
+                    placeholder="Pend."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-slate-800 font-mono-numbers font-bold"
                   />
                 </div>
               </div>

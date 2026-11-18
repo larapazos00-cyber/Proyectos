@@ -346,6 +346,13 @@ export const HabitsTracker: React.FC<HabitsTrackerProps> = ({
 
   const [habits, setHabits] = useState<HabitItem[]>(loadStoredHabits);
 
+  // Sync directly from preferences updates after commit
+  useEffect(() => {
+    if (Array.isArray(preferences?.habits) && preferences.habits.length > 0) {
+      setHabits((prev) => (prev === preferences.habits ? prev : preferences.habits!));
+    }
+  }, [preferences?.habits]);
+
   // Sync across components via custom event
   useEffect(() => {
     const handleSync = () => {

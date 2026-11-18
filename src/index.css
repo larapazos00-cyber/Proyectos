@@ -3,6 +3,22 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
+  html {
+    font-size: 15px;
+  }
+
+  @media (min-width: 1024px) {
+    html {
+      font-size: clamp(13.5px, 0.35vw + 10.5px, 16px);
+    }
+  }
+
+  @media (max-height: 780px) and (min-width: 1024px) {
+    html {
+      font-size: clamp(13px, 0.25vw + 10.5px, 14.5px);
+    }
+  }
+
   html,
   body,
   #root {

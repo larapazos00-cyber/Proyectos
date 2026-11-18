@@ -116,7 +116,7 @@ export default defineConfig(() => {
               },
             },
             {
-              // Documentos HTML, Manifiesto y metadatos locales con Stale-While-Revalidate
+              // Documentos HTML, Manifiesto y metadatos locales con NetworkFirst para que cada republicación cargue al instante sin perder acceso offline
               urlPattern: ({ request, sameOrigin, url }) =>
                 sameOrigin &&
                 !url.pathname.startsWith('/api/') &&
@@ -124,9 +124,10 @@ export default defineConfig(() => {
                 (request.mode === 'navigate' ||
                   request.destination === 'document' ||
                   request.destination === 'manifest'),
-              handler: 'StaleWhileRevalidate',
+              handler: 'NetworkFirst',
               options: {
-                cacheName: 'studyflow-app-shell-swr-v2',
+                cacheName: 'studyflow-app-shell-nf-v3',
+                networkTimeoutSeconds: 3,
                 expiration: {
                   maxEntries: 30,
                   maxAgeSeconds: 60 * 60 * 24 * 14, // 14 días

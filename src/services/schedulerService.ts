@@ -9,6 +9,7 @@ import {
   TopicSchedulingPriorityInfo,
   SubjectSchedulingPriorityInfo,
   StudyPreferences,
+  SubjectAllocationStrategy,
   ScheduledStudySession,
   ReviewQuality,
   BlockedTimeEvent,
@@ -109,6 +110,27 @@ function normalizeSmartMatchText(text: string): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+function getStoredAllocationStrategy(): SubjectAllocationStrategy {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem('studyflow_preferences_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (
+          parsed?.subjectAllocationStrategy === 'important_first' ||
+          parsed?.subjectAllocationStrategy === 'more_subjects' ||
+          parsed?.subjectAllocationStrategy === 'balanced'
+        ) {
+          return parsed.subjectAllocationStrategy;
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return 'balanced';
 }
 
 export function loadActiveSmartGoalsFromStorage(): StoredSmartGoalItem[] {
@@ -1745,9 +1767,11 @@ export const schedulerService = {
   calculateSubjectSchedulingPriority(
     subject: Subject,
     todayStr?: string,
-    smartGoalsOverride?: StoredSmartGoalItem[]
+    smartGoalsOverride?: StoredSmartGoalItem[],
+    strategyOverride?: SubjectAllocationStrategy
   ): SubjectSchedulingPriorityInfo {
     const refTodayStr = todayStr || getTodayLocalDateStr();
+    const activeStrategy: SubjectAllocationStrategy = strategyOverride || getStoredAllocationStrategy();
     const exams = (subject.exams || []).filter((e) => !e.completed);
     const projects = (subject.projects || []).filter(
       (p) => p.status !== 'calificado' && p.status !== 'entregado'
@@ -1841,6 +1865,26 @@ export const schedulerService = {
         : 0;
 
     let effectiveScore = totalActiveGradeWeightPct * 1.2 + urgencyPoints;
+
+    // Influencia de créditos ECTS y horas dedicadas (opcionales) según la estrategia elegida
+    const credits = subject.credits && subject.credits > 0 ? subject.credits : 0;
+    const allocatedHours =
+      subject.allocatedHours && subject.allocatedHours > 0 ? subject.allocatedHours : 0;
+    const academicProgress = this.calculateSubjectAcademicProgress(subject.topics || []);
+
+    if (activeStrategy === 'important_first') {
+      effectiveScore += credits * 6 + allocatedHours * 1.2 + totalActiveGradeWeightPct * 0.35;
+    } else if (activeStrategy === 'more_subjects') {
+      const creditLightness = credits > 0 ? Math.max(0, 36 - credits * 4) : 12;
+      const effortHours = allocatedHours > 0 ? allocatedHours : academicProgress.remainingHours;
+      const quickWinHoursBoost = Math.max(0, 45 - Math.min(45, effortHours) * 1.1);
+      const nearCompletionBoost =
+        academicProgress.progressPct >= 45 ? academicProgress.progressPct * 0.35 : 0;
+      effectiveScore += creditLightness + quickWinHoursBoost + nearCompletionBoost;
+    } else {
+      effectiveScore += credits * 1.5 + allocatedHours * 0.4;
+    }
+
     if (isManualLevel) {
       const manualBaseMap: Record<'critica' | 'alta' | 'media' | 'baja', number> = {
         critica: 220,
@@ -1848,7 +1892,11 @@ export const schedulerService = {
         media: 105,
         baja: 30,
       };
-      effectiveScore = manualBaseMap[effectiveLevel] + totalActiveGradeWeightPct * 0.4 + urgencyPoints * 0.5;
+      effectiveScore =
+        manualBaseMap[effectiveLevel] +
+        totalActiveGradeWeightPct * 0.4 +
+        urgencyPoints * 0.5 +
+        (activeStrategy === 'important_first' ? credits * 2 + allocatedHours * 0.5 : 0);
     }
     if (isManualRank && subject.manualPriorityRank) {
       effectiveScore += Math.max(50, 500 - subject.manualPriorityRank * 20);
@@ -1876,6 +1924,10 @@ export const schedulerService = {
       baja: 'Baja',
     };
 
+    const metaParts: string[] = [`${totalActiveGradeWeightPct}% nota en juego`];
+    if (credits > 0) metaParts.push(`${credits} ECTS`);
+    if (allocatedHours > 0) metaParts.push(`${allocatedHours}h ded.`);
+
     return {
       subjectId: subject.id,
       subjectName: subject.name,
@@ -1890,7 +1942,7 @@ export const schedulerService = {
       taskWeightPct,
       nearestDeadlineDate,
       daysUntilDeadline,
-      summaryLabel: `${levelLabels[effectiveLevel]} (${totalActiveGradeWeightPct}% nota en juego)`,
+      summaryLabel: `${levelLabels[effectiveLevel]} (${metaParts.join(' · ')})`,
     };
   },
 
@@ -1926,11 +1978,15 @@ export const schedulerService = {
   /**
    * Ordena una lista de asignaturas de mayor a menor prioridad de agendado al calendario.
    */
-  sortSubjectsBySchedulingPriority(subjects: Subject[], todayStr?: string): Subject[] {
+  sortSubjectsBySchedulingPriority(
+    subjects: Subject[],
+    todayStr?: string,
+    strategy?: SubjectAllocationStrategy
+  ): Subject[] {
     const activeSmartGoals = loadActiveSmartGoalsFromStorage();
     return [...subjects].sort((a, b) => {
-      const pA = this.calculateSubjectSchedulingPriority(a, todayStr, activeSmartGoals);
-      const pB = this.calculateSubjectSchedulingPriority(b, todayStr, activeSmartGoals);
+      const pA = this.calculateSubjectSchedulingPriority(a, todayStr, activeSmartGoals, strategy);
+      const pB = this.calculateSubjectSchedulingPriority(b, todayStr, activeSmartGoals, strategy);
       if (pB.effectiveScore !== pA.effectiveScore) {
         return pB.effectiveScore - pA.effectiveScore;
       }
@@ -3648,9 +3704,13 @@ export const schedulerService = {
       return { dateStr: initialDateStr, hourStr: '10:00' };
     };
 
-    // 2. Ordenar las asignaturas por orden de prioridad (manual o % de la nota final de exámenes, proyectos y tareas)
+    // 2. Ordenar las asignaturas por orden de prioridad (estrategia elegida + manual o % de la nota final + créditos/horas)
     // para que las asignaturas prioritarias reserven primero los mejores huecos del calendario
-    const prioritizedSubjectsOrder = this.sortSubjectsBySchedulingPriority(subjects, todayStr);
+    const prioritizedSubjectsOrder = this.sortSubjectsBySchedulingPriority(
+      subjects,
+      todayStr,
+      updatedPreferences.subjectAllocationStrategy
+    );
     const updatedSubjectsById = new Map<string, Subject>();
 
     prioritizedSubjectsOrder.forEach((subject) => {

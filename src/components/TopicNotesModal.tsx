@@ -38,6 +38,7 @@ import {
   EditableKeyPoint,
   DifficultyLevel,
   Mindmap,
+  StudyPreferences,
 } from '../types';
 import { pdfCornellExportService } from '../services/pdfCornellExportService';
 import { schedulerService } from '../services/schedulerService';
@@ -151,6 +152,9 @@ interface TopicNotesModalProps {
   onClose: () => void;
   topic: Topic | null;
   subjectName: string;
+  isNewTopic?: boolean;
+  suggestedTopicNumber?: number;
+  preferences?: StudyPreferences;
   initialDocumentId?: string;
   initialOpenKeyPoints?: boolean;
   initialTriggerFormatAI?: boolean;
@@ -162,6 +166,7 @@ interface TopicNotesModalProps {
   onSaveTopicNotes: (
     topicId: string,
     data: {
+      title?: string;
       notes: string;
       cues: string[];
       summary: string;
@@ -181,6 +186,9 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   onClose,
   topic,
   subjectName,
+  isNewTopic = false,
+  suggestedTopicNumber = 1,
+  preferences,
   initialDocumentId,
   initialOpenKeyPoints = false,
   initialTriggerFormatAI = false,
@@ -218,16 +226,26 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   const [newKeyTermName, setNewKeyTermName] = useState<string>('');
   const [newKeyTermDef, setNewKeyTermDef] = useState<string>('');
   const [isActiveRecallMask, setIsActiveRecallMask] = useState<boolean>(false);
-  const [notes, setNotes] = useState<string>(
-    topic?.notes || topic?.generalNotes || topic?.description || ''
-  );
-  const [richGeneralNotes, setRichGeneralNotes] = useState<string>(
-    topic?.richGeneralNotes ||
-      convertMarkdownAndImagesToRichHtml(
-        topic?.notes || topic?.generalNotes || topic?.description || '',
-        topic?.generalImages || []
-      )
-  );
+  const [editableTitle, setEditableTitle] = useState<string>(topic?.title || '');
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const [notes, setNotes] = useState<string>(() => {
+    if (topic?.notes) return topic.notes;
+    if (topic?.generalNotes) return topic.generalNotes;
+    if (!isNewTopic && topic?.description && topic.description !== 'Sin descripción detallada.') {
+      return topic.description;
+    }
+    return '';
+  });
+  const [richGeneralNotes, setRichGeneralNotes] = useState<string>(() => {
+    if (topic?.richGeneralNotes) return topic.richGeneralNotes;
+    const seed =
+      topic?.notes ||
+      topic?.generalNotes ||
+      (!isNewTopic && topic?.description && topic.description !== 'Sin descripción detallada.'
+        ? topic.description
+        : '');
+    return seed ? convertMarkdownAndImagesToRichHtml(seed, topic?.generalImages || []) : '';
+  });
   const [generalImages, setGeneralImages] = useState<DocumentImageAsset[]>(
     topic?.generalImages || []
   );
@@ -246,7 +264,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     if (topic?.subtopics && topic.subtopics.length > 0) {
       return topic.subtopics.map((st) => `¿En qué consiste ${st}?`);
     }
-    return ['¿Cuál es la definición fundamental?', '¿Qué aplicaciones prácticas tiene?'];
+    return isNewTopic ? [] : ['¿Cuál es la definición fundamental?', '¿Qué aplicaciones prácticas tiene?'];
   });
   const [summary, setSummary] = useState<string>(topic?.summary || '');
   const [newCue, setNewCue] = useState<string>('');
@@ -279,6 +297,9 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   });
   const [customPageCountOverride, setCustomPageCountOverride] = useState<number | undefined>(
     topic?.pageCount
+  );
+  const [hasManualPageOverride, setHasManualPageOverride] = useState<boolean>(
+    Boolean(topic?.pageCount && topic.pageCount > 0 && (topic?.attachedFiles?.length || 0) === 0)
   );
 
   // Import State
@@ -328,6 +349,14 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     const isDifferentTopic = lastSyncedTopicIdRef.current !== topic.id;
     lastSyncedTopicIdRef.current = topic.id;
 
+    if (isDifferentTopic) {
+      setEditableTitle(topic.title || '');
+      setCustomPageCountOverride(topic.pageCount);
+      setHasManualPageOverride(
+        Boolean(topic.pageCount && topic.pageCount > 0 && normalizedFiles.length === 0)
+      );
+    }
+
     setAttachedFiles((prev) => {
       if (isDifferentTopic || prev.length === 0) return normalizedFiles;
       // Preserve local edits in `prev` when the same topic re-renders
@@ -368,13 +397,61 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     [attachedFiles]
   );
 
+  // Auto-detect page count from free-writing notes when no attached files or manual override exist
+  const hasMeaningfulFreeNotes = useMemo(() => {
+    const trimmed = notes.trim();
+    if (!trimmed || trimmed === 'Sin descripción detallada.') return false;
+    if (
+      !isNewTopic &&
+      !topic?.notes &&
+      !topic?.generalNotes &&
+      trimmed === (topic?.description || '').trim()
+    ) {
+      return false;
+    }
+    return true;
+  }, [notes, isNewTopic, topic?.notes, topic?.generalNotes, topic?.description]);
+
+  const freeNotesAutoPageCount = useMemo(() => {
+    if (!hasMeaningfulFreeNotes) return 0;
+    return detectTextPageCount(notes);
+  }, [hasMeaningfulFreeNotes, notes]);
+
   // Effective page count for topic organization
   const effectivePageCount = useMemo(() => {
     if (attachedFiles.length > 0 && organizedFilesPageCount > 0) {
+      if (hasManualPageOverride && customPageCountOverride && customPageCountOverride > 0) {
+        return customPageCountOverride;
+      }
       return Math.max(customPageCountOverride || 0, organizedFilesPageCount);
     }
-    return customPageCountOverride || topic?.pageCount || 0;
-  }, [attachedFiles, organizedFilesPageCount, customPageCountOverride, topic?.pageCount]);
+    if (hasManualPageOverride && customPageCountOverride !== undefined) {
+      return customPageCountOverride;
+    }
+    if (freeNotesAutoPageCount > 0 && (isNewTopic || !topic?.pageCount)) {
+      return freeNotesAutoPageCount;
+    }
+    return customPageCountOverride || topic?.pageCount || freeNotesAutoPageCount || 0;
+  }, [
+    attachedFiles.length,
+    organizedFilesPageCount,
+    hasManualPageOverride,
+    customPageCountOverride,
+    freeNotesAutoPageCount,
+    isNewTopic,
+    topic?.pageCount,
+  ]);
+
+  const handleManualPageCountInput = (rawValue: string) => {
+    const parsed = parseInt(rawValue, 10);
+    if (!rawValue.trim() || isNaN(parsed) || parsed <= 0) {
+      setHasManualPageOverride(false);
+      setCustomPageCountOverride(undefined);
+    } else {
+      setHasManualPageOverride(true);
+      setCustomPageCountOverride(Math.min(2000, parsed));
+    }
+  };
 
   // Estimated study hours based on detected pages & topic difficulty
   const estimatedStudyHours = useMemo(() => {
@@ -382,9 +459,10 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       topicDifficulty || topic?.difficulty || 'Media',
       topic?.subtopics ? topic.subtopics.length : 0,
       notes.length,
-      effectivePageCount > 0 ? effectivePageCount : undefined
+      effectivePageCount > 0 ? effectivePageCount : undefined,
+      preferences
     );
-  }, [topicDifficulty, topic?.difficulty, topic?.subtopics, notes.length, effectivePageCount]);
+  }, [topicDifficulty, topic?.difficulty, topic?.subtopics, notes.length, effectivePageCount, preferences]);
 
   const activeAttachedFile = useMemo(
     () => attachedFiles.find((f) => f.id === activeEditingDocId) || null,
@@ -415,29 +493,36 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
   // Current text shown in the Free-Writing Notes editor
   const currentEditorText = activeAttachedFile ? activeAttachedFile.content : notes;
 
+  // Resolver título actual del tema (editable en modo creación o existente)
+  const resolvedTopicTitle = editableTitle.trim() || topic.title || `Tema ${suggestedTopicNumber}`;
+
   // Cambiar la dificultad del tema directamente desde el modal de apuntes
   const handleSelectDifficulty = (newDiff: DifficultyLevel) => {
     setTopicDifficulty(newDiff);
     if (onChangeTopicDifficulty) {
       onChangeTopicDifficulty(topic.id, newDiff);
     }
-    onSaveTopicNotes(topic.id, {
-      notes,
-      cues,
-      summary,
-      difficulty: newDiff,
-      attachedFiles,
-      pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
-      richGeneralNotes,
-      generalImages,
-      generalComments,
-      keyPoints: activeEditableKeyPoints,
-    });
+    if (!isNewTopic || editableTitle.trim()) {
+      onSaveTopicNotes(topic.id, {
+        title: editableTitle.trim() || topic.title,
+        notes,
+        cues,
+        summary,
+        difficulty: newDiff,
+        attachedFiles,
+        pageCount: effectivePageCount > 0 ? effectivePageCount : topic.pageCount,
+        richGeneralNotes,
+        generalImages,
+        generalComments,
+        keyPoints: activeEditableKeyPoints,
+      });
+    }
     showTransientNotice(`Dificultad del tema actualizada a ${newDiff} (~${schedulerService.calculateTopicTime(
       newDiff,
       topic.subtopics ? topic.subtopics.length : 0,
       notes.length,
-      effectivePageCount > 0 ? effectivePageCount : undefined
+      effectivePageCount > 0 ? effectivePageCount : undefined,
+      preferences
     )}h estimadas).`);
   };
 
@@ -594,6 +679,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
       // Auto-persistir los puntos clave y el resumen en la asignatura
       onSaveTopicNotes(topic.id, {
+        title: editableTitle.trim() || topic.title || `Tema ${suggestedTopicNumber}`,
         notes,
         cues: nextCues,
         summary: nextSummary,
@@ -786,6 +872,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
             const nextRich = convertMarkdownAndImagesToRichHtml(nextMain, generalImages);
             setRichGeneralNotes(nextRich);
             onSaveTopicNotes(topic.id, {
+              title: editableTitle.trim() || topic.title || `Tema ${suggestedTopicNumber}`,
               notes: nextMain,
               cues,
               summary,
@@ -999,6 +1086,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
         // Auto-persistir el formato estructurado con IA en la asignatura
         onSaveTopicNotes(topic.id, {
+          title: editableTitle.trim() || topic.title || `Tema ${suggestedTopicNumber}`,
           notes: nextMainNotes,
           cues: nextCues,
           summary: nextSummary,
@@ -1050,7 +1138,9 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
         const file = filesArray[i];
         const result = await processImportedDocumentFile(
           file,
-          topic.title,
+          editableTitle.trim() ||
+            topic.title ||
+            file.name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim(),
           subjectName,
           (statusMsg) =>
             setImportStatus(
@@ -1085,7 +1175,23 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
           ? effectivePageCount
           : topic.pageCount;
       if (newOrganizedPages > 0) {
+        setHasManualPageOverride(false);
         setCustomPageCountOverride(newOrganizedPages);
+      }
+
+      // If creating a new topic and title is still blank, suggest title cleanly from uploaded filename
+      const suggestedFileTitle =
+        !editableTitle.trim() && newlyAddedFiles[0]?.name
+          ? newlyAddedFiles[0].name
+              .replace(/\.[^/.]+$/, '')
+              .replace(/[_-]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+          : '';
+      const resolvedUploadTitle =
+        editableTitle.trim() || suggestedFileTitle || topic.title || `Tema ${suggestedTopicNumber}`;
+      if (!editableTitle.trim() && suggestedFileTitle) {
+        setEditableTitle(suggestedFileTitle);
       }
 
       // Update main free-writing notes and richGeneralNotes synchronously
@@ -1120,9 +1226,11 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
       // Auto-persist uploaded PDFs immediately to parent state & storage so they are never lost
       onSaveTopicNotes(topic.id, {
+        title: resolvedUploadTitle,
         notes: nextMainNotes,
         cues: mergedCues,
         summary: latestSummary,
+        difficulty: topicDifficulty,
         attachedFiles: nextAttachedFiles,
         pageCount: nextEffectivePages,
         richGeneralNotes: nextRichGeneralNotes,
@@ -1176,6 +1284,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     );
     setAttachedFiles(updated);
     const totalOrgPages = calculateOrganizedPagesFromFiles(updated);
+    setHasManualPageOverride(false);
     setCustomPageCountOverride(totalOrgPages > 0 ? totalOrgPages : undefined);
   };
 
@@ -1246,6 +1355,13 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
 
   // Save notes, attached files, and total page count for study organization
   const handleSave = () => {
+    const trimmedTitle = editableTitle.trim();
+    if (isNewTopic && !trimmedTitle) {
+      setImportError('Escribe un título para el tema antes de guardarlo.');
+      titleInputRef.current?.focus();
+      return;
+    }
+
     let finalMainNotes = notes;
     let finalRichGeneralNotes = richGeneralNotes;
     let finalAttachedFiles = attachedFiles;
@@ -1282,6 +1398,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
     }
 
     const savePayload = {
+      title: trimmedTitle || topic.title,
       notes: finalMainNotes,
       cues,
       summary,
@@ -1294,19 +1411,12 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       keyPoints: activeEditableKeyPoints,
     };
 
-    console.log('[TopicNotesModal] handleSave -> passing payload to onSaveTopicNotes:', {
-      topicId: topic.id,
-      attachedFilesCount: finalAttachedFiles.length,
-      attachedFiles: finalAttachedFiles,
-      savePayload,
-    });
-
     onSaveTopicNotes(topic.id, savePayload);
     setSaveSuccessNotice(true);
     setTimeout(() => {
       setSaveSuccessNotice(false);
       onClose();
-    }, 450);
+    }, 350);
   };
 
   const buildTempCornellNote = (): CornellNote => ({
@@ -1454,8 +1564,8 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
       <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-6xl h-[94vh] flex flex-col overflow-hidden animate-in fade-in duration-200">
         {/* Cabecera Visual del Estudio de Apuntes y Documentos (oculta en Modo Lectura) */}
         {!showFocusedFreeReading && (
-        <div className="px-6 py-4 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-4 shrink-0 bg-white">
-          <div className="flex items-center gap-3.5 min-w-0">
+        <div className="px-5 sm:px-6 py-4 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-4 shrink-0 bg-white">
+          <div className="flex items-center gap-3.5 min-w-0 flex-1">
             {/* Indicador Visual de Volumen de Páginas */}
             <div
               className="w-12 h-12 rounded-2xl bg-blue-50 border border-blue-200/80 flex flex-col items-center justify-center shrink-0 text-blue-700"
@@ -1469,11 +1579,13 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
               </span>
             </div>
 
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               {/* Metadatos limpios sin cápsulas */}
               <div className="flex items-center gap-1.5 text-xs text-slate-500 flex-wrap">
                 <span className="font-semibold text-blue-600">
-                  Escritura de Apuntes Libre y Documentos
+                  {isNewTopic
+                    ? 'Nuevo Tema · Subir Apuntes o Escribir'
+                    : 'Escritura de Apuntes Libre y Documentos'}
                 </span>
                 <span aria-hidden="true">·</span>
                 <span className="font-medium text-slate-700">{subjectName}</span>
@@ -1490,9 +1602,61 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                   {totalExtractedWords} palabras
                 </span>
               </div>
-              <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate mt-0.5">
-                {topic.title}
-              </h2>
+
+              {isNewTopic ? (
+                <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                  <input
+                    ref={titleInputRef}
+                    type="text"
+                    autoFocus
+                    value={editableTitle}
+                    onChange={(e) => {
+                      setEditableTitle(e.target.value);
+                      if (importError && e.target.value.trim()) {
+                        setImportError(null);
+                      }
+                    }}
+                    placeholder={`Título del Tema ${suggestedTopicNumber} (o sube un PDF para rellenarlo)...`}
+                    className="flex-1 min-w-[220px] sm:min-w-[300px] text-sm sm:text-base font-bold text-slate-900 bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-slate-300 focus:border-blue-500 rounded-xl px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
+                  />
+                  <div
+                    className="flex items-center gap-1.5 bg-slate-50 border border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 rounded-xl px-2.5 py-1.5 transition-all"
+                    title="Opcional: se detecta automáticamente si subes un PDF/Word o escribes apuntes libres"
+                  >
+                    <span className="text-[11px] font-semibold text-slate-600 whitespace-nowrap">
+                      Nº Págs.:
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="2000"
+                      value={
+                        hasManualPageOverride
+                          ? customPageCountOverride ?? ''
+                          : effectivePageCount > 0
+                          ? effectivePageCount
+                          : ''
+                      }
+                      onChange={(e) => handleManualPageCountInput(e.target.value)}
+                      placeholder="Auto"
+                      className="w-14 bg-transparent text-xs font-bold font-mono-numbers text-slate-900 text-center focus:outline-none"
+                    />
+                    {effectivePageCount > 0 && (
+                      <span className="text-[10px] font-semibold text-slate-500 whitespace-nowrap">
+                        {hasManualPageOverride
+                          ? 'manual'
+                          : attachedFiles.length > 0
+                          ? 'auto doc'
+                          : 'auto texto'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate mt-0.5">
+                  {topic.title}
+                </h2>
+              )}
             </div>
           </div>
 
@@ -1526,11 +1690,12 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                 );
               })}
             </div>
-            {onOpenReadingMode && (
+            {onOpenReadingMode && !isNewTopic && (
               <button
                 type="button"
                 onClick={() => {
                   onSaveTopicNotes(topic.id, {
+                    title: editableTitle.trim() || topic.title,
                     notes,
                     cues,
                     summary,
@@ -1580,7 +1745,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
               ) : (
                 <>
                   <Save className="w-4 h-4" />
-                  <span>Guardar cambios</span>
+                  <span>{isNewTopic ? 'Crear Tema y Guardar' : 'Guardar cambios'}</span>
                 </>
               )}
             </button>
@@ -1909,12 +2074,13 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
                       type="number"
                       min="1"
                       max="2000"
-                      value={effectivePageCount || ''}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value, 10);
-                        setCustomPageCountOverride(!isNaN(val) && val > 0 ? val : 0);
-                      }}
-                      placeholder="0"
+                      value={
+                        hasManualPageOverride
+                          ? customPageCountOverride ?? ''
+                          : effectivePageCount || ''
+                      }
+                      onChange={(e) => handleManualPageCountInput(e.target.value)}
+                      placeholder="Auto"
                       className="w-14 bg-slate-50 border border-slate-300 rounded-lg px-1.5 py-0.5 text-center font-bold font-mono-numbers text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500"
                       title="Número total de páginas tenidas en cuenta para organizar sesiones y tiempo de estudio"
                     />
@@ -2488,7 +2654,7 @@ export const TopicNotesModal: React.FC<TopicNotesModalProps> = ({
               {noteFormat === 'free' && (
                 <RichEditableDocumentWorkspace
                   documentId={activeAttachedFile ? activeAttachedFile.id : `main-${topic.id}`}
-                  documentTitle={activeAttachedFile ? activeAttachedFile.name : topic.title}
+                  documentTitle={activeAttachedFile ? activeAttachedFile.name : resolvedTopicTitle}
                   markdownContent={currentEditorText}
                   richHtmlContent={
                     activeAttachedFile

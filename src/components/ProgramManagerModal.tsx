@@ -224,6 +224,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   const [newSubCode, setNewSubCode] = useState('');
   const [newSubProf, setNewSubProf] = useState('');
   const [newSubCredits, setNewSubCredits] = useState('');
+  const [newSubAllocatedHours, setNewSubAllocatedHours] = useState('');
   const [newSubColor, setNewSubColor] = useState('#3b82f6');
   const [showAddSub, setShowAddSub] = useState(false);
 
@@ -233,6 +234,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   const [editSubCode, setEditSubCode] = useState('');
   const [editSubProf, setEditSubProf] = useState('');
   const [editSubCredits, setEditSubCredits] = useState('');
+  const [editSubAllocatedHours, setEditSubAllocatedHours] = useState('');
   const [editSubColor, setEditSubColor] = useState('#3b82f6');
   const [confirmDeleteSubId, setConfirmDeleteSubId] = useState<string | null>(null);
 
@@ -903,6 +905,8 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
 
     const parsedNewCredits =
       newSubCredits.trim() !== '' ? parseFloat(newSubCredits) : NaN;
+    const parsedNewAllocatedHours =
+      newSubAllocatedHours.trim() !== '' ? parseFloat(newSubAllocatedHours) : NaN;
 
     const newSubject: Subject = {
       id: `sub-${Date.now()}`,
@@ -912,6 +916,10 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
       credits:
         !isNaN(parsedNewCredits) && parsedNewCredits > 0
           ? parsedNewCredits
+          : undefined,
+      allocatedHours:
+        !isNaN(parsedNewAllocatedHours) && parsedNewAllocatedHours > 0
+          ? parsedNewAllocatedHours
           : undefined,
       professor: newSubProf.trim() || undefined,
       topics: [],
@@ -943,6 +951,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
     setNewSubCode('');
     setNewSubProf('');
     setNewSubCredits('');
+    setNewSubAllocatedHours('');
     setShowAddSub(false);
   };
 
@@ -955,6 +964,11 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
     setEditSubCredits(
       sub.credits !== undefined && sub.credits > 0 ? String(sub.credits) : ''
     );
+    setEditSubAllocatedHours(
+      sub.allocatedHours !== undefined && sub.allocatedHours > 0
+        ? String(sub.allocatedHours)
+        : ''
+    );
     setEditSubColor(sub.color || '#3b82f6');
   };
 
@@ -963,6 +977,8 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
 
     const parsedEditCredits =
       editSubCredits.trim() !== '' ? parseFloat(editSubCredits) : NaN;
+    const parsedEditAllocatedHours =
+      editSubAllocatedHours.trim() !== '' ? parseFloat(editSubAllocatedHours) : NaN;
 
     const updated = programs.map((p) => {
       if (p.id !== currentProgram.id) return p;
@@ -982,6 +998,10 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                     credits:
                       !isNaN(parsedEditCredits) && parsedEditCredits > 0
                         ? parsedEditCredits
+                        : undefined,
+                    allocatedHours:
+                      !isNaN(parsedEditAllocatedHours) && parsedEditAllocatedHours > 0
+                        ? parsedEditAllocatedHours
                         : undefined,
                     color: editSubColor || '#3b82f6',
                   }
@@ -1030,8 +1050,8 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl overflow-hidden my-8">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-5xl xl:max-w-6xl max-h-[92dvh] overflow-y-auto rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl my-2">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-800/60">
           <div>
@@ -1491,29 +1511,41 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                                                 </span>
                                               )}
                                             </div>
-                                              {subject.credits ? (
-                                                <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-md">
-                                                  {subject.credits} ECTS
-                                                </span>
-                                              ) : (
-                                                <button
-                                                  type="button"
-                                                  onClick={() => {
-                                                    onSelectProgramAndYear(program.id, year.id);
-                                                    setEditingSubId(subject.id);
-                                                    setEditSubName(subject.name);
-                                                    setEditSubCode(subject.code || '');
-                                                    setEditSubProf(subject.professor || '');
-                                                    setEditSubCredits('');
-                                                    setEditSubColor(subject.color || '#3b82f6');
-                                                    setActiveModalTab('hierarchy');
-                                                  }}
-                                                  className="text-[10px] font-medium text-slate-400 hover:text-blue-600 dark:text-slate-500 dark:hover:text-blue-400 bg-slate-50 dark:bg-slate-800/60 px-2 py-0.5 rounded-md border border-dashed border-slate-200 dark:border-slate-700 cursor-pointer"
-                                                  title="Añadir créditos opcionales a esta asignatura"
-                                                >
-                                                  + Créditos (opcional)
-                                                </button>
-                                              )}
+                                              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                                {subject.credits ? (
+                                                  <span className="text-[11px] font-bold font-mono-numbers text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-md">
+                                                    {subject.credits} ECTS
+                                                  </span>
+                                                ) : (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      onSelectProgramAndYear(program.id, year.id);
+                                                      setEditingSubId(subject.id);
+                                                      setEditSubName(subject.name);
+                                                      setEditSubCode(subject.code || '');
+                                                      setEditSubProf(subject.professor || '');
+                                                      setEditSubCredits('');
+                                                      setEditSubAllocatedHours(
+                                                        subject.allocatedHours !== undefined && subject.allocatedHours > 0
+                                                          ? String(subject.allocatedHours)
+                                                          : ''
+                                                      );
+                                                      setEditSubColor(subject.color || '#3b82f6');
+                                                      setActiveModalTab('hierarchy');
+                                                    }}
+                                                    className="text-[10px] font-medium text-slate-400 hover:text-blue-600 dark:text-slate-500 dark:hover:text-blue-400 bg-slate-50 dark:bg-slate-800/60 px-2 py-0.5 rounded-md border border-dashed border-slate-200 dark:border-slate-700 cursor-pointer"
+                                                    title="Añadir créditos u horas opcionales a esta asignatura"
+                                                  >
+                                                    + Créd. / Horas
+                                                  </button>
+                                                )}
+                                                {subject.allocatedHours ? (
+                                                  <span className="text-[11px] font-bold font-mono-numbers text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-md">
+                                                    {subject.allocatedHours}h ded.
+                                                  </span>
+                                                ) : null}
+                                              </div>
                                             </div>
 
                                             <h6 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white line-clamp-2 leading-snug">
@@ -1572,6 +1604,11 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                                                     setEditSubCredits(
                                                       subject.credits !== undefined && subject.credits > 0
                                                         ? String(subject.credits)
+                                                        : ''
+                                                    );
+                                                    setEditSubAllocatedHours(
+                                                      subject.allocatedHours !== undefined && subject.allocatedHours > 0
+                                                        ? String(subject.allocatedHours)
                                                         : ''
                                                     );
                                                     setEditSubColor(subject.color || '#3b82f6');
@@ -2179,7 +2216,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
 
               {showAddSub && (
                 <div className="p-4 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl space-y-3 text-xs">
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                     <div className="sm:col-span-2">
                       <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">
                         Nombre de la Asignatura *
@@ -2215,7 +2252,22 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                         step="0.5"
                         value={newSubCredits}
                         onChange={(e) => setNewSubCredits(e.target.value)}
-                        placeholder="Opcional"
+                        placeholder="Ej: 6"
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-slate-800 dark:text-slate-100 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-700 dark:text-slate-300 font-medium mb-1">
+                        Horas dedicadas (opc.)
+                      </label>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={500}
+                        step="0.5"
+                        value={newSubAllocatedHours}
+                        onChange={(e) => setNewSubAllocatedHours(e.target.value)}
+                        placeholder="Ej: 40"
                         className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-slate-800 dark:text-slate-100 focus:outline-none"
                       />
                     </div>
@@ -2284,7 +2336,7 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                     >
                       {isEditingSub ? (
                         <div className="space-y-3">
-                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
                             <div className="sm:col-span-2">
                               <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
                                 Nombre de la Asignatura *
@@ -2320,6 +2372,21 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                                 step="0.5"
                                 value={editSubCredits}
                                 onChange={(e) => setEditSubCredits(e.target.value)}
+                                placeholder="Opcional"
+                                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-300 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                                Horas dedicadas (opc.)
+                              </label>
+                              <input
+                                type="number"
+                                min={0.5}
+                                max={500}
+                                step="0.5"
+                                value={editSubAllocatedHours}
+                                onChange={(e) => setEditSubAllocatedHours(e.target.value)}
                                 placeholder="Opcional"
                                 className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 dark:text-slate-300 focus:outline-none"
                               />
@@ -2436,6 +2503,12 @@ export const ProgramManagerModal: React.FC<ProgramManagerModalProps> = ({
                               {sub.credits ? (
                                 <>
                                   <span>{sub.credits} cr.</span>
+                                  <span>·</span>
+                                </>
+                              ) : null}
+                              {sub.allocatedHours ? (
+                                <>
+                                  <span className="text-indigo-500 dark:text-indigo-400">{sub.allocatedHours}h ded.</span>
                                   <span>·</span>
                                 </>
                               ) : null}
